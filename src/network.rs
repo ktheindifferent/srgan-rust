@@ -46,7 +46,9 @@ pub fn sr_net_base(factor: usize, width: u32, log_depth: u32, global_node_factor
 			tag![],
 		)?;
 
-		ReduceMean::new(&input, &avg_node).axes(&[1, 2]).add_to(&mut g, tag![])?;
+		ReduceMean::new(&input, &avg_node)
+			.axes(&[1, 2])
+			.add_to(&mut g, tag![])?;
 		Linear::new(&avg_node, &linear_node)
 			.init(Linear::msra(1.0))
 			.add_to(&mut g, tag![])?;

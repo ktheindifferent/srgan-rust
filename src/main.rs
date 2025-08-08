@@ -35,147 +35,122 @@ use alumina::{
 use rusty_sr::{aligned_crop::*, network::*, psnr, NetworkDescription, UpscalingNetwork};
 
 fn main() {
-	let app_m = App::new("Rusty SR")
-	.version("v0.2.0")
-	.author("J. Millard <millard.jn@gmail.com>")
-	.about("A convolutional neural network trained to upscale images")
-	.settings(&[AppSettings::SubcommandsNegateReqs, AppSettings::VersionlessSubcommands])
-	.arg(Arg::with_name("INPUT_FILE")
+	let app_m = build_cli().get_matches();
+	run_command(&app_m).unwrap_or_else(|err| println!("{:?}", err));
+}
+
+fn build_cli() -> App<'static, 'static> {
+	App::new("Rusty SR")
+		.version("v0.2.0")
+		.author("J. Millard <millard.jn@gmail.com>")
+		.about("A convolutional neural network trained to upscale images")
+		.settings(&[AppSettings::SubcommandsNegateReqs, AppSettings::VersionlessSubcommands])
+		.arg(build_input_file_arg())
+		.arg(build_output_file_arg())
+		.arg(build_parameters_arg())
+		.arg(build_custom_arg())
+		.arg(build_bilinear_factor_arg())
+		.subcommand(build_train_subcommand())
+		.subcommand(build_train_prescaled_subcommand())
+		.subcommand(build_downscale_subcommand())
+		.subcommand(build_quantise_subcommand())
+		.subcommand(build_psnr_subcommand())
+		.subcommand(build_set_width_subcommand())
+}
+
+fn build_input_file_arg() -> Arg<'static, 'static> {
+	Arg::with_name("INPUT_FILE")
 		.help("Sets the input image to upscale")
 		.required(true)
 		.index(1)
-	)
-	.arg(Arg::with_name("OUTPUT_FILE")
+}
+
+fn build_output_file_arg() -> Arg<'static, 'static> {
+	Arg::with_name("OUTPUT_FILE")
 		.help("Sets the output file to write/overwrite (.png recommended)")
 		.required(true)
 		.index(2)
-	)
-	.arg(Arg::with_name("PARAMETERS")
+}
+
+fn build_parameters_arg() -> Arg<'static, 'static> {
+	Arg::with_name("PARAMETERS")
 		.help("Sets which built-in parameters to use with the neural net. Default: natural")
 		.short("p")
 		.long("parameters")
 		.value_name("PARAMETERS")
 		.possible_values(&["natural", "anime", "bilinear"])
 		.empty_values(false)
-	)
-	.arg(Arg::with_name("CUSTOM")
+}
+
+fn build_custom_arg() -> Arg<'static, 'static> {
+	Arg::with_name("CUSTOM")
 		.conflicts_with("PARAMETERS")
 		.short("c")
 		.long("custom")
 		.value_name("PARAMETER_FILE")
 		.help("Sets a custom parameter file (.rsr) to use with the neural net")
 		.empty_values(false)
-	)
-	.arg(Arg::with_name("BILINEAR_FACTOR")
+}
+
+fn build_bilinear_factor_arg() -> Arg<'static, 'static> {
+	Arg::with_name("BILINEAR_FACTOR")
 		.short("f")
 		.long("factor")
 		.help("The integer upscaling factor used if bilinear upscaling is performed. Default 4")
 		.empty_values(false)
-	)
-	.subcommand(SubCommand::with_name("train")
+}
+
+fn build_train_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("train")
 		.about("Train a new set of neural parameters on your own dataset")
-		.arg(Arg::with_name("TRAINING_FOLDER")
-			.required(true)
-			.index(1)
-			.help("Images from this folder(or sub-folders) will be used for training")
+		.arg(
+			Arg::with_name("TRAINING_FOLDER")
+				.required(true)
+				.index(1)
+				.help("Images from this folder(or sub-folders) will be used for training"),
 		)
-		.arg(Arg::with_name("PARAMETER_FILE")
-			.required(true)
-			.index(2)
-			.help("Learned network parameters will be (over)written to this parameter file (.rsr)")
+		.arg(
+			Arg::with_name("PARAMETER_FILE")
+				.required(true)
+				.index(2)
+				.help("Learned network parameters will be (over)written to this parameter file (.rsr)"),
 		)
-		.arg(Arg::with_name("LEARNING_RATE")
-			.short("R")
-			.long("rate")
-			.help("The learning rate used by the Adam optimiser. Default: 3e-3")
-			.empty_values(false)
+		.arg(build_learning_rate_arg())
+		.arg(build_quantise_arg())
+		.arg(build_training_loss_arg())
+		.arg(
+			Arg::with_name("DOWNSCALE_COLOURSPACE")
+				.help("Colourspace in which to perform downsampling. Default: sRGB")
+				.short("c")
+				.long("colourspace")
+				.value_name("COLOURSPACE")
+				.possible_values(&["sRGB", "RGB"])
+				.empty_values(false),
 		)
-		.arg(Arg::with_name("QUANTISE")
-			.short("q")
-			.long("quantise")
-			.help("Quantise the weights by zeroing the smallest 12 bits of each f32. Reduces parameter file size")
-			.takes_value(false)
+		.arg(build_recurse_arg())
+		.arg(build_start_parameters_arg())
+		.arg(build_factor_arg())
+		.arg(build_width_arg())
+		.arg(build_log_depth_arg())
+		.arg(build_patch_size_arg())
+		.arg(build_batch_size_arg())
+		.arg(
+			Arg::with_name("VALIDATION_FOLDER")
+				.short("v")
+				.long("val_folder")
+				.help("Images from this folder(or sub-folders) will be used to evaluate training progress")
+				.empty_values(false),
 		)
-		.arg(Arg::with_name("TRAINING_LOSS")
-	 		.help("Selects whether the neural net learns to minimise the L1 or L2 loss. Default: L1")
-	 		.short("l")
-	 		.long("loss")
-	 		.value_name("LOSS")
-	 		.possible_values(&["L1", "L2"])
-	 		.empty_values(false)
-	 	)
-		.arg(Arg::with_name("DOWNSCALE_COLOURSPACE")
-	 		.help("Colourspace in which to perform downsampling. Default: sRGB")
-	 		.short("c")
-	 		.long("colourspace")
-	 		.value_name("COLOURSPACE")
-	 		.possible_values(&["sRGB", "RGB"])
-	 		.empty_values(false)
-	 	)
-		.arg(Arg::with_name("RECURSE_SUBFOLDERS")
-			.short("r")
-			.long("recurse")
-			.help("Recurse into subfolders of training and validation folders looking for files")
-			.takes_value(false)
-		)
-		.arg(Arg::with_name("START_PARAMETERS")
-			.short("s")
-			.long("start")
-			.help("Start training from known parameters loaded from this .rsr file rather than random initialisation")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("FACTOR")
-			.short("f")
-			.long("factor")
-			.help("The integer upscaling factor of the network the be trained. Default: 4")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("WIDTH")
-			.short("w")
-			.long("width")
-			.help("The minimum number of channels in the hidden layers in the network the be trained. Default: 16")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("LOG_DEPTH")
-			.short("d")
-			.long("log_depth")
-			.help("There will be 2^(log_depth)-1 hidden layers in the network the be trained. Default: 4")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("PATCH_SIZE")
-			.short("p")
-			.long("patch_size")
-			.help("The integer patch_size of the training input after downsampling. Default: 48")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("BATCH_SIZE")
-			.short("b")
-			.long("batch_size")
-			.help("The integer batch_size of the training input. Default: 4")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("VALIDATION_FOLDER")
-			.short("v")
-			.long("val_folder")
-			.help("Images from this folder(or sub-folders) will be used to evaluate training progress")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("VAL_MAX")
-			.requires("VALIDATION_FOLDER")
-			.short("m")
-			.long("val_max")
-			.value_name("N")
-			.help("Set upper limit on number of images used for each validation pass")
-			.empty_values(false)
-		)
-	)
-	.subcommand(SubCommand::with_name("train_prescaled")
+		.arg(build_val_max_arg())
+}
+
+fn build_train_prescaled_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("train_prescaled")
 		.about("Train a new set of neural parameters on your own dataset")
 		.arg(Arg::with_name("PARAMETER_FILE")
 			.required(true)
 			.index(1)
-			.help("Learned network parameters will be (over)written to this parameter file (.rsr)")
-		)
+			.help("Learned network parameters will be (over)written to this parameter file (.rsr)"))
 		.arg(Arg::with_name("TRAINING_INPUT_FOLDER")
 			.required(true)
 			.short("i")
@@ -183,180 +158,321 @@ fn main() {
 			.help("Images from this folder(or sub-folders) will be used as the target for training, comparing against target images in neighbour folder 'Base'")
 			.empty_values(false)
 			.multiple(true)
-			.number_of_values(1)
-		)
-		.arg(Arg::with_name("LEARNING_RATE")
-			.short("R")
-			.long("rate")
-			.help("The learning rate used by the Adam optimiser. Default: 3e-3")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("QUANTISE")
-			.short("q")
-			.long("quantise")
-			.help("Quantise the weights by zeroing the smallest 12 bits of each f32. Reduces parameter file size")
-			.takes_value(false)
-		)
-		.arg(Arg::with_name("TRAINING_LOSS")
-	 		.help("Selects whether the neural net learns to minimise the L1 or L2 loss. Default: L1")
-	 		.short("l")
-	 		.long("loss")
-	 		.value_name("LOSS")
-	 		.possible_values(&["L1", "L2"])
-	 		.empty_values(false)
-	 	)
-		.arg(Arg::with_name("RECURSE_SUBFOLDERS")
-			.short("r")
-			.long("recurse")
-			.help("Recurse into subfolders of training and validation folders looking for files")
-			.takes_value(false)
-		)
-		.arg(Arg::with_name("START_PARAMETERS")
-			.short("s")
-			.long("start")
-			.help("Start training from known parameters loaded from this .rsr file rather than random initialisation")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("FACTOR")
-			.short("f")
-			.long("factor")
-			.help("The integer upscaling factor of the network the be trained. Default: 4")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("WIDTH")
-			.short("w")
-			.long("width")
-			.help("The minimum number of channels in the hidden layers in the network the be trained. Default: 16")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("LOG_DEPTH")
-			.short("d")
-			.long("log_depth")
-			.help("There will be 2^(log_depth)-1 hidden layers in the network the be trained. Default: 4")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("PATCH_SIZE")
-			.short("p")
-			.long("patch_size")
-			.help("The integer patch_size of the training input after downsampling. Default: 48")
-			.empty_values(false)
-		)
-		.arg(Arg::with_name("BATCH_SIZE")
-			.short("b")
-			.long("batch_size")
-			.help("The integer batch_size of the training input. Default: 4")
-			.empty_values(false)
-		)
+			.number_of_values(1))
+		.arg(build_learning_rate_arg())
+		.arg(build_quantise_arg())
+		.arg(build_training_loss_arg())
+		.arg(build_recurse_arg())
+		.arg(build_start_parameters_arg())
+		.arg(build_factor_arg())
+		.arg(build_width_arg())
+		.arg(build_log_depth_arg())
+		.arg(build_patch_size_arg())
+		.arg(build_batch_size_arg())
 		.arg(Arg::with_name("GLOBAL_SIZE")
 			.short("g")
 			.long("global_node_factor")
 			.help("The relative size of the global (non-spatial) nodes in each layer. Default: 2")
-			.empty_values(false)
-		)
+			.empty_values(false))
 		.arg(Arg::with_name("VALIDATION_INPUT_FOLDER")
 			.short("x")
 			.long("val_folder")
 			.help("Images from this folder(or sub-folders) will be used to evaluate training progress, comparing against target images in neighbour folder 'Base'")
 			.empty_values(false)
 			.multiple(true)
-			.number_of_values(1)
-		)
-		.arg(Arg::with_name("VAL_MAX")
-			.requires("VALIDATION_FOLDER")
-			.short("m")
-			.long("val_max")
-			.value_name("N")
-			.help("Set upper limit on number of images used for each validation pass")
-			.empty_values(false)
-		)
-	)
-	.subcommand(SubCommand::with_name("downscale")
-	 	.about("Downscale images")
-		.arg(Arg::with_name("FACTOR")
-			.help("The integer downscaling factor")
-			.required(true)
-			.index(1)
-		)
-		.arg(Arg::with_name("INPUT_FILE")
-			.help("Sets the input image to downscale")
-			.required(true)
-			.index(2)
-		)
-		.arg(Arg::with_name("OUTPUT_FILE")
-			.help("Sets the output file to write/overwrite (.png recommended)")
-			.required(true)
-			.index(3)
-		)
-	 	.arg(Arg::with_name("COLOURSPACE")
-	 		.help("colourspace in which to perform downsampling. Default: sRGB")
-	 		.short("c")
-	 		.long("colourspace")
-	 		.value_name("COLOURSPACE")
-	 		.possible_values(&["sRGB", "RGB"])
-	 		.empty_values(false)
-	 	)
-	)
-	.subcommand(SubCommand::with_name("quantise")
-	 	.about("Quantise the weights of a network, reducing file size")
-		.arg(Arg::with_name("INPUT_FILE")
-			.help("The input network to be quantised")
-			.required(true)
-			.index(1)
-		)
-		.arg(Arg::with_name("OUTPUT_FILE")
-			.help("The location at which the quantised network will be saved")
-			.required(true)
-			.index(2)
-		)
-	)
-	.subcommand(SubCommand::with_name("psnr")
-		.about("Print the PSNR value from the differences between the two images")
-		.arg(Arg::with_name("IMAGE1")
-			.required(true)
-			.index(1)
-			.help("PSNR is calculated using the difference between this image and IMAGE2")
-		)
-		.arg(Arg::with_name("IMAGE2")
-			.required(true)
-			.index(2)
-			.help("PSNR is calculated using the difference between this image and IMAGE1")
-		)
-	)
-	.subcommand(SubCommand::with_name("set_width")
-	 	.about("Set the width of a network")
-		.arg(Arg::with_name("INPUT_FILE")
-			.help("The input network to be updated with a width")
-			.required(true)
-			.index(1)
-		)
-		.arg(Arg::with_name("WIDTH")
-			.help("The width to set")
-			.required(true)
-			.index(2)
-		)
-		.arg(Arg::with_name("OUTPUT_FILE")
-			.help("The location at which the new network will be saved")
-			.required(true)
-			.index(3)
-		)
-	)
-	.get_matches();
+			.number_of_values(1))
+		.arg(build_val_max_arg())
+}
 
-	if let Some(sub_m) = app_m.subcommand_matches("train") {
-		train(sub_m).map_err(|e| format!("Train error: {}", e))
-	} else if let Some(sub_m) = app_m.subcommand_matches("train_prescaled") {
-		train_prescaled(sub_m).map_err(|e| format!("Train_prescaled error: {}", e))
-	} else if let Some(sub_m) = app_m.subcommand_matches("downscale") {
-		downscale(sub_m)
-	} else if let Some(sub_m) = app_m.subcommand_matches("psnr") {
-		psnr(sub_m)
-	} else if let Some(sub_m) = app_m.subcommand_matches("quantise") {
-		quantise(sub_m)
-	} else if let Some(sub_m) = app_m.subcommand_matches("set_width") {
-		set_width(sub_m)
-	} else {
-		upscale(&app_m)
-	}.unwrap_or_else(|err| println!("{:?}", err));
+fn build_downscale_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("downscale")
+		.about("Downscale images")
+		.arg(
+			Arg::with_name("FACTOR")
+				.help("The integer downscaling factor")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("INPUT_FILE")
+				.help("Sets the input image to downscale")
+				.required(true)
+				.index(2),
+		)
+		.arg(
+			Arg::with_name("OUTPUT_FILE")
+				.help("Sets the output file to write/overwrite (.png recommended)")
+				.required(true)
+				.index(3),
+		)
+		.arg(
+			Arg::with_name("COLOURSPACE")
+				.help("colourspace in which to perform downsampling. Default: sRGB")
+				.short("c")
+				.long("colourspace")
+				.value_name("COLOURSPACE")
+				.possible_values(&["sRGB", "RGB"])
+				.empty_values(false),
+		)
+}
+
+fn build_quantise_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("quantise")
+		.about("Quantise the weights of a network, reducing file size")
+		.arg(
+			Arg::with_name("INPUT_FILE")
+				.help("The input network to be quantised")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("OUTPUT_FILE")
+				.help("The location at which the quantised network will be saved")
+				.required(true)
+				.index(2),
+		)
+}
+
+fn build_psnr_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("psnr")
+		.about("Print the PSNR value from the differences between the two images")
+		.arg(
+			Arg::with_name("IMAGE1")
+				.required(true)
+				.index(1)
+				.help("PSNR is calculated using the difference between this image and IMAGE2"),
+		)
+		.arg(
+			Arg::with_name("IMAGE2")
+				.required(true)
+				.index(2)
+				.help("PSNR is calculated using the difference between this image and IMAGE1"),
+		)
+}
+
+fn build_set_width_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("set_width")
+		.about("Set the width of a network")
+		.arg(
+			Arg::with_name("INPUT_FILE")
+				.help("The input network to be updated with a width")
+				.required(true)
+				.index(1),
+		)
+		.arg(Arg::with_name("WIDTH").help("The width to set").required(true).index(2))
+		.arg(
+			Arg::with_name("OUTPUT_FILE")
+				.help("The location at which the new network will be saved")
+				.required(true)
+				.index(3),
+		)
+}
+
+fn build_learning_rate_arg() -> Arg<'static, 'static> {
+	Arg::with_name("LEARNING_RATE")
+		.short("R")
+		.long("rate")
+		.help("The learning rate used by the Adam optimiser. Default: 3e-3")
+		.empty_values(false)
+}
+
+fn build_quantise_arg() -> Arg<'static, 'static> {
+	Arg::with_name("QUANTISE")
+		.short("q")
+		.long("quantise")
+		.help("Quantise the weights by zeroing the smallest 12 bits of each f32. Reduces parameter file size")
+		.takes_value(false)
+}
+
+fn build_training_loss_arg() -> Arg<'static, 'static> {
+	Arg::with_name("TRAINING_LOSS")
+		.help("Selects whether the neural net learns to minimise the L1 or L2 loss. Default: L1")
+		.short("l")
+		.long("loss")
+		.value_name("LOSS")
+		.possible_values(&["L1", "L2"])
+		.empty_values(false)
+}
+
+fn build_recurse_arg() -> Arg<'static, 'static> {
+	Arg::with_name("RECURSE_SUBFOLDERS")
+		.short("r")
+		.long("recurse")
+		.help("Recurse into subfolders of training and validation folders looking for files")
+		.takes_value(false)
+}
+
+fn build_start_parameters_arg() -> Arg<'static, 'static> {
+	Arg::with_name("START_PARAMETERS")
+		.short("s")
+		.long("start")
+		.help("Start training from known parameters loaded from this .rsr file rather than random initialisation")
+		.empty_values(false)
+}
+
+fn build_factor_arg() -> Arg<'static, 'static> {
+	Arg::with_name("FACTOR")
+		.short("f")
+		.long("factor")
+		.help("The integer upscaling factor of the network the be trained. Default: 4")
+		.empty_values(false)
+}
+
+fn build_width_arg() -> Arg<'static, 'static> {
+	Arg::with_name("WIDTH")
+		.short("w")
+		.long("width")
+		.help("The minimum number of channels in the hidden layers in the network the be trained. Default: 16")
+		.empty_values(false)
+}
+
+fn build_log_depth_arg() -> Arg<'static, 'static> {
+	Arg::with_name("LOG_DEPTH")
+		.short("d")
+		.long("log_depth")
+		.help("There will be 2^(log_depth)-1 hidden layers in the network the be trained. Default: 4")
+		.empty_values(false)
+}
+
+fn build_patch_size_arg() -> Arg<'static, 'static> {
+	Arg::with_name("PATCH_SIZE")
+		.short("p")
+		.long("patch_size")
+		.help("The integer patch_size of the training input after downsampling. Default: 48")
+		.empty_values(false)
+}
+
+fn build_batch_size_arg() -> Arg<'static, 'static> {
+	Arg::with_name("BATCH_SIZE")
+		.short("b")
+		.long("batch_size")
+		.help("The integer batch_size of the training input. Default: 4")
+		.empty_values(false)
+}
+
+fn build_val_max_arg() -> Arg<'static, 'static> {
+	Arg::with_name("VAL_MAX")
+		.requires("VALIDATION_FOLDER")
+		.short("m")
+		.long("val_max")
+		.value_name("N")
+		.help("Set upper limit on number of images used for each validation pass")
+		.empty_values(false)
+}
+
+fn run_command(app_m: &ArgMatches) -> ::std::result::Result<(), String> {
+	match app_m.subcommand() {
+		("train", Some(sub_m)) => train(sub_m).map_err(|e| format!("Train error: {}", e)),
+		("train_prescaled", Some(sub_m)) => train_prescaled(sub_m).map_err(|e| format!("Train_prescaled error: {}", e)),
+		("downscale", Some(sub_m)) => downscale(sub_m),
+		("psnr", Some(sub_m)) => psnr(sub_m),
+		("quantise", Some(sub_m)) => quantise(sub_m),
+		("set_width", Some(sub_m)) => set_width(sub_m),
+		_ => upscale(app_m),
+	}
+}
+
+fn parse_required_usize(app_m: &ArgMatches, name: &str) -> ::std::result::Result<usize, String> {
+	app_m
+		.value_of(name)
+		.ok_or_else(|| format!("No {} given", name))?
+		.parse::<usize>()
+		.map_err(|_| format!("{} argument must be an integer", name))
+}
+
+fn parse_optional_usize(app_m: &ArgMatches, name: &str, default: usize) -> ::std::result::Result<usize, String> {
+	app_m
+		.value_of(name)
+		.map(|s| {
+			s.parse::<usize>()
+				.map_err(|_| format!("{} argument must be an integer", name))
+		})
+		.transpose()
+		.map(|opt| opt.unwrap_or(default))
+}
+
+fn parse_optional_u32(app_m: &ArgMatches, name: &str, default: u32) -> ::std::result::Result<u32, String> {
+	app_m
+		.value_of(name)
+		.map(|s| {
+			s.parse::<u32>()
+				.map_err(|_| format!("{} argument must be an integer", name))
+		})
+		.transpose()
+		.map(|opt| opt.unwrap_or(default))
+}
+
+fn parse_colourspace_srgb(app_m: &ArgMatches) -> ::std::result::Result<bool, String> {
+	Ok(match app_m.value_of("COLOURSPACE") {
+		Some("sRGB") | None => true,
+		Some("RGB") => false,
+		Some(other) => return Err(format!("Invalid colourspace: {}", other)),
+	})
+}
+
+fn parse_downscale_colourspace(app_m: &ArgMatches) -> ::std::result::Result<bool, String> {
+	Ok(match app_m.value_of("DOWNSCALE_COLOURSPACE") {
+		Some("sRGB") | None => true,
+		Some("RGB") => false,
+		Some(other) => return Err(format!("Invalid downscale colourspace: {}", other)),
+	})
+}
+
+fn parse_training_loss(app_m: &ArgMatches) -> ::std::result::Result<(f32, f32), String> {
+	Ok(match app_m.value_of("TRAINING_LOSS") {
+		Some("L1") | None => (1.0, 1.0 / 255.0),
+		Some("L2") => (2.0, 1.0 / 255.0),
+		Some(other) => return Err(format!("Invalid training loss: {}", other)),
+	})
+}
+
+fn parse_learning_rate(app_m: &ArgMatches) -> ::std::result::Result<f32, String> {
+	let lr = app_m
+		.value_of("LEARNING_RATE")
+		.map(|s| {
+			s.parse::<f32>()
+				.map_err(|_| "Learning rate argument must be a numeric value".to_string())
+		})
+		.transpose()?
+		.unwrap_or(3e-3);
+
+	if lr <= 0.0 {
+		eprintln!("Learning_rate ({}) probably should be greater than 0.", lr);
+	}
+	Ok(lr)
+}
+
+fn parse_patch_size(app_m: &ArgMatches) -> ::std::result::Result<usize, String> {
+	let patch_size = parse_optional_usize(app_m, "PATCH_SIZE", 48)?;
+	if patch_size == 0 {
+		return Err(format!("Patch_size ({}) must be greater than 0.", patch_size));
+	}
+	Ok(patch_size)
+}
+
+fn parse_batch_size(app_m: &ArgMatches) -> ::std::result::Result<usize, String> {
+	let batch_size = parse_optional_usize(app_m, "BATCH_SIZE", 4)?;
+	if batch_size == 0 {
+		return Err(format!("Batch_size ({}) must be greater than 0.", batch_size));
+	}
+	Ok(batch_size)
+}
+
+fn read_input_file(path: &str) -> ::std::result::Result<ArrayD<f32>, String> {
+	rusty_sr::read(&mut File::open(Path::new(path)).map_err(|e| format!("Error opening input file: {}", e))?)
+		.map_err(|e| format!("Error reading input file: {}", e))
+}
+
+fn write_output_file(output: ArrayD<f32>, path: &str) -> ::std::result::Result<(), String> {
+	print!(" Writing file...");
+	stdout().flush().ok();
+	rusty_sr::save(
+		output,
+		&mut File::create(Path::new(path)).map_err(|e| format!("Error creating output file: {}", e))?,
+	)
+	.map_err(|e| format!("Error writing output file: {}", e))?;
+	println!(" Done");
+	Ok(())
 }
 
 pub fn psnr(app_m: &ArgMatches) -> ::std::result::Result<(), String> {
@@ -402,127 +518,64 @@ fn quantise(app_m: &ArgMatches) -> ::std::result::Result<(), String> {
 }
 
 fn downscale(app_m: &ArgMatches) -> ::std::result::Result<(), String> {
-	let factor = match app_m.value_of("FACTOR") {
-		Some(string) => string.parse::<usize>().expect("Factor argument must be an integer"),
-		_ => unreachable!(),
-	};
+	let factor = parse_required_usize(app_m, "FACTOR")?;
+	let srgb = parse_colourspace_srgb(app_m)?;
 
-	let srgb = match app_m.value_of("COLOURSPACE") {
-		Some("sRGB") | None => true,
-		Some("RGB") => false,
-		_ => unreachable!(),
-	};
+	let input_path = app_m.value_of("INPUT_FILE").expect("No input file given?");
+	let output_path = app_m.value_of("OUTPUT_FILE").expect("No output file given?");
 
-	let input = rusty_sr::read(
-		&mut File::open(Path::new(app_m.value_of("INPUT_FILE").expect("No input file given?")))
-			.map_err(|e| format!("Error opening input file: {}", e))?,
-	).map_err(|e| format!("Error reading input file: {}", e))?;
-
+	let input = read_input_file(input_path)?;
 	let output = rusty_sr::downscale(input, factor, srgb).map_err(|e| format!("Error while downscaling: {}", e))?;
 
-	print!(" Writing file...");
-	stdout().flush().ok();
-	rusty_sr::save(
-		output,
-		&mut File::create(Path::new(app_m.value_of("OUTPUT_FILE").expect("No output file given?")))
-			.map_err(|e| format!("Error creating output file: {}", e))?,
-	).map_err(|e| format!("Error writing output file: {}", e))?;
-
-	println!(" Done");
-	Ok(())
+	write_output_file(output, output_path)
 }
 
 fn upscale(app_m: &ArgMatches) -> ::std::result::Result<(), String> {
-	let factor = match app_m.value_of("BILINEAR_FACTOR") {
-		Some(string) => string.parse::<usize>().expect("Factor argument must be an integer"),
-		_ => 4,
-	};
+	let factor = parse_optional_usize(app_m, "BILINEAR_FACTOR", 4)?;
 
-	//-- Sort out parameters and graph
-	let network: UpscalingNetwork = if let Some(file_str) = app_m.value_of("CUSTOM") {
-		let mut param_file = File::open(Path::new(file_str)).expect("Error opening parameter file");
+	let network = load_upscaling_network(app_m, factor)?;
+	println!("Upsampling using {}...", network);
+
+	let input_path = app_m.value_of("INPUT_FILE").expect("No input file given?");
+	let output_path = app_m.value_of("OUTPUT_FILE").expect("No output file given?");
+
+	let input = read_input_file(input_path)?;
+	let output = rusty_sr::upscale(input, &network).map_err(|e| format!("Error while upscaling: {}", e))?;
+
+	write_output_file(output, output_path)
+}
+
+fn load_upscaling_network(app_m: &ArgMatches, factor: usize) -> ::std::result::Result<UpscalingNetwork, String> {
+	if let Some(file_str) = app_m.value_of("CUSTOM") {
+		let mut param_file =
+			File::open(Path::new(file_str)).map_err(|e| format!("Error opening parameter file: {}", e))?;
 		let mut data = Vec::new();
 		param_file
 			.read_to_end(&mut data)
-			.expect("Reading parameter file failed");
-		UpscalingNetwork::new(rusty_sr::network_from_bytes(&data)?, "custom trained neural net")?
+			.map_err(|e| format!("Reading parameter file failed: {}", e))?;
+		UpscalingNetwork::new(rusty_sr::network_from_bytes(&data)?, "custom trained neural net")
 	} else {
 		UpscalingNetwork::from_label(app_m.value_of("PARAMETERS").unwrap_or("natural"), Some(factor))
-			.map_err(|e| format!("Error parsing PARAMETERS: {}", e))?
-	};
-	println!("Upsampling using {}...", network);
-
-	let input = rusty_sr::read(
-		&mut File::open(Path::new(app_m.value_of("INPUT_FILE").expect("No input file given?")))
-			.map_err(|e| format!("Error opening input file: {}", e))?,
-	).map_err(|e| format!("Error reading input file: {}", e))?;
-
-	let output = rusty_sr::upscale(input, &network).map_err(|e| format!("Error while upscaling: {}", e))?;
-
-	print!(" Writing file...");
-	stdout().flush().ok();
-	rusty_sr::save(
-		output,
-		&mut File::create(Path::new(app_m.value_of("OUTPUT_FILE").expect("No output file given?")))
-			.map_err(|e| format!("Error creating output file: {}", e))?,
-	).map_err(|e| format!("Error writing output file: {}", e))?;
-
-	println!(" Done");
-	Ok(())
+			.map_err(|e| format!("Error parsing PARAMETERS: {}", e))
+	}
 }
 
 fn train(app_m: &ArgMatches) -> Result<()> {
 	println!("Training with:");
 
-	let srgb_downscale = match app_m.value_of("DOWNSCALE_COLOURSPACE") {
-		Some("sRGB") | None => {
-			println!(" sRGB downscaling");
-			true
-		},
-		Some("RGB") => {
-			println!(" RGB downscaling");
-			false
-		},
-		_ => unreachable!(),
-	};
+	let srgb_downscale = parse_downscale_colourspace(app_m).map_err(|e| e.to_string())?;
+	println!(" {} downscaling", if srgb_downscale { "sRGB" } else { "RGB" });
 
-	let (power, scale) = match app_m.value_of("TRAINING_LOSS") {
-		Some("L1") | None => {
-			println!(" L1 loss");
-			(1.0, 1.0 / 255.0)
-		},
-		Some("L2") => {
-			println!(" L2 loss");
-			(2.0, 1.0 / 255.0)
-		},
-		_ => unreachable!(),
-	};
+	let (power, scale) = parse_training_loss(app_m).map_err(|e| e.to_string())?;
+	println!(" {} loss", if power == 1.0 { "L1" } else { "L2" });
 
-	let lr = app_m
-		.value_of("LEARNING_RATE")
-		.map(|string| {
-			string
-				.parse::<f32>()
-				.expect("Learning rate argument must be a numeric value")
-		})
-		.unwrap_or(3e-3);
-	if lr <= 0.0 {
-		eprintln!("Learning_rate ({}) probably should be greater than 0.", lr);
-	}
+	let lr = parse_learning_rate(app_m).map_err(|e| e.to_string())?;
 	println!(" learning rate: {}", lr);
 
-	let patch_size = app_m
-		.value_of("PATCH_SIZE")
-		.map(|string| string.parse::<usize>().expect("Patch_size argument must be an integer"))
-		.unwrap_or(48);
-	assert!(patch_size > 0, "Patch_size ({}) must be greater than 0.", patch_size);
+	let patch_size = parse_patch_size(app_m).map_err(|e| e.to_string())?;
 	println!(" patch_size: {}", patch_size);
 
-	let batch_size = app_m
-		.value_of("BATCH_SIZE")
-		.map(|string| string.parse::<usize>().expect("Batch_size argument must be an integer"))
-		.unwrap_or(4);
-	assert!(batch_size > 0, "Batch_size ({}) must be greater than 0.", batch_size);
+	let batch_size = parse_batch_size(app_m).map_err(|e| e.to_string())?;
 	println!(" batch_size: {}", batch_size);
 
 	let quantise = app_m.is_present("QUANTISE");
@@ -632,7 +685,8 @@ fn train(app_m: &ArgMatches) -> Result<()> {
 					parameters: data.params.to_vec(),
 				},
 				quantise,
-			).unwrap();
+			)
+			.unwrap();
 			parameter_file
 				.write_all(&bytes)
 				.expect("Could not save to parameter file");
@@ -910,7 +964,8 @@ fn train_prescaled(app_m: &ArgMatches) -> Result<()> {
 					parameters: data.params.to_vec(),
 				},
 				quantise,
-			).unwrap();
+			)
+			.unwrap();
 			parameter_file
 				.write_all(&bytes)
 				.expect("Could not save to parameter file");

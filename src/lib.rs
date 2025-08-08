@@ -39,8 +39,8 @@ use alumina::{
 	graph::GraphDef,
 };
 
-const L1_SRGB_NATURAL_PARAMS: &'static [u8] = include_bytes!("res/L1_x4_UCID_x1node.rsr");
-const L1_SRGB_ANIME_PARAMS: &'static [u8] = include_bytes!("res/L1_x4_Anime_x1node.rsr");
+const L1_SRGB_NATURAL_PARAMS: &[u8] = include_bytes!("res/L1_x4_UCID_x1node.rsr");
+const L1_SRGB_ANIME_PARAMS: &[u8] = include_bytes!("res/L1_x4_Anime_x1node.rsr");
 
 /// A struct containing the network parameters and hyperparameters.
 #[derive(Debug, Serialize, Deserialize)]
@@ -193,7 +193,8 @@ impl UpscalingNetwork {
 				desc.width,
 				desc.log_depth,
 				desc.global_node_factor as usize,
-			).map_err(|e| e.to_string())?,
+			)
+			.map_err(|e| e.to_string())?,
 			parameters: desc.parameters,
 			display: display.to_string(),
 		})
@@ -210,7 +211,8 @@ impl UpscalingNetwork {
 						desc.width,
 						desc.log_depth,
 						desc.global_node_factor as usize,
-					).map_err(|e| e.to_string())?,
+					)
+					.map_err(|e| e.to_string())?,
 					parameters: desc.parameters,
 					display: "neural net trained on natural images with an L1 loss".to_string(),
 				})
@@ -223,7 +225,8 @@ impl UpscalingNetwork {
 						desc.width,
 						desc.log_depth,
 						desc.global_node_factor as usize,
-					).map_err(|e| e.to_string())?,
+					)
+					.map_err(|e| e.to_string())?,
 					parameters: desc.parameters,
 					display: "neural net trained on animation images with an L1 loss".to_string(),
 				})
