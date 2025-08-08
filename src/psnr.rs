@@ -1,6 +1,6 @@
 use std::cmp;
 
-use ndarray::{ArrayViewD, Axis, Zip};
+use ndarray::{ArrayView1, ArrayViewD, Axis, Zip};
 
 /// Takes two tensors of shape [H, W, 3] and
 /// returns the err, y_err and pixel count of a pair of images.
@@ -20,26 +20,33 @@ pub fn psnr_calculation(image1: ArrayViewD<f32>, image2: ArrayViewD<f32>) -> (f3
 	};
 
 	let min_height = cmp::min(image1.shape()[0], image2.shape()[0]);
-	let min_width = cmp::min(image1.shape()[1], image2.shape()[2]);
+	let min_width = cmp::min(image1.shape()[1], image2.shape()[1]);
 
 	let image1 = image1.slice(s![0..min_height, 0..min_width, 0..3]);
 	let image2 = image2.slice(s![0..min_height, 0..min_width, 0..3]);
 
-	let mut err = 0.0;
-	let mut y_err = 0.0;
-	let mut pix = 0.0f32;
+	let mut rgb_error = 0.0;
+	let mut luma_error = 0.0;
+	let mut pixel_count = 0.0f32;
 
-	Zip::from(image1.genrows()).and(image2.genrows()).apply(|o, i| {
-		let dr = o[0].max(0.0).min(1.0) - i[0].max(0.0).min(1.0);
-		let dg = o[1].max(0.0).min(1.0) - i[1].max(0.0).min(1.0);
-		let db = o[2].max(0.0).min(1.0) - i[2].max(0.0).min(1.0);
-		let y_diff = dr * 0.299 + dg * 0.587 + db * 0.114; // BT.601
-													 // let y_diff = dr*0.2126 + dg*0.7152 + db*0.0722; // BT.709
+	Zip::from(image1.genrows())
+		.and(image2.genrows())
+		.apply(|output_row, input_row| {
+			let r_diff = clamp_pixel(output_row[0]) - clamp_pixel(input_row[0]);
+			let g_diff = clamp_pixel(output_row[1]) - clamp_pixel(input_row[1]);
+			let b_diff = clamp_pixel(output_row[2]) - clamp_pixel(input_row[2]);
+			
+			// BT.601 luma coefficients
+			let luma_diff = r_diff * 0.299 + g_diff * 0.587 + b_diff * 0.114;
+			
+			luma_error += luma_diff * luma_diff;
+			rgb_error += (r_diff * r_diff + g_diff * g_diff + b_diff * b_diff) / 3.0;
+			pixel_count += 1.0;
+		});
 
-		y_err += y_diff * y_diff; //(yo - yi)*(yo - yi);
-		err += (dr * dr + dg * dg + db * db) / 3.0; // R G B
-		pix += 1.0;
-	});
+	(rgb_error, luma_error, pixel_count)
+}
 
-	(err, y_err, pix)
+fn clamp_pixel(value: f32) -> f32 {
+	value.max(0.0).min(1.0)
 }
