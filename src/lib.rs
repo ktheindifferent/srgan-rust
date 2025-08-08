@@ -15,8 +15,14 @@ extern crate smallvec;
 extern crate xz2;
 
 pub mod aligned_crop;
+pub mod cli;
+pub mod commands;
+pub mod config;
+pub mod constants;
+pub mod error;
 pub mod network;
 pub mod psnr;
+pub mod training;
 
 use std::{
 	fmt,
@@ -28,7 +34,7 @@ use std::{
 use bincode::{deserialize, serialize};
 use image::{ImageFormat, ImageResult};
 
-use network::*;
+pub use network::*;
 
 use byteorder::{BigEndian, ByteOrder};
 use ndarray::{ArrayD, Axis, IxDyn};
@@ -193,7 +199,8 @@ impl UpscalingNetwork {
 				desc.width,
 				desc.log_depth,
 				desc.global_node_factor as usize,
-			).map_err(|e| e.to_string())?,
+			)
+			.map_err(|e| e.to_string())?,
 			parameters: desc.parameters,
 			display: display.to_string(),
 		})
@@ -210,7 +217,8 @@ impl UpscalingNetwork {
 						desc.width,
 						desc.log_depth,
 						desc.global_node_factor as usize,
-					).map_err(|e| e.to_string())?,
+					)
+					.map_err(|e| e.to_string())?,
 					parameters: desc.parameters,
 					display: "neural net trained on natural images with an L1 loss".to_string(),
 				})
@@ -223,7 +231,8 @@ impl UpscalingNetwork {
 						desc.width,
 						desc.log_depth,
 						desc.global_node_factor as usize,
-					).map_err(|e| e.to_string())?,
+					)
+					.map_err(|e| e.to_string())?,
 					parameters: desc.parameters,
 					display: "neural net trained on animation images with an L1 loss".to_string(),
 				})
