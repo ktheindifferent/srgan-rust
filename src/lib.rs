@@ -15,8 +15,14 @@ extern crate smallvec;
 extern crate xz2;
 
 pub mod aligned_crop;
+pub mod cli;
+pub mod commands;
+pub mod config;
+pub mod constants;
+pub mod error;
 pub mod network;
 pub mod psnr;
+pub mod training;
 
 use std::{
 	fmt,
@@ -28,7 +34,7 @@ use std::{
 use bincode::{deserialize, serialize};
 use image::{ImageFormat, ImageResult};
 
-use network::*;
+pub use network::*;
 
 use byteorder::{BigEndian, ByteOrder};
 use ndarray::{ArrayD, Axis, IxDyn};
