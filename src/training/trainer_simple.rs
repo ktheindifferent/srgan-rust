@@ -28,7 +28,8 @@ pub fn train_network(
 	let params = initial_params.unwrap_or_else(|| {
 		graph
 			.initialise_nodes(solver.parameters())
-			.expect("Could not initialise parameters")
+			.map_err(|e| crate::error::SrganError::Training(format!("Could not initialise parameters: {}", e)))
+			.unwrap()
 	});
 
 	let checkpoint_path_owned = checkpoint_path.to_string();
@@ -46,7 +47,11 @@ pub fn train_network(
 				network_config_clone.global_node_factor as u32,
 				quantise,
 			)
-			.expect("Could not save checkpoint");
+			.map_err(|e| {
+				eprintln!("Warning: Could not save checkpoint: {}", e);
+				e
+			})
+			.ok();
 		}
 
 		println!("step {}\terr:{}\tchange:{}", data.step, data.err, data.change_norm);

@@ -153,7 +153,8 @@ pub fn read(file: &mut File) -> ImageResult<ArrayD<f32>> {
 	let input_image = image::load_from_memory(&vec)?;
 	let input = image_to_data(&input_image);
 	let shape = input.shape().to_vec();
-	let input = input.into_shape(IxDyn(&[1, shape[0], shape[1], shape[2]])).unwrap();
+	let input = input.into_shape(IxDyn(&[1, shape[0], shape[1], shape[2]]))
+		.map_err(|_| image::ImageError::DimensionError)?;
 	Ok(input)
 }
 
@@ -274,7 +275,7 @@ pub fn upscale(image: ArrayD<f32>, network: &UpscalingNetwork) -> alumina::graph
 	subgraph_inputs.extend(param_ids);
 	let output_id = graph.node_id("output").value_id();
 	let mut subgraph = graph.subgraph(&subgraph_inputs, &[output_id.clone()])?;
-	let result = subgraph.execute(input_vec).expect("Could not execute upsampling graph");
+	let result = subgraph.execute(input_vec)?;
 
 	Ok(result.into_map().remove(&output_id).unwrap())
 }

@@ -133,8 +133,10 @@ fn crop(
 
 	let mut out_arr = ArrayD::from_elem(IxDyn(crop_shape), fill);
 	{
-		let in_si = SliceInfo::new(input_slice_arg).unwrap();
-		let out_si = SliceInfo::new(output_slice_arg).unwrap();
+		let in_si = SliceInfo::new(input_slice_arg)
+			.expect("Invalid input slice arguments");
+		let out_si = SliceInfo::new(output_slice_arg)
+			.expect("Invalid output slice arguments");
 		let in_si: &SliceInfo<[SliceOrIndex], IxDyn> = in_si.as_ref();
 		let out_si: &SliceInfo<[SliceOrIndex], IxDyn> = out_si.as_ref();
 

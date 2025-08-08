@@ -6,7 +6,7 @@ use crate::NetworkDescription;
 use clap::ArgMatches;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn train_prescaled(app_m: &ArgMatches) -> Result<()> {
 	println!("Training prescaled with:");
@@ -49,7 +49,7 @@ pub fn train_prescaled(app_m: &ArgMatches) -> Result<()> {
 		training_config.patch_size,
 		network_config.factor,
 		training_config.batch_size,
-	);
+	)?;
 
 	train_network(
 		graph,
@@ -198,16 +198,17 @@ fn print_training_info(network_config: &NetworkConfig, training_config: &Trainin
 	println!(" log_depth: {}", network_config.log_depth);
 }
 
-fn create_prescaled_validation_stream(input_folders: Vec<&str>, recurse: bool) -> Box<dyn alumina::data::DataStream> {
+fn create_prescaled_validation_stream(input_folders: Vec<&str>, recurse: bool) -> Result<Box<dyn alumina::data::DataStream>> {
 	use alumina::data::{image_folder::ImageFolder, DataSet, DataStream};
 
 	let mut folders_iter = input_folders.into_iter();
-	let first_folder = folders_iter.next().unwrap();
+	let first_folder = folders_iter.next()
+		.ok_or_else(|| SrganError::MissingFolder("At least one validation folder required".to_string()))?;
 
 	let input_folder = Path::new(first_folder);
 	let mut target_folder = input_folder
 		.parent()
-		.expect("Don't use root as a validation folder")
+		.ok_or_else(|| SrganError::InvalidInput("Don't use root as a validation folder".to_string()))?
 		.to_path_buf();
 	target_folder.push("Base");
 
@@ -219,8 +220,8 @@ fn create_prescaled_validation_stream(input_folders: Vec<&str>, recurse: bool) -
 		let input_path = Path::new(input_folder);
 		let mut target_folder = input_path
 			.parent()
-			.expect("Don't use root as a validation folder")
-			.to_path_buf();
+			.map(|p| p.to_path_buf())
+			.unwrap_or_else(|| PathBuf::from("."));
 		target_folder.push("Base");
 
 		ImageFolder::new(input_path, recurse)
@@ -229,11 +230,11 @@ fn create_prescaled_validation_stream(input_folders: Vec<&str>, recurse: bool) -
 			.boxed()
 	});
 
-	Box::new(
+	Ok(Box::new(
 		set.shuffle_random()
 			.batch(1)
 			.buffered(crate::constants::io::VALIDATION_BUFFER_THREADS),
-	)
+	))
 }
 
 fn calculate_prescaled_epoch_size(input_folders: clap::Values, recurse: bool) -> usize {
