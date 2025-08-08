@@ -1,6 +1,7 @@
 use std::error::Error as StdError;
 use std::fmt;
 use std::io;
+use std::path::PathBuf;
 
 #[derive(Debug)]
 pub enum SrganError {
@@ -12,8 +13,13 @@ pub enum SrganError {
 	Validation(String),
 	Serialization(String),
 	InvalidParameter(String),
-	FileNotFound(String),
+	FileNotFound(PathBuf),
 	GraphConstruction(String),
+	GraphExecution(String),
+	CheckpointSave(String),
+	InvalidInput(String),
+	ShapeError(String),
+	MissingFolder(String),
 }
 
 impl fmt::Display for SrganError {
@@ -27,8 +33,13 @@ impl fmt::Display for SrganError {
 			SrganError::Validation(msg) => write!(f, "Validation error: {}", msg),
 			SrganError::Serialization(msg) => write!(f, "Serialization error: {}", msg),
 			SrganError::InvalidParameter(msg) => write!(f, "Invalid parameter: {}", msg),
-			SrganError::FileNotFound(msg) => write!(f, "File not found: {}", msg),
+			SrganError::FileNotFound(path) => write!(f, "File not found: {}", path.display()),
 			SrganError::GraphConstruction(msg) => write!(f, "Graph construction error: {}", msg),
+			SrganError::GraphExecution(msg) => write!(f, "Graph execution error: {}", msg),
+			SrganError::CheckpointSave(msg) => write!(f, "Failed to save checkpoint: {}", msg),
+			SrganError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
+			SrganError::ShapeError(msg) => write!(f, "Shape error: {}", msg),
+			SrganError::MissingFolder(msg) => write!(f, "Missing required folder: {}", msg),
 		}
 	}
 }
@@ -56,6 +67,24 @@ impl From<String> for SrganError {
 impl From<alumina::graph::Error> for SrganError {
 	fn from(err: alumina::graph::Error) -> Self {
 		SrganError::GraphConstruction(err.to_string())
+	}
+}
+
+impl From<bincode::Error> for SrganError {
+	fn from(err: bincode::Error) -> Self {
+		SrganError::Serialization(format!("Bincode error: {}", err))
+	}
+}
+
+impl From<std::num::ParseIntError> for SrganError {
+	fn from(err: std::num::ParseIntError) -> Self {
+		SrganError::Parse(format!("Failed to parse integer: {}", err))
+	}
+}
+
+impl From<std::num::ParseFloatError> for SrganError {
+	fn from(err: std::num::ParseFloatError) -> Self {
+		SrganError::Parse(format!("Failed to parse float: {}", err))
 	}
 }
 

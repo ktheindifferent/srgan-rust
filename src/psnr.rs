@@ -1,6 +1,6 @@
 use std::cmp;
 
-use ndarray::{ArrayView1, ArrayViewD, Axis, Zip};
+use ndarray::{ArrayViewD, Axis, Zip};
 
 /// Takes two tensors of shape [H, W, 3] and
 /// returns the err, y_err and pixel count of a pair of images.

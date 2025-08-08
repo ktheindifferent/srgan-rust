@@ -5,15 +5,28 @@ A Rust implementation of SRGAN (Super-Resolution Generative Adversarial Networks
 Use the included pre-trained neural networks to upscale your images, or easily train your own specialised neural network!  
 Feel free to open an issue for general discussion or to raise any problems.  
 
-## Usage
-To upscale an image:  
-`srgan-rust <INPUT_FILE> <OUTPUT_FILE>`  
+## Quick Start
 
-PNG output files are recommended.
+### Installation
+```bash
+# Build from source with optimizations
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+./target/release/srgan-rust --help
+```
 
-For further options:  
-`srgan-rust --help`  
-`srgan-rust train --help`  
+### Basic Usage
+```bash
+# Upscale an image using default settings
+srgan-rust input.jpg output.png
+
+# Use anime-optimized model
+srgan-rust -p anime anime.png anime_4x.png
+
+# Custom upscaling factor
+srgan-rust -f 2 photo.jpg photo_2x.png
+```
+
+For detailed usage instructions, see [USAGE.md](USAGE.md).  
 
 ## Setup
 To get the rust compiler (rustc) use [rustup](https://rustup.rs). For best performance compile using environmental variable `RUSTFLAGS="-C target-cpu=native" ` and a release mode build `cargo build --release`.  
@@ -30,14 +43,38 @@ Bank Lobby (test image for [Neural Enhance](https://github.com/alexjc/neural-enh
 CC-BY-SA @benarent  
 ![BankLowRes](docs/bank_nn.png)![Bank](docs/bank_rs.png)
 
-## Note
-Attemping to upscale images with significant noise or jpeg artefacts is likely to produce poor results. Input and output colorspace are nominally sRGB.
+## Features
+
+- 🚀 Fast image upscaling using SRGAN neural networks
+- 🎨 Pre-trained models for natural images and anime/artwork  
+- 🔧 Train custom models on your own datasets
+- 📊 PSNR calculation for quality metrics
+- ✅ Comprehensive input validation and error handling
+- 🧪 CI/CD pipeline with GitHub Actions
+- 📖 Detailed documentation and usage examples
+
+## Documentation
+
+- [Usage Guide](USAGE.md) - Detailed usage instructions and examples
+- [Training Guide](USAGE.md#training-custom-models) - How to train custom models
+- [Project Development](project_description.md) - Development progress and todo list
+
+## Notes
+
+- Best results with high-quality input images
+- Attempting to upscale images with significant noise or JPEG artifacts may produce poor results
+- Input and output colorspace are nominally sRGB
+- PNG output format recommended for best quality
 
 ## License
 MIT
 
 
-## Notes
+## Contributing
 
-To train:
-./srgan-rust train ./train ./test.rs
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Acknowledgments
+
+- Based on the SRGAN paper by Ledig et al.
+- Uses the Alumina deep learning framework

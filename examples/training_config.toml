@@ -1,0 +1,47 @@
+# Example Training Configuration for SRGAN-Rust
+# Copy and modify this file for your training needs
+
+[network]
+# Network architecture settings
+factor = 4          # Upscaling factor: 2, 4, or 8
+width = 32          # Network width: 16 (fast), 32 (balanced), 64 (quality)
+log_depth = 4       # Network depth: 3-5 (4 is recommended)
+global_node_factor = 2  # Global node size multiplier
+
+[training]
+# Training hyperparameters
+learning_rate = 0.001       # Learning rate for Adam optimizer
+batch_size = 4              # Batch size (adjust based on memory)
+patch_size = 48             # Training patch size
+loss_type = "L1"            # Loss function: "L1" or "L2"
+srgb_downscale = true       # Use sRGB colorspace for downscaling
+quantise = false            # Quantise weights to reduce file size
+checkpoint_interval = 1000  # Save checkpoint every N steps
+# max_steps = 50000         # Optional: stop after N steps
+# early_stopping_patience = 10  # Optional: stop if no improvement
+
+[data]
+# Training data configuration
+training_folder = "./training_data"
+recurse = true              # Search subdirectories for images
+
+[data.augmentation]
+# Data augmentation settings
+horizontal_flip = true      # Random horizontal flips
+vertical_flip = false       # Random vertical flips
+rotate_90 = true           # Random 90-degree rotations
+brightness_range = 0.1     # Random brightness adjustment
+contrast_range = 0.1       # Random contrast adjustment
+
+[validation]
+# Validation configuration (optional but recommended)
+validation_folder = "./validation_data"
+max_images = 50            # Limit validation set size
+frequency = 100            # Validate every N steps
+
+[output]
+# Output configuration
+parameter_file = "./models/trained_model.rsr"
+checkpoint_dir = "./checkpoints"
+# tensorboard_dir = "./logs"  # Optional: for TensorBoard logging
+save_best_model = true       # Save best model based on validation

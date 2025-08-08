@@ -1,15 +1,25 @@
+pub mod batch;
+pub mod benchmark;
 pub mod downscale;
+pub mod generate_config;
 pub mod psnr;
+pub mod profile_memory;
 pub mod quantise;
 pub mod set_width;
 pub mod train;
 pub mod train_prescaled;
 pub mod upscale;
+pub mod upscale_gpu;
 
+pub use self::batch::batch_upscale;
+pub use self::benchmark::benchmark;
 pub use self::downscale::downscale;
+pub use self::generate_config::{generate_config, train_with_config};
 pub use self::psnr::psnr;
+pub use self::profile_memory::{profile_memory_command, analyze_memory_usage};
 pub use self::quantise::quantise;
 pub use self::set_width::set_width;
 pub use self::train::train;
 pub use self::train_prescaled::train_prescaled;
 pub use self::upscale::upscale;
+pub use self::upscale_gpu::{list_gpu_devices, upscale_gpu};

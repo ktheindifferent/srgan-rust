@@ -1,8 +1,8 @@
 use crate::error::{Result, SrganError};
+use crate::validation;
 use clap::ArgMatches;
 use std::fs::File;
 use std::io::{stdout, Write};
-use std::path::Path;
 
 pub fn downscale(app_m: &ArgMatches) -> Result<()> {
 	let factor = parse_factor(app_m)?;
@@ -14,15 +14,21 @@ pub fn downscale(app_m: &ArgMatches) -> Result<()> {
 	let output_path = app_m
 		.value_of("OUTPUT_FILE")
 		.ok_or_else(|| SrganError::InvalidParameter("No output file given".to_string()))?;
+	
+	// Validate paths and factor
+	let input_path_buf = validation::validate_input_file(input_path)?;
+	validation::validate_image_extension(&input_path_buf)?;
+	let output_path_buf = validation::validate_output_path(output_path)?;
+	validation::validate_factor(factor)?;
 
-	let mut input_file = File::open(Path::new(input_path))?;
+	let mut input_file = File::open(&input_path_buf)?;
 	let input = crate::read(&mut input_file)?;
 	let output = crate::downscale(input, factor, srgb)?;
 
 	print!(" Writing file...");
 	stdout().flush().ok();
 
-	let mut output_file = File::create(Path::new(output_path))?;
+	let mut output_file = File::create(&output_path_buf)?;
 	crate::save(output, &mut output_file)?;
 
 	println!(" Done");

@@ -1,5 +1,6 @@
 use crate::aligned_crop::AlignedCrop;
 use crate::constants::io;
+use crate::error::{Result, SrganError};
 use alumina::data::{image_folder::ImageFolder, Cropping, DataSet, DataStream};
 
 pub struct DataLoader;
@@ -27,14 +28,15 @@ impl DataLoader {
 		patch_size: usize,
 		factor: usize,
 		batch_size: usize,
-	) -> Box<dyn DataStream> {
+	) -> Result<Box<dyn DataStream>> {
 		let mut folders_iter = input_folders.into_iter();
-		let first_folder = folders_iter.next().expect("At least one training folder required");
+		let first_folder = folders_iter.next()
+			.ok_or_else(|| SrganError::MissingFolder("At least one training folder required".to_string()))?;
 
 		let input_folder = std::path::Path::new(first_folder);
 		let mut target_folder = input_folder
 			.parent()
-			.expect("Don't use root as a training folder")
+			.ok_or_else(|| SrganError::InvalidInput("Don't use root as a training folder".to_string()))?
 			.to_path_buf();
 		target_folder.push("Base");
 
@@ -46,8 +48,8 @@ impl DataLoader {
 			let input_path = std::path::Path::new(input_folder);
 			let mut target_folder = input_path
 				.parent()
-				.expect("Don't use root as a training folder")
-				.to_path_buf();
+				.map(|p| p.to_path_buf())
+				.unwrap_or_else(|| std::path::PathBuf::from("."));
 			target_folder.push("Base");
 
 			ImageFolder::new(input_path, recurse)
@@ -56,13 +58,13 @@ impl DataLoader {
 				.boxed()
 		});
 
-		Box::new(
+		Ok(Box::new(
 			set.aligned_crop(0, &[patch_size, patch_size, 3], Cropping::Random)
 				.and_crop(1, &[factor, factor, 1])
 				.shuffle_random()
 				.batch(batch_size)
 				.buffered(io::BUFFER_THREADS),
-		)
+		))
 	}
 
 	pub fn create_validation_stream(validation_folder: &str, recurse: bool) -> Box<dyn DataStream> {

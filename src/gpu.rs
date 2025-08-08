@@ -1,0 +1,262 @@
+use crate::error::{Result, SrganError};
+use ndarray::ArrayD;
+use std::fmt;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GpuBackend {
+    None,
+    Cuda,
+    OpenCL,
+    Metal,
+    Vulkan,
+}
+
+impl fmt::Display for GpuBackend {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            GpuBackend::None => write!(f, "CPU"),
+            GpuBackend::Cuda => write!(f, "CUDA"),
+            GpuBackend::OpenCL => write!(f, "OpenCL"),
+            GpuBackend::Metal => write!(f, "Metal"),
+            GpuBackend::Vulkan => write!(f, "Vulkan"),
+        }
+    }
+}
+
+impl GpuBackend {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_lowercase().as_str() {
+            "cpu" | "none" => Ok(GpuBackend::None),
+            "cuda" => Ok(GpuBackend::Cuda),
+            "opencl" | "cl" => Ok(GpuBackend::OpenCL),
+            "metal" => Ok(GpuBackend::Metal),
+            "vulkan" | "vk" => Ok(GpuBackend::Vulkan),
+            _ => Err(SrganError::InvalidParameter(format!(
+                "Unknown GPU backend: {}. Valid options: cpu, cuda, opencl, metal, vulkan",
+                s
+            ))),
+        }
+    }
+
+    pub fn is_available(&self) -> bool {
+        match self {
+            GpuBackend::None => true,
+            // For now, GPU backends are not implemented
+            // In a real implementation, we would check for driver/library availability
+            _ => false,
+        }
+    }
+}
+
+pub struct GpuDevice {
+    backend: GpuBackend,
+    device_id: usize,
+    memory_mb: usize,
+    name: String,
+}
+
+impl GpuDevice {
+    pub fn cpu() -> Self {
+        GpuDevice {
+            backend: GpuBackend::None,
+            device_id: 0,
+            memory_mb: 0,
+            name: "CPU".to_string(),
+        }
+    }
+
+    pub fn list_devices() -> Vec<GpuDevice> {
+        // For now, only CPU is available
+        // In a real implementation, we would query available GPU devices
+        vec![Self::cpu()]
+    }
+
+    pub fn select_best() -> Self {
+        // Select the best available device
+        // For now, this is always CPU
+        Self::cpu()
+    }
+
+    pub fn backend(&self) -> GpuBackend {
+        self.backend
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn memory_mb(&self) -> usize {
+        self.memory_mb
+    }
+}
+
+pub trait GpuCompute {
+    fn to_device(&mut self, device: &GpuDevice) -> Result<()>;
+    fn to_cpu(&mut self) -> Result<()>;
+    fn is_on_device(&self) -> bool;
+}
+
+impl GpuCompute for ArrayD<f32> {
+    fn to_device(&mut self, device: &GpuDevice) -> Result<()> {
+        match device.backend() {
+            GpuBackend::None => Ok(()),
+            _ => Err(SrganError::InvalidParameter(format!(
+                "GPU backend {} is not yet implemented",
+                device.backend()
+            ))),
+        }
+    }
+
+    fn to_cpu(&mut self) -> Result<()> {
+        // Already on CPU
+        Ok(())
+    }
+
+    fn is_on_device(&self) -> bool {
+        false
+    }
+}
+
+pub struct GpuContext {
+    device: GpuDevice,
+    allocated_mb: usize,
+}
+
+impl GpuContext {
+    pub fn new(backend: GpuBackend) -> Result<Self> {
+        if !backend.is_available() {
+            return Err(SrganError::InvalidParameter(format!(
+                "GPU backend {} is not available on this system",
+                backend
+            )));
+        }
+
+        let device = if backend == GpuBackend::None {
+            GpuDevice::cpu()
+        } else {
+            // In a real implementation, we would select the best GPU
+            return Err(SrganError::InvalidParameter(format!(
+                "GPU backend {} is not yet implemented",
+                backend
+            )));
+        };
+
+        Ok(GpuContext {
+            device,
+            allocated_mb: 0,
+        })
+    }
+
+    pub fn device(&self) -> &GpuDevice {
+        &self.device
+    }
+
+    pub fn allocated_mb(&self) -> usize {
+        self.allocated_mb
+    }
+
+    pub fn available_mb(&self) -> usize {
+        if self.device.memory_mb > self.allocated_mb {
+            self.device.memory_mb - self.allocated_mb
+        } else {
+            0
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod cuda {
+    use super::*;
+    
+    pub fn is_cuda_available() -> bool {
+        // Check if CUDA runtime is available
+        // This would require cuda-sys or similar crate
+        false
+    }
+    
+    pub fn get_cuda_devices() -> Vec<GpuDevice> {
+        vec![]
+    }
+}
+
+#[cfg(feature = "opencl")]
+mod opencl {
+    use super::*;
+    
+    pub fn is_opencl_available() -> bool {
+        // Check if OpenCL runtime is available
+        // This would require ocl or similar crate
+        false
+    }
+    
+    pub fn get_opencl_devices() -> Vec<GpuDevice> {
+        vec![]
+    }
+}
+
+#[cfg(feature = "metal")]
+mod metal {
+    use super::*;
+    
+    pub fn is_metal_available() -> bool {
+        // Check if Metal is available (macOS only)
+        // This would require metal-rs or similar crate
+        false
+    }
+    
+    pub fn get_metal_devices() -> Vec<GpuDevice> {
+        vec![]
+    }
+}
+
+#[cfg(feature = "vulkan")]
+mod vulkan {
+    use super::*;
+    
+    pub fn is_vulkan_available() -> bool {
+        // Check if Vulkan runtime is available
+        // This would require vulkano or similar crate
+        false
+    }
+    
+    pub fn get_vulkan_devices() -> Vec<GpuDevice> {
+        vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_gpu_backend_from_str() {
+        assert_eq!(GpuBackend::from_str("cpu").unwrap(), GpuBackend::None);
+        assert_eq!(GpuBackend::from_str("cuda").unwrap(), GpuBackend::Cuda);
+        assert_eq!(GpuBackend::from_str("opencl").unwrap(), GpuBackend::OpenCL);
+        assert_eq!(GpuBackend::from_str("metal").unwrap(), GpuBackend::Metal);
+        assert_eq!(GpuBackend::from_str("vulkan").unwrap(), GpuBackend::Vulkan);
+        assert!(GpuBackend::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_gpu_device_list() {
+        let devices = GpuDevice::list_devices();
+        assert!(!devices.is_empty());
+        assert_eq!(devices[0].backend(), GpuBackend::None);
+    }
+
+    #[test]
+    fn test_gpu_context_cpu() {
+        let context = GpuContext::new(GpuBackend::None).unwrap();
+        assert_eq!(context.device().backend(), GpuBackend::None);
+    }
+
+    #[test]
+    fn test_gpu_compute_trait() {
+        let mut arr = ArrayD::<f32>::zeros(vec![1, 32, 32, 3]);
+        let device = GpuDevice::cpu();
+        assert!(arr.to_device(&device).is_ok());
+        assert!(!arr.is_on_device());
+        assert!(arr.to_cpu().is_ok());
+    }
+}

@@ -13,10 +13,17 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_bilinear_factor_arg())
 		.subcommand(build_train_subcommand())
 		.subcommand(build_train_prescaled_subcommand())
+		.subcommand(build_batch_subcommand())
 		.subcommand(build_downscale_subcommand())
 		.subcommand(build_quantise_subcommand())
 		.subcommand(build_psnr_subcommand())
 		.subcommand(build_set_width_subcommand())
+		.subcommand(build_upscale_gpu_subcommand())
+		.subcommand(build_list_gpus_subcommand())
+		.subcommand(build_benchmark_subcommand())
+		.subcommand(build_generate_config_subcommand())
+		.subcommand(build_profile_memory_subcommand())
+		.subcommand(build_analyze_memory_subcommand())
 		.get_matches()
 }
 
@@ -130,6 +137,77 @@ fn build_train_prescaled_subcommand() -> App<'static, 'static> {
             .multiple(true)
             .number_of_values(1))
         .arg(build_val_max_arg())
+}
+
+fn build_batch_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("batch")
+		.about("Batch process multiple images in a directory")
+		.arg(
+			Arg::with_name("INPUT_DIR")
+				.help("Input directory containing images to upscale")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("OUTPUT_DIR")
+				.help("Output directory for upscaled images")
+				.required(true)
+				.index(2),
+		)
+		.arg(
+			Arg::with_name("PARAMETERS")
+				.help("Sets which built-in parameters to use with the neural net")
+				.short("p")
+				.long("parameters")
+				.value_name("PARAMETERS")
+				.possible_values(&["natural", "anime", "bilinear"])
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("CUSTOM")
+				.conflicts_with("PARAMETERS")
+				.short("c")
+				.long("custom")
+				.value_name("PARAMETER_FILE")
+				.help("Sets a custom parameter file (.rsr) to use with the neural net")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("FACTOR")
+				.short("f")
+				.long("factor")
+				.help("The integer upscaling factor. Default: 4")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("RECURSIVE")
+				.short("r")
+				.long("recursive")
+				.help("Process images in subdirectories recursively")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("PATTERN")
+				.short("g")
+				.long("glob")
+				.help("Glob pattern for matching image files")
+				.value_name("PATTERN")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("SEQUENTIAL")
+				.short("s")
+				.long("sequential")
+				.help("Process images sequentially instead of in parallel")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("SKIP_EXISTING")
+				.short("k")
+				.long("skip-existing")
+				.help("Skip images that already exist in the output directory")
+				.takes_value(false),
+		)
 }
 
 fn build_downscale_subcommand() -> App<'static, 'static> {
@@ -324,4 +402,176 @@ fn build_val_max_arg() -> Arg<'static, 'static> {
 		.value_name("N")
 		.help("Set upper limit on number of images used for each validation pass")
 		.empty_values(false)
+}
+
+fn build_upscale_gpu_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("upscale-gpu")
+		.about("Upscale images using GPU acceleration")
+		.arg(
+			Arg::with_name("input")
+				.help("Input image to upscale")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output file (.png recommended)")
+				.required(true)
+				.index(2),
+		)
+		.arg(
+			Arg::with_name("network")
+				.help("Network to use (natural, anime, bilinear)")
+				.short("n")
+				.long("network")
+				.default_value("natural")
+				.possible_values(&["natural", "anime", "bilinear"]),
+		)
+		.arg(
+			Arg::with_name("gpu")
+				.help("GPU backend to use (auto, cuda, opencl, metal, vulkan, cpu)")
+				.short("g")
+				.long("gpu")
+				.default_value("auto")
+				.possible_values(&["auto", "cuda", "opencl", "metal", "vulkan", "cpu"]),
+		)
+}
+
+fn build_list_gpus_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("list-gpus")
+		.about("List available GPU devices and backends")
+}
+
+fn build_benchmark_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("benchmark")
+		.about("Benchmark model performance")
+		.arg(
+			Arg::with_name("input")
+				.help("Input image or directory")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("iterations")
+				.help("Number of iterations")
+				.short("i")
+				.long("iterations")
+				.default_value("10"),
+		)
+		.arg(
+			Arg::with_name("models")
+				.help("Comma-separated list of models to benchmark")
+				.short("m")
+				.long("models")
+				.default_value("natural,anime,bilinear"),
+		)
+		.arg(
+			Arg::with_name("warmup")
+				.help("Number of warmup iterations")
+				.short("w")
+				.long("warmup")
+				.default_value("2"),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output results file (JSON format)")
+				.short("o")
+				.long("output"),
+		)
+		.arg(
+			Arg::with_name("compare")
+				.help("Compare with previous results file")
+				.short("c")
+				.long("compare"),
+		)
+}
+
+fn build_generate_config_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("generate-config")
+		.about("Generate a training configuration file")
+		.arg(
+			Arg::with_name("output")
+				.help("Output configuration file (.toml)")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("preset")
+				.help("Configuration preset")
+				.short("p")
+				.long("preset")
+				.possible_values(&["basic", "advanced", "high-quality", "fast"])
+				.default_value("basic"),
+		)
+}
+
+fn build_profile_memory_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("profile-memory")
+		.about("Profile memory usage during upscaling")
+		.arg(
+			Arg::with_name("input")
+				.help("Input image to upscale")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("model")
+				.help("Model to use for upscaling")
+				.short("m")
+				.long("model")
+				.possible_values(&["natural", "anime"])
+				.default_value("natural"),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output image file")
+				.short("o")
+				.long("output"),
+		)
+		.arg(
+			Arg::with_name("report")
+				.help("Memory report output file")
+				.short("r")
+				.long("report")
+				.default_value("memory_profile.txt"),
+		)
+		.arg(
+			Arg::with_name("interval")
+				.help("Sampling interval in milliseconds")
+				.short("i")
+				.long("interval")
+				.default_value("100"),
+		)
+}
+
+fn build_analyze_memory_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("analyze-memory")
+		.about("Analyze memory usage of any command")
+		.arg(
+			Arg::with_name("command")
+				.help("Command to analyze")
+				.required(true)
+				.index(1)
+				.possible_values(&["upscale", "downscale", "batch", "train"]),
+		)
+		.arg(
+			Arg::with_name("args")
+				.help("Arguments for the command")
+				.multiple(true)
+				.required(true),
+		)
+		.arg(
+			Arg::with_name("report")
+				.help("Memory analysis report file")
+				.short("r")
+				.long("report")
+				.default_value("memory_analysis.txt"),
+		)
+		.arg(
+			Arg::with_name("interval")
+				.help("Sampling interval in milliseconds")
+				.short("i")
+				.long("interval")
+				.default_value("100"),
+		)
 }
