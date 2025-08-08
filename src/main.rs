@@ -1,8 +1,13 @@
 extern crate srgan_rust;
+#[macro_use]
+extern crate log;
 
-use srgan_rust::{cli, commands};
+use srgan_rust::{cli, commands, logging};
 
 fn main() {
+	// Initialize simple logger for CLI output
+	logging::init_simple_logger();
+	
 	let app_m = cli::build_cli();
 
 	let result = match app_m.subcommand() {
@@ -16,7 +21,7 @@ fn main() {
 	};
 
 	if let Err(err) = result {
-		eprintln!("Error: {}", err);
+		error!("Error: {}", err);
 		std::process::exit(1);
 	}
 }

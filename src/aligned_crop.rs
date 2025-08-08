@@ -4,8 +4,6 @@ use ndarray::{ArrayD, IxDyn, Slice, SliceInfo, SliceOrIndex};
 use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
 
-use std::mem;
-
 use alumina::data::crop::Cropping;
 
 pub trait AlignedCrop: DataSet {
@@ -82,10 +80,7 @@ impl<S: DataSet> DataSet for AlignedCropSet<S> {
 
 		let (input_slice_arg, output_slice_arg) = slice_args(&arr_shape, crop_shape, cropping);
 		let fill = self.fill.get(&component).cloned().unwrap_or(0.0);
-		mem::replace(
-			&mut data[component],
-			crop(arr, crop_shape, fill, input_slice_arg.clone(), output_slice_arg.clone()),
-		);
+		data[component] = crop(arr, crop_shape, fill, input_slice_arg.clone(), output_slice_arg.clone());
 
 		for &(other_component, ref factors) in self.other_crops.iter() {
 			let next_arr = mem::replace(&mut data[other_component], ArrayD::zeros(IxDyn(&[])));
@@ -94,15 +89,12 @@ impl<S: DataSet> DataSet for AlignedCropSet<S> {
 				secondary_slice_args(factors, crop_shape, input_slice_arg.clone(), output_slice_arg.clone());
 
 			let fill = self.fill.get(&other_component).cloned().unwrap_or(0.0);
-			mem::replace(
-				&mut data[other_component],
-				crop(
-					next_arr,
-					&next_crop_shape,
-					fill,
-					next_input_slice_arg.clone(),
-					next_output_slice_arg.clone(),
-				),
+			data[other_component] = crop(
+				next_arr,
+				&next_crop_shape,
+				fill,
+				next_input_slice_arg.clone(),
+				next_output_slice_arg.clone(),
 			);
 		}
 

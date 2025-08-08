@@ -2,6 +2,7 @@ use crate::config::{LossType, NetworkConfig, TrainingConfig, ValidationConfig};
 use crate::error::{Result, SrganError};
 use crate::network::training_sr_net;
 use crate::training::{train_network, DataLoader};
+use crate::validation;
 use crate::NetworkDescription;
 use clap::ArgMatches;
 use std::fs::File;
@@ -41,6 +42,10 @@ pub fn train(app_m: &ArgMatches) -> Result<()> {
 	let param_file_path = app_m
 		.value_of("PARAMETER_FILE")
 		.ok_or_else(|| SrganError::InvalidParameter("No parameter file specified".to_string()))?;
+	
+	// Validate training folder and output path
+	validation::validate_directory(training_folder)?;
+	validation::validate_output_path(param_file_path)?;
 
 	let mut training_stream = DataLoader::create_training_stream(
 		training_folder,
