@@ -13,6 +13,7 @@ fn main() {
 	let result = match app_m.subcommand() {
 		("train", Some(sub_m)) => commands::train(sub_m),
 		("train_prescaled", Some(sub_m)) => commands::train_prescaled(sub_m),
+		("batch", Some(sub_m)) => commands::batch_upscale(sub_m),
 		("downscale", Some(sub_m)) => commands::downscale(sub_m),
 		("psnr", Some(sub_m)) => commands::psnr(sub_m),
 		("quantise", Some(sub_m)) => commands::quantise(sub_m),

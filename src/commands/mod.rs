@@ -1,4 +1,7 @@
+pub mod batch;
+pub mod benchmark;
 pub mod downscale;
+pub mod generate_config;
 pub mod psnr;
 pub mod quantise;
 pub mod set_width;
@@ -6,7 +9,10 @@ pub mod train;
 pub mod train_prescaled;
 pub mod upscale;
 
+pub use self::batch::batch_upscale;
+pub use self::benchmark::benchmark;
 pub use self::downscale::downscale;
+pub use self::generate_config::{generate_config, train_with_config};
 pub use self::psnr::psnr;
 pub use self::quantise::quantise;
 pub use self::set_width::set_width;

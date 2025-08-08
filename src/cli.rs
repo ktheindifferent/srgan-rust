@@ -13,6 +13,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_bilinear_factor_arg())
 		.subcommand(build_train_subcommand())
 		.subcommand(build_train_prescaled_subcommand())
+		.subcommand(build_batch_subcommand())
 		.subcommand(build_downscale_subcommand())
 		.subcommand(build_quantise_subcommand())
 		.subcommand(build_psnr_subcommand())
@@ -130,6 +131,77 @@ fn build_train_prescaled_subcommand() -> App<'static, 'static> {
             .multiple(true)
             .number_of_values(1))
         .arg(build_val_max_arg())
+}
+
+fn build_batch_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("batch")
+		.about("Batch process multiple images in a directory")
+		.arg(
+			Arg::with_name("INPUT_DIR")
+				.help("Input directory containing images to upscale")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("OUTPUT_DIR")
+				.help("Output directory for upscaled images")
+				.required(true)
+				.index(2),
+		)
+		.arg(
+			Arg::with_name("PARAMETERS")
+				.help("Sets which built-in parameters to use with the neural net")
+				.short("p")
+				.long("parameters")
+				.value_name("PARAMETERS")
+				.possible_values(&["natural", "anime", "bilinear"])
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("CUSTOM")
+				.conflicts_with("PARAMETERS")
+				.short("c")
+				.long("custom")
+				.value_name("PARAMETER_FILE")
+				.help("Sets a custom parameter file (.rsr) to use with the neural net")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("FACTOR")
+				.short("f")
+				.long("factor")
+				.help("The integer upscaling factor. Default: 4")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("RECURSIVE")
+				.short("r")
+				.long("recursive")
+				.help("Process images in subdirectories recursively")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("PATTERN")
+				.short("g")
+				.long("glob")
+				.help("Glob pattern for matching image files")
+				.value_name("PATTERN")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("SEQUENTIAL")
+				.short("s")
+				.long("sequential")
+				.help("Process images sequentially instead of in parallel")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("SKIP_EXISTING")
+				.short("k")
+				.long("skip-existing")
+				.help("Skip images that already exist in the output directory")
+				.takes_value(false),
+		)
 }
 
 fn build_downscale_subcommand() -> App<'static, 'static> {

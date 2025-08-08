@@ -1,0 +1,253 @@
+use crate::error::{Result, SrganError};
+use crate::logging;
+use crate::validation;
+use crate::UpscalingNetwork;
+use clap::ArgMatches;
+use indicatif::{MultiProgress, ProgressBar};
+use log::{error, info, warn};
+use rayon::prelude::*;
+use std::fs::{self, File};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
+    let input_dir = app_m
+        .value_of("INPUT_DIR")
+        .ok_or_else(|| SrganError::InvalidParameter("No input directory given".to_string()))?;
+    let output_dir = app_m
+        .value_of("OUTPUT_DIR")
+        .ok_or_else(|| SrganError::InvalidParameter("No output directory given".to_string()))?;
+
+    // Validate directories
+    let input_path = validation::validate_directory(input_dir)?;
+    let output_path = validation::validate_directory(output_dir)?;
+
+    // Parse options
+    let recursive = app_m.is_present("RECURSIVE");
+    let parallel = !app_m.is_present("SEQUENTIAL");
+    let skip_existing = app_m.is_present("SKIP_EXISTING");
+    let pattern = app_m.value_of("PATTERN").unwrap_or("*.{png,jpg,jpeg,gif,bmp}");
+    
+    // Load network
+    let factor = parse_factor(app_m);
+    let network = load_network(app_m, factor)?;
+    let network = Arc::new(network);
+
+    info!("Starting batch processing with {} upscaling", network);
+    info!("Input directory: {}", input_path.display());
+    info!("Output directory: {}", output_path.display());
+
+    // Collect image files
+    let image_files = collect_image_files(&input_path, pattern, recursive)?;
+    
+    if image_files.is_empty() {
+        warn!("No image files found matching pattern: {}", pattern);
+        return Ok(());
+    }
+
+    info!("Found {} images to process", image_files.len());
+
+    // Create progress tracking
+    let multi_progress = Arc::new(MultiProgress::new());
+    let overall_pb = multi_progress.add(ProgressBar::new(image_files.len() as u64));
+    overall_pb.set_style(
+        indicatif::ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
+            .expect("Failed to set progress bar template")
+            .progress_chars("#>-"),
+    );
+    overall_pb.set_message("Processing images");
+
+    let start_time = Instant::now();
+    let errors = Arc::new(Mutex::new(Vec::new()));
+    let successful = Arc::new(Mutex::new(0usize));
+
+    if parallel {
+        // Process images in parallel
+        image_files.par_iter().for_each(|image_file| {
+            process_single_image(
+                image_file,
+                &input_path,
+                &output_path,
+                &network,
+                skip_existing,
+                &overall_pb,
+                &errors,
+                &successful,
+            );
+        });
+    } else {
+        // Process images sequentially
+        for image_file in &image_files {
+            process_single_image(
+                image_file,
+                &input_path,
+                &output_path,
+                &network,
+                skip_existing,
+                &overall_pb,
+                &errors,
+                &successful,
+            );
+        }
+    }
+
+    overall_pb.finish_with_message("Batch processing complete");
+
+    // Report results
+    let duration = start_time.elapsed();
+    let successful_count = *successful.lock().unwrap();
+    let error_list = errors.lock().unwrap();
+    
+    info!(
+        "Processed {} of {} images in {:.2}s",
+        successful_count,
+        image_files.len(),
+        duration.as_secs_f32()
+    );
+
+    if !error_list.is_empty() {
+        error!("Failed to process {} images:", error_list.len());
+        for (path, err) in error_list.iter() {
+            error!("  {}: {}", path.display(), err);
+        }
+    }
+
+    Ok(())
+}
+
+fn process_single_image(
+    image_path: &Path,
+    input_base: &Path,
+    output_base: &Path,
+    network: &Arc<UpscalingNetwork>,
+    skip_existing: bool,
+    progress: &ProgressBar,
+    errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
+    successful: &Arc<Mutex<usize>>,
+) {
+    // Calculate relative path and output path
+    let relative_path = image_path
+        .strip_prefix(input_base)
+        .unwrap_or(image_path);
+    
+    let output_path = output_base.join(relative_path);
+    let output_path = output_path.with_extension("png"); // Always save as PNG
+
+    // Skip if exists and skip_existing is true
+    if skip_existing && output_path.exists() {
+        progress.inc(1);
+        progress.set_message(format!("Skipped: {}", relative_path.display()));
+        return;
+    }
+
+    // Create output directory if needed
+    if let Some(parent) = output_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                errors.lock().unwrap().push((
+                    image_path.to_path_buf(),
+                    format!("Failed to create output directory: {}", e),
+                ));
+                progress.inc(1);
+                return;
+            }
+        }
+    }
+
+    // Process the image
+    match process_image(image_path, &output_path, network) {
+        Ok(_) => {
+            *successful.lock().unwrap() += 1;
+            progress.inc(1);
+            progress.set_message(format!("Processed: {}", relative_path.display()));
+        }
+        Err(e) => {
+            errors.lock().unwrap().push((image_path.to_path_buf(), e.to_string()));
+            progress.inc(1);
+            progress.set_message(format!("Failed: {}", relative_path.display()));
+        }
+    }
+}
+
+fn process_image(input_path: &Path, output_path: &Path, network: &UpscalingNetwork) -> Result<()> {
+    let mut input_file = File::open(input_path)?;
+    let input = crate::read(&mut input_file)?;
+    let output = crate::upscale(input, network)?;
+    let mut output_file = File::create(output_path)?;
+    crate::save(output, &mut output_file)?;
+    Ok(())
+}
+
+fn collect_image_files(dir: &Path, pattern: &str, recursive: bool) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    
+    if recursive {
+        collect_files_recursive(dir, pattern, &mut files)?;
+    } else {
+        collect_files_in_dir(dir, pattern, &mut files)?;
+    }
+    
+    files.sort();
+    Ok(files)
+}
+
+fn collect_files_recursive(dir: &Path, pattern: &str, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.is_dir() {
+            collect_files_recursive(&path, pattern, files)?;
+        } else if is_image_file(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn collect_files_in_dir(dir: &Path, pattern: &str, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        
+        if path.is_file() && is_image_file(&path) {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn is_image_file(path: &Path) -> bool {
+    let valid_extensions = ["png", "jpg", "jpeg", "gif", "bmp", "tiff", "webp"];
+    
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| valid_extensions.contains(&e.to_lowercase().as_str()))
+        .unwrap_or(false)
+}
+
+fn parse_factor(app_m: &ArgMatches) -> usize {
+    app_m
+        .value_of("FACTOR")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(4)
+}
+
+fn load_network(app_m: &ArgMatches, factor: usize) -> Result<UpscalingNetwork> {
+    if let Some(file_str) = app_m.value_of("CUSTOM") {
+        let param_path = validation::validate_input_file(file_str)?;
+        let mut param_file = File::open(&param_path)?;
+        let mut data = Vec::new();
+        param_file.read_to_end(&mut data)?;
+        let network_desc = crate::network_from_bytes(&data)?;
+        UpscalingNetwork::new(network_desc, "custom trained neural net")
+            .map_err(|e| SrganError::Network(e))
+    } else {
+        let param_type = app_m.value_of("PARAMETERS").unwrap_or("natural");
+        UpscalingNetwork::from_label(param_type, Some(factor))
+            .map_err(|e| SrganError::Network(e))
+    }
+}
