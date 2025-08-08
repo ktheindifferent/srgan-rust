@@ -22,6 +22,8 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_list_gpus_subcommand())
 		.subcommand(build_benchmark_subcommand())
 		.subcommand(build_generate_config_subcommand())
+		.subcommand(build_profile_memory_subcommand())
+		.subcommand(build_analyze_memory_subcommand())
 		.get_matches()
 }
 
@@ -500,5 +502,76 @@ fn build_generate_config_subcommand() -> App<'static, 'static> {
 				.long("preset")
 				.possible_values(&["basic", "advanced", "high-quality", "fast"])
 				.default_value("basic"),
+		)
+}
+
+fn build_profile_memory_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("profile-memory")
+		.about("Profile memory usage during upscaling")
+		.arg(
+			Arg::with_name("input")
+				.help("Input image to upscale")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("model")
+				.help("Model to use for upscaling")
+				.short("m")
+				.long("model")
+				.possible_values(&["natural", "anime"])
+				.default_value("natural"),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output image file")
+				.short("o")
+				.long("output"),
+		)
+		.arg(
+			Arg::with_name("report")
+				.help("Memory report output file")
+				.short("r")
+				.long("report")
+				.default_value("memory_profile.txt"),
+		)
+		.arg(
+			Arg::with_name("interval")
+				.help("Sampling interval in milliseconds")
+				.short("i")
+				.long("interval")
+				.default_value("100"),
+		)
+}
+
+fn build_analyze_memory_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("analyze-memory")
+		.about("Analyze memory usage of any command")
+		.arg(
+			Arg::with_name("command")
+				.help("Command to analyze")
+				.required(true)
+				.index(1)
+				.possible_values(&["upscale", "downscale", "batch", "train"]),
+		)
+		.arg(
+			Arg::with_name("args")
+				.help("Arguments for the command")
+				.multiple(true)
+				.required(true),
+		)
+		.arg(
+			Arg::with_name("report")
+				.help("Memory analysis report file")
+				.short("r")
+				.long("report")
+				.default_value("memory_analysis.txt"),
+		)
+		.arg(
+			Arg::with_name("interval")
+				.help("Sampling interval in milliseconds")
+				.short("i")
+				.long("interval")
+				.default_value("100"),
 		)
 }

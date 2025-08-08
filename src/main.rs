@@ -22,6 +22,21 @@ fn main() {
 		("list-gpus", Some(sub_m)) => commands::list_gpu_devices(sub_m),
 		("benchmark", Some(sub_m)) => commands::benchmark(sub_m),
 		("generate-config", Some(sub_m)) => commands::generate_config(sub_m),
+		("profile-memory", Some(sub_m)) => {
+			let input = sub_m.value_of("input").unwrap();
+			let model = sub_m.value_of("model");
+			let output = sub_m.value_of("output");
+			let report = sub_m.value_of("report");
+			let interval = sub_m.value_of("interval").unwrap().parse().unwrap_or(100);
+			commands::profile_memory_command(input, model, output, report, interval)
+		},
+		("analyze-memory", Some(sub_m)) => {
+			let command = sub_m.value_of("command").unwrap();
+			let args: Vec<&str> = sub_m.values_of("args").unwrap().collect();
+			let report = sub_m.value_of("report");
+			let interval = sub_m.value_of("interval").unwrap().parse().unwrap_or(100);
+			commands::analyze_memory_usage(command, args, report, interval)
+		},
 		_ => commands::upscale(&app_m),
 	};
 

@@ -25,6 +25,7 @@ pub mod gpu;
 pub mod logging;
 pub mod network;
 pub mod psnr;
+pub mod profiling;
 pub mod training;
 pub mod validation;
 
