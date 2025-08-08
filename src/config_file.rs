@@ -1,6 +1,6 @@
 use crate::config::{LossType, NetworkConfig, TrainingConfig};
 use crate::error::{Result, SrganError};
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 

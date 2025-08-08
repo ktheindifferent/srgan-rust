@@ -18,6 +18,10 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_quantise_subcommand())
 		.subcommand(build_psnr_subcommand())
 		.subcommand(build_set_width_subcommand())
+		.subcommand(build_upscale_gpu_subcommand())
+		.subcommand(build_list_gpus_subcommand())
+		.subcommand(build_benchmark_subcommand())
+		.subcommand(build_generate_config_subcommand())
 		.get_matches()
 }
 
@@ -396,4 +400,105 @@ fn build_val_max_arg() -> Arg<'static, 'static> {
 		.value_name("N")
 		.help("Set upper limit on number of images used for each validation pass")
 		.empty_values(false)
+}
+
+fn build_upscale_gpu_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("upscale-gpu")
+		.about("Upscale images using GPU acceleration")
+		.arg(
+			Arg::with_name("input")
+				.help("Input image to upscale")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output file (.png recommended)")
+				.required(true)
+				.index(2),
+		)
+		.arg(
+			Arg::with_name("network")
+				.help("Network to use (natural, anime, bilinear)")
+				.short("n")
+				.long("network")
+				.default_value("natural")
+				.possible_values(&["natural", "anime", "bilinear"]),
+		)
+		.arg(
+			Arg::with_name("gpu")
+				.help("GPU backend to use (auto, cuda, opencl, metal, vulkan, cpu)")
+				.short("g")
+				.long("gpu")
+				.default_value("auto")
+				.possible_values(&["auto", "cuda", "opencl", "metal", "vulkan", "cpu"]),
+		)
+}
+
+fn build_list_gpus_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("list-gpus")
+		.about("List available GPU devices and backends")
+}
+
+fn build_benchmark_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("benchmark")
+		.about("Benchmark model performance")
+		.arg(
+			Arg::with_name("input")
+				.help("Input image or directory")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("iterations")
+				.help("Number of iterations")
+				.short("i")
+				.long("iterations")
+				.default_value("10"),
+		)
+		.arg(
+			Arg::with_name("models")
+				.help("Comma-separated list of models to benchmark")
+				.short("m")
+				.long("models")
+				.default_value("natural,anime,bilinear"),
+		)
+		.arg(
+			Arg::with_name("warmup")
+				.help("Number of warmup iterations")
+				.short("w")
+				.long("warmup")
+				.default_value("2"),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output results file (JSON format)")
+				.short("o")
+				.long("output"),
+		)
+		.arg(
+			Arg::with_name("compare")
+				.help("Compare with previous results file")
+				.short("c")
+				.long("compare"),
+		)
+}
+
+fn build_generate_config_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("generate-config")
+		.about("Generate a training configuration file")
+		.arg(
+			Arg::with_name("output")
+				.help("Output configuration file (.toml)")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("preset")
+				.help("Configuration preset")
+				.short("p")
+				.long("preset")
+				.possible_values(&["basic", "advanced", "high-quality", "fast"])
+				.default_value("basic"),
+		)
 }

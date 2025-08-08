@@ -126,7 +126,7 @@ pub fn train_with_config(app_m: &ArgMatches) -> Result<()> {
         let mut data = Vec::new();
         std::io::Read::read_to_end(&mut param_file, &mut data)?;
         let network_desc = crate::network_from_bytes(&data)?;
-        Some(network_desc.1)
+        Some(network_desc.parameters)
     } else {
         None
     };

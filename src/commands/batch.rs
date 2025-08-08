@@ -1,13 +1,11 @@
 use crate::error::{Result, SrganError};
-use crate::logging;
 use crate::validation;
 use crate::UpscalingNetwork;
 use clap::ArgMatches;
 use indicatif::{MultiProgress, ProgressBar};
 use log::{error, info, warn};
-use rayon::prelude::*;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -64,34 +62,24 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     let errors = Arc::new(Mutex::new(Vec::new()));
     let successful = Arc::new(Mutex::new(0usize));
 
+    // Process images sequentially
+    // TODO: Parallel processing is disabled due to Send/Sync constraints in UpscalingNetwork
     if parallel {
-        // Process images in parallel
-        image_files.par_iter().for_each(|image_file| {
-            process_single_image(
-                image_file,
-                &input_path,
-                &output_path,
-                &network,
-                skip_existing,
-                &overall_pb,
-                &errors,
-                &successful,
-            );
-        });
-    } else {
-        // Process images sequentially
-        for image_file in &image_files {
-            process_single_image(
-                image_file,
-                &input_path,
-                &output_path,
-                &network,
-                skip_existing,
-                &overall_pb,
-                &errors,
-                &successful,
-            );
-        }
+        warn!("Parallel processing is currently disabled due to technical constraints");
+        warn!("Processing images sequentially instead...");
+    }
+    
+    for image_file in &image_files {
+        process_single_image(
+            image_file,
+            &input_path,
+            &output_path,
+            &network,
+            skip_existing,
+            &overall_pb,
+            &errors,
+            &successful,
+        );
     }
 
     overall_pb.finish_with_message("Batch processing complete");
@@ -208,7 +196,7 @@ fn collect_files_recursive(dir: &Path, pattern: &str, files: &mut Vec<PathBuf>) 
     Ok(())
 }
 
-fn collect_files_in_dir(dir: &Path, pattern: &str, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_files_in_dir(dir: &Path, _pattern: &str, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();

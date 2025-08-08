@@ -21,6 +21,7 @@ pub mod config;
 pub mod config_file;
 pub mod constants;
 pub mod error;
+pub mod gpu;
 pub mod logging;
 pub mod network;
 pub mod psnr;

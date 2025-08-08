@@ -3,6 +3,7 @@ use indexmap::{IndexMap, IndexSet};
 use ndarray::{ArrayD, IxDyn, Slice, SliceInfo, SliceOrIndex};
 use rand::{thread_rng, Rng};
 use smallvec::SmallVec;
+use std::mem;
 
 use alumina::data::crop::Cropping;
 

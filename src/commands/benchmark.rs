@@ -2,7 +2,7 @@ use crate::error::{Result, SrganError};
 use crate::UpscalingNetwork;
 use clap::ArgMatches;
 use log::info;
-use ndarray::{Array4, ArrayD, IxDyn};
+use ndarray::ArrayD;
 use std::time::{Duration, Instant};
 
 /// Benchmark structure to hold results
@@ -230,8 +230,8 @@ fn benchmark_model(
 fn create_test_image(width: usize, height: usize) -> ArrayD<f32> {
     // Create a random test image
     let mut rng = rand::thread_rng();
-    let shape = IxDyn(&[1, height, width, 3]);
-    let mut image = Array4::<f32>::zeros(shape.clone());
+    let shape = vec![1, height, width, 3];
+    let mut image = ArrayD::<f32>::zeros(shape.clone());
     
     // Fill with random values
     for elem in image.iter_mut() {
@@ -244,10 +244,14 @@ fn create_test_image(width: usize, height: usize) -> ArrayD<f32> {
 fn estimate_network_memory(network: &UpscalingNetwork) -> f64 {
     // Rough estimate based on network description
     // This is a simplified estimation
-    match network.description() {
-        _ if network.description().contains("bilinear") => 0.1,
-        _ if network.description().contains("anime") => 50.0,
-        _ => 40.0, // Default for natural model
+    // Estimate based on network type
+    let desc = network.to_string();
+    if desc.contains("bilinear") {
+        0.1
+    } else if desc.contains("anime") {
+        50.0
+    } else {
+        40.0 // Default for natural model
     }
 }
 

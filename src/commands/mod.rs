@@ -8,6 +8,7 @@ pub mod set_width;
 pub mod train;
 pub mod train_prescaled;
 pub mod upscale;
+pub mod upscale_gpu;
 
 pub use self::batch::batch_upscale;
 pub use self::benchmark::benchmark;
@@ -19,3 +20,4 @@ pub use self::set_width::set_width;
 pub use self::train::train;
 pub use self::train_prescaled::train_prescaled;
 pub use self::upscale::upscale;
+pub use self::upscale_gpu::{list_gpu_devices, upscale_gpu};
