@@ -45,8 +45,8 @@ use alumina::{
 	graph::GraphDef,
 };
 
-const L1_SRGB_NATURAL_PARAMS: &'static [u8] = include_bytes!("res/L1_x4_UCID_x1node.rsr");
-const L1_SRGB_ANIME_PARAMS: &'static [u8] = include_bytes!("res/L1_x4_Anime_x1node.rsr");
+const L1_SRGB_NATURAL_PARAMS: &[u8] = include_bytes!("res/L1_x4_UCID_x1node.rsr");
+const L1_SRGB_ANIME_PARAMS: &[u8] = include_bytes!("res/L1_x4_Anime_x1node.rsr");
 
 /// A struct containing the network parameters and hyperparameters.
 #[derive(Debug, Serialize, Deserialize)]
