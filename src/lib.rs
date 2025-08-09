@@ -23,11 +23,14 @@ pub mod constants;
 pub mod error;
 pub mod gpu;
 pub mod logging;
+pub mod model_converter;
 pub mod network;
 pub mod psnr;
 pub mod profiling;
 pub mod training;
 pub mod validation;
+pub mod video;
+pub mod web_server;
 
 use std::{
 	fmt,
@@ -211,6 +214,19 @@ impl UpscalingNetwork {
 			display: display.to_string(),
 		})
 	}
+	
+	/// Create network from config  
+	pub fn new_from_config(config: config::NetworkConfig) -> ::std::result::Result<Self, crate::error::SrganError> {
+		let desc = NetworkDescription {
+			factor: 4,  // Default scale factor
+			width: config.width,
+			log_depth: config.log_depth,
+			global_node_factor: 1,
+			parameters: Vec::new(),
+		};
+		Self::new(desc, "custom network")
+			.map_err(|e| crate::error::SrganError::Network(e))
+	}
 
 	/// Accepts labels: [natural, natural_L1, natural_rgb, anime, anime_L1, bilinear]
 	pub fn from_label(label: &str, bilinear_factor: Option<usize>) -> ::std::result::Result<Self, String> {
@@ -254,6 +270,56 @@ impl UpscalingNetwork {
 
 	pub fn borrow_network(&self) -> (&GraphDef, &[ArrayD<f32>]) {
 		(&self.graph, &self.parameters)
+	}
+	
+	/// Load network from file
+	pub fn load_from_file(path: &std::path::Path) -> ::std::result::Result<Self, crate::error::SrganError> {
+		network_from_file(path)
+			.map_err(|e| crate::error::SrganError::Network(e))
+			.and_then(|desc| {
+				Self::new(desc, "custom network")
+					.map_err(|e| crate::error::SrganError::Network(e))
+			})
+	}
+	
+	/// Save network to file
+	pub fn save_to_file(&self, path: &std::path::Path) -> ::std::result::Result<(), crate::error::SrganError> {
+		let desc = NetworkDescription {
+			factor: 4,  // Default
+			width: 12,  // Default
+			log_depth: 4,  // Default  
+			global_node_factor: 1,
+			parameters: self.parameters.clone(),
+		};
+		network_to_file(&desc, path)
+			.map_err(|e| crate::error::SrganError::Serialization(e))
+	}
+	
+	/// Load built-in natural model
+	pub fn load_builtin_natural() -> ::std::result::Result<Self, crate::error::SrganError> {
+		Self::from_label("natural", None)
+			.map_err(|e| crate::error::SrganError::Network(e))
+	}
+	
+	/// Load built-in anime model
+	pub fn load_builtin_anime() -> ::std::result::Result<Self, crate::error::SrganError> {
+		Self::from_label("anime", None)
+			.map_err(|e| crate::error::SrganError::Network(e))
+	}
+	
+	/// Upscale an image
+	pub fn upscale_image(&self, img: &image::DynamicImage) -> ::std::result::Result<image::DynamicImage, crate::error::SrganError> {
+		// Convert image to tensor
+		let tensor = image_to_data(img);
+		
+		// Upscale
+		let result = upscale(tensor, self)
+			.map_err(|e| crate::error::SrganError::GraphExecution(e.to_string()))?;
+		
+		// Convert back to image
+		let upscaled_img = data_to_image(result.view());
+		
+		Ok(upscaled_img)
 	}
 }
 
