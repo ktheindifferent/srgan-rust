@@ -15,19 +15,21 @@
 - [x] Benchmarking capabilities
 - [x] Training guide and example configurations
 - [x] GPU acceleration foundation (backend abstraction)
+- [x] Memory profiling capabilities
+- [x] Example datasets with download scripts
+- [x] Model conversion tools (PyTorch/TensorFlow to Alumina)
+- [x] Video upscaling support (frame-by-frame)
+- [x] Web API server mode
 
 ## In Progress 🚧
-- [ ] Memory profiling capabilities
-- [ ] Example datasets with download scripts
 
 ## High Priority 🔴
 - [ ] Complete GPU kernel implementation for acceleration
-- [ ] Model conversion tools (PyTorch/TensorFlow to Alumina)
 - [ ] Model quantization for faster inference
-- [ ] Web API server mode
+- [ ] Model comparison and A/B testing framework
+- [ ] Checkpoint resume functionality for training
 
 ## Medium Priority 🟡
-- [ ] Video upscaling support (frame-by-frame)
 - [ ] Model pruning capabilities
 - [ ] Distributed training support
 - [ ] Model visualization tools
