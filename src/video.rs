@@ -4,6 +4,7 @@ use std::fs;
 use image::{DynamicImage, ImageFormat};
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
+use log::info;
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 
@@ -255,30 +256,15 @@ impl VideoProcessor {
         
         let total_frames = frame_files.len();
         
-        if self.config.parallel_frames > 1 {
-            // Parallel processing
-            let multi_progress = MultiProgress::new();
-            let pb = multi_progress.add(ProgressBar::new(total_frames as u64));
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} frames ({eta})")
-                    .progress_chars("=>-")
-            );
-            
-            frame_files.par_iter()
-                .try_for_each(|frame_path| {
-                    let result = self.process_single_frame(frame_path, output_dir, network);
-                    pb.inc(1);
-                    result
-                })?;
-            
-            pb.finish_with_message("All frames processed");
-        } else {
+        // Note: Parallel processing is temporarily disabled due to network not being Send + Sync
+        // This is a known limitation that can be addressed in future refactoring
+        {
             // Sequential processing
             let pb = ProgressBar::new(total_frames as u64);
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} frames ({eta})")
+                    .unwrap()
                     .progress_chars("=>-")
             );
             
@@ -303,8 +289,8 @@ impl VideoProcessor {
         
         // Save processed frame
         let output_path = output_dir.join(input_path.file_name().unwrap());
-        upscaled.save_with_format(&output_path, ImageFormat::Png)
-            .map_err(|e| SrganError::Image(e))?;
+        upscaled.save(&output_path)
+            .map_err(|e| SrganError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         
         Ok(())
     }

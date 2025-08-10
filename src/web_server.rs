@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
 use std::net::SocketAddr;
 use std::io::Write;
-use image::{DynamicImage, ImageFormat};
+use image::{DynamicImage, ImageFormat, GenericImage};
 use serde::{Deserialize, Serialize};
+use log::{info, warn};
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 
@@ -173,7 +174,7 @@ impl WebServer {
         info!("API endpoints:");
         info!("  POST /api/upscale       - Synchronous image upscaling");
         info!("  POST /api/upscale/async - Asynchronous image upscaling");
-        info!("  GET  /api/job/{id}      - Check job status");
+        info!("  GET  /api/job/{{id}}      - Check job status");
         info!("  GET  /api/health        - Health check");
         info!("  GET  /api/models        - List available models");
         
@@ -437,10 +438,10 @@ impl WebServer {
         let format = request.format.as_deref().unwrap_or("png");
         let mut output = Vec::new();
         let img_format = match format {
-            "jpeg" | "jpg" => ImageFormat::Jpeg,
-            "png" => ImageFormat::Png,
-            "webp" => ImageFormat::WebP,
-            _ => ImageFormat::Png,
+            "jpeg" | "jpg" => ImageFormat::JPEG,
+            "png" => ImageFormat::PNG,
+            "webp" => ImageFormat::WEBP,
+            _ => ImageFormat::PNG,
         };
         
         upscaled.write_to(&mut output, img_format)

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use clap::ArgMatches;
+use log::{info, warn};
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 use crate::video::{VideoProcessor, VideoConfig, VideoCodec, VideoQuality, extract_preview_frame};
@@ -54,7 +55,7 @@ pub fn upscale_video(matches: &ArgMatches) -> Result<(), SrganError> {
         // Save preview
         let preview_path = output_path.with_extension("preview.png");
         upscaled_preview.save(&preview_path)
-            .map_err(|e| SrganError::Image(e))?;
+            .map_err(|e| SrganError::Io(e.into()))?;
         
         info!("✓ Preview saved to {:?}", preview_path);
         
