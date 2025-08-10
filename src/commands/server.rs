@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 use clap::ArgMatches;
+use log::info;
 use crate::error::SrganError;
 use crate::web_server::{WebServer, ServerConfig};
 

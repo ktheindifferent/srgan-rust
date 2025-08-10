@@ -5,6 +5,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use ndarray::{Array4, ArrayView4, Axis};
+use log::{info, warn, debug};
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 use crate::config::NetworkConfig;

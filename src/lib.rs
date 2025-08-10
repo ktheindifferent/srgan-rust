@@ -28,6 +28,7 @@ pub mod network;
 pub mod psnr;
 pub mod profiling;
 pub mod training;
+pub mod utils;
 pub mod validation;
 pub mod video;
 pub mod web_server;
@@ -274,16 +275,27 @@ impl UpscalingNetwork {
 	
 	/// Load network from file
 	pub fn load_from_file(path: &std::path::Path) -> ::std::result::Result<Self, crate::error::SrganError> {
-		network_from_file(path)
+		use std::fs::File;
+		use std::io::Read;
+		
+		let mut file = File::open(path)
+			.map_err(|e| crate::error::SrganError::Io(e))?;
+		let mut data = Vec::new();
+		file.read_to_end(&mut data)
+			.map_err(|e| crate::error::SrganError::Io(e))?;
+			
+		let desc = network_from_bytes(&data)
+			.map_err(|e| crate::error::SrganError::Network(e))?;
+			
+		Self::new(desc, "custom network")
 			.map_err(|e| crate::error::SrganError::Network(e))
-			.and_then(|desc| {
-				Self::new(desc, "custom network")
-					.map_err(|e| crate::error::SrganError::Network(e))
-			})
 	}
 	
 	/// Save network to file
 	pub fn save_to_file(&self, path: &std::path::Path) -> ::std::result::Result<(), crate::error::SrganError> {
+		use std::fs::File;
+		use std::io::Write;
+		
 		let desc = NetworkDescription {
 			factor: 4,  // Default
 			width: 12,  // Default
@@ -291,8 +303,16 @@ impl UpscalingNetwork {
 			global_node_factor: 1,
 			parameters: self.parameters.clone(),
 		};
-		network_to_file(&desc, path)
-			.map_err(|e| crate::error::SrganError::Serialization(e))
+		
+		let data = network_to_bytes(desc, false)
+			.map_err(|e| crate::error::SrganError::Serialization(e))?;
+			
+		let mut file = File::create(path)
+			.map_err(|e| crate::error::SrganError::Io(e))?;
+		file.write_all(&data)
+			.map_err(|e| crate::error::SrganError::Io(e))?;
+			
+		Ok(())
 	}
 	
 	/// Load built-in natural model
