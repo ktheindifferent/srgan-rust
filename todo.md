@@ -20,8 +20,24 @@
 - [x] Model conversion tools (PyTorch/TensorFlow to Alumina)
 - [x] Video upscaling support (frame-by-frame)
 - [x] Web API server mode
+- [x] Critical fixes guide documentation
+- [x] Enhancement plan documentation
+- [x] Benchmarking infrastructure improvements
+- [x] Project overview documentation
 
 ## In Progress 🚧
+- [ ] Fix remaining unwrap() calls (45+ identified)
+- [ ] Implement resource cleanup for memory leaks
+- [ ] Add error recovery middleware for web server
+
+## Critical Fixes 🚨 (Must fix before production)
+- [ ] Fix panic points in web_server.rs (17 unwrap calls)
+- [ ] Fix panic points in video.rs (8 unwrap calls)
+- [ ] Fix panic points in model_converter.rs (5 unwrap calls)
+- [ ] Add proper cleanup in drop implementations
+- [ ] Fix memory leaks in training loop
+- [ ] Add connection pooling for web server
+- [ ] Implement circuit breaker pattern for failures
 
 ## High Priority 🔴
 - [ ] Complete GPU kernel implementation for acceleration
@@ -90,6 +106,24 @@
 - [ ] Automated security scanning
 - [ ] Release automation with changelogs
 
+## New Tasks from Recent Analysis 🆕
+- [ ] Implement retry logic for network operations
+- [ ] Add timeout configurations for all async operations
+- [ ] Create health check endpoint for web server
+- [ ] Add request/response logging middleware
+- [ ] Implement rate limiting with token bucket algorithm
+- [ ] Add metrics collection (Prometheus format)
+- [ ] Create database migration system for future persistence
+- [ ] Add OpenTelemetry tracing support
+- [ ] Implement graceful shutdown for all services
+- [ ] Add support for partial image processing (tiles)
+- [ ] Create model warmup functionality
+- [ ] Add support for streaming responses in web API
+- [ ] Implement caching layer for processed images
+- [ ] Add webhook support for async job completion
+- [ ] Create admin dashboard for web server
+
 ---
-*Last Updated: Session 5*
-*Total Tasks: 51 (14 completed, 37 pending)*
+*Last Updated: Session 8*
+*Total Tasks: 73 (23 completed, 50 pending)*
+*Critical Fixes: 7 urgent items to prevent production failures*
