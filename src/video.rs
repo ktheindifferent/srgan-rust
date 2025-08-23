@@ -1,11 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::fs;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::sync::atomic::{AtomicU64, Ordering};
 use image::{DynamicImage, ImageFormat};
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use log::info;
+use log::{info, warn, debug, error};
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 
@@ -74,11 +75,21 @@ pub struct VideoProcessor {
     config: VideoConfig,
     network: Option<UpscalingNetwork>,
     frame_count: Option<usize>,
+    allowed_dirs: Vec<PathBuf>,
+    command_timeout: Duration,
 }
 
 impl VideoProcessor {
     /// Create a new video processor
     pub fn new(config: VideoConfig) -> Result<Self, SrganError> {
+        // Validate input and output paths
+        Self::validate_path(&config.input_path)?;
+        Self::validate_path(&config.output_path)?;
+        
+        if let Some(ref model_path) = config.model_path {
+            Self::validate_path(model_path)?;
+        }
+        
         // Check if ffmpeg is available
         if !Self::check_ffmpeg()? {
             return Err(SrganError::InvalidInput(
@@ -86,10 +97,23 @@ impl VideoProcessor {
             ));
         }
         
+        // Setup allowed directories (current working dir and temp dir)
+        let mut allowed_dirs = vec![
+            std::env::current_dir().map_err(|e| SrganError::Io(e))?,
+            std::env::temp_dir(),
+        ];
+        
+        // Add user home directory if available
+        if let Ok(home) = std::env::var("HOME") {
+            allowed_dirs.push(PathBuf::from(home));
+        }
+        
         Ok(Self {
             config,
             network: None,
             frame_count: None,
+            allowed_dirs,
+            command_timeout: Duration::from_secs(300), // 5 minute timeout
         })
     }
     
@@ -139,10 +163,85 @@ impl VideoProcessor {
         Ok(())
     }
     
+    /// Validate a path for security
+    fn validate_path(path: &Path) -> Result<(), SrganError> {
+        // Convert to string and check for shell metacharacters
+        let path_str = path.to_str()
+            .ok_or_else(|| SrganError::InvalidInput("Invalid path encoding".to_string()))?;
+        
+        // Check for dangerous characters that could lead to command injection
+        const FORBIDDEN_CHARS: &[char] = &[
+            ';', '|', '&', '`', '$', '(', ')', '{', '}', '<', '>', '\n', '\r', '\0',
+            '"', '\'', '\\', '*', '?', '[', ']', '!', '~', '#'
+        ];
+        
+        if path_str.chars().any(|c| FORBIDDEN_CHARS.contains(&c)) {
+            return Err(SrganError::InvalidInput(
+                format!("Path contains forbidden characters: {}", path_str)
+            ));
+        }
+        
+        // Check for directory traversal attempts (both Unix and Windows style)
+        if path_str.contains("..") || path_str.contains("..\\") {
+            return Err(SrganError::InvalidInput(
+                "Path contains directory traversal attempt".to_string()
+            ));
+        }
+        
+        // Ensure path doesn't start with a dash (could be interpreted as command flag)
+        if path_str.starts_with('-') {
+            return Err(SrganError::InvalidInput(
+                "Path cannot start with a dash".to_string()
+            ));
+        }
+        
+        Ok(())
+    }
+    
+    /// Canonicalize and validate path is within allowed directories
+    fn validate_and_canonicalize_path(&self, path: &Path) -> Result<PathBuf, SrganError> {
+        // First validate the path syntax
+        Self::validate_path(path)?;
+        
+        // Canonicalize to resolve symlinks and get absolute path
+        let canonical = path.canonicalize()
+            .or_else(|_| {
+                // If file doesn't exist yet, canonicalize the parent and append filename
+                if let Some(parent) = path.parent() {
+                    if let Some(file_name) = path.file_name() {
+                        parent.canonicalize()
+                            .map(|p| p.join(file_name))
+                    } else {
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Invalid path"))
+                    }
+                } else {
+                    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "Invalid path"))
+                }
+            })
+            .map_err(|e| SrganError::InvalidInput(format!("Path validation failed: {}", e)))?;
+        
+        // Check if path is within allowed directories
+        let is_allowed = self.allowed_dirs.iter().any(|allowed| {
+            canonical.starts_with(allowed)
+        });
+        
+        if !is_allowed {
+            return Err(SrganError::InvalidInput(
+                format!("Path is outside allowed directories: {:?}", canonical)
+            ));
+        }
+        
+        debug!("Validated path: {:?}", canonical);
+        Ok(canonical)
+    }
+    
     /// Check if ffmpeg is installed
     fn check_ffmpeg() -> Result<bool, SrganError> {
+        Self::log_command_execution("ffmpeg", &["-version"], None);
+        
         Command::new("ffmpeg")
             .arg("-version")
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
@@ -150,6 +249,45 @@ impl VideoProcessor {
             .map_err(|_| SrganError::InvalidInput(
                 "Failed to run ffmpeg. Please ensure ffmpeg is installed.".into()
             ))
+    }
+    
+    /// Log command execution for security auditing
+    fn log_command_execution(command: &str, args: &[&str], input_file: Option<&Path>) {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        let args_str = args.join(" ");
+        
+        if let Some(input) = input_file {
+            info!(
+                "[AUDIT] Command execution at {}: {} {} | Input: {:?}",
+                timestamp, command, args_str, input
+            );
+        } else {
+            info!(
+                "[AUDIT] Command execution at {}: {} {}",
+                timestamp, command, args_str
+            );
+        }
+        
+        // Log to a dedicated security audit file if configured
+        #[cfg(feature = "audit-log")]
+        {
+            use std::io::Write;
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/var/log/srgan_audit.log")
+            {
+                let _ = writeln!(
+                    file,
+                    "{} | {} {} | Input: {:?}",
+                    timestamp, command, args_str, input_file
+                );
+            }
+        }
     }
     
     /// Create temporary directory for processing
@@ -180,16 +318,34 @@ impl VideoProcessor {
     
     /// Get video information using ffprobe
     fn get_video_info(&self) -> Result<VideoInfo, SrganError> {
+        // Validate input path again
+        let safe_input_path = self.validate_and_canonicalize_path(&self.config.input_path)?;
+        
+        debug!("Getting video info for: {:?}", safe_input_path);
+        
+        // Log the command execution for audit
+        Self::log_command_execution(
+            "ffprobe",
+            &["-v", "error", "-select_streams", "v:0", "-count_packets",
+              "-show_entries", "stream=r_frame_rate,nb_read_packets,width,height",
+              "-of", "csv=p=0"],
+            Some(&safe_input_path)
+        );
+        
         let output = Command::new("ffprobe")
-            .args(&[
-                "-v", "error",
-                "-select_streams", "v:0",
-                "-count_packets",
-                "-show_entries", "stream=r_frame_rate,nb_read_packets,width,height",
-                "-of", "csv=p=0",
-                self.config.input_path.to_str()
-                    .ok_or_else(|| SrganError::InvalidInput("Invalid input path".to_string()))?,
-            ])
+            .arg("-v")
+            .arg("error")
+            .arg("-select_streams")
+            .arg("v:0")
+            .arg("-count_packets")
+            .arg("-show_entries")
+            .arg("stream=r_frame_rate,nb_read_packets,width,height")
+            .arg("-of")
+            .arg("csv=p=0")
+            .arg(&safe_input_path)  // Pass as separate argument, not formatted into string
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .output()
             .map_err(|e| SrganError::InvalidInput(
                 format!("Failed to get video info: {}", e)
@@ -225,25 +381,49 @@ impl VideoProcessor {
     /// Extract frames from video
     fn extract_frames(&self, temp_dir: &Path, info: &VideoInfo) -> Result<(), SrganError> {
         let frames_dir = temp_dir.join("frames");
+        let safe_input_path = self.validate_and_canonicalize_path(&self.config.input_path)?;
+        let safe_output_pattern = self.validate_and_canonicalize_path(&frames_dir.join("frame_%06d.png"))?;
+        
+        info!("Extracting frames from: {:?}", safe_input_path);
+        
+        // Build args for logging
+        let mut log_args = vec!["-i"];
+        if self.config.start_time.is_some() {
+            log_args.push("-ss");
+        }
+        if self.config.duration.is_some() {
+            log_args.push("-t");
+        }
+        log_args.extend(&["-vf", "fps=X"]);
+        
+        Self::log_command_execution("ffmpeg", &log_args, Some(&safe_input_path));
         
         let mut cmd = Command::new("ffmpeg");
-        let input_path_str = self.config.input_path.to_str()
-            .ok_or_else(|| SrganError::InvalidInput("Invalid input path".to_string()))?;
-        cmd.args(&["-i", input_path_str]);
+        cmd.arg("-i")
+           .arg(&safe_input_path);
         
-        // Add time range if specified
+        // Add time range if specified (validate these strings)
         if let Some(ref start) = self.config.start_time {
-            cmd.args(&["-ss", start]);
+            Self::validate_time_string(start)?;
+            cmd.arg("-ss")
+               .arg(start);
         }
         if let Some(ref duration) = self.config.duration {
-            cmd.args(&["-t", duration]);
+            Self::validate_time_string(duration)?;
+            cmd.arg("-t")
+               .arg(duration);
         }
         
-        cmd.args(&[
-            "-vf", &format!("fps={}", info.fps),
-            frames_dir.join("frame_%06d.png").to_str()
-                .ok_or_else(|| SrganError::InvalidInput("Invalid frames directory path".to_string()))?,
-        ]);
+        // Use validated FPS value
+        let safe_fps = Self::validate_fps(info.fps)?;
+        cmd.arg("-vf")
+           .arg(format!("fps={}", safe_fps))
+           .arg(&safe_output_pattern);
+        
+        // Add security constraints
+        cmd.stdin(Stdio::null())
+           .stdout(Stdio::null())
+           .stderr(Stdio::null());
         
         let status = cmd.status()
             .map_err(|e| SrganError::InvalidInput(
@@ -311,35 +491,57 @@ impl VideoProcessor {
     
     /// Reassemble frames into video
     fn reassemble_video(&self, frames_dir: &Path, info: &VideoInfo) -> Result<(), SrganError> {
+        let safe_frames_pattern = self.validate_and_canonicalize_path(&frames_dir.join("frame_%06d.png"))?;
+        let safe_output_path = self.validate_and_canonicalize_path(&self.config.output_path)?;
+        
+        info!("Reassembling video to: {:?}", safe_output_path);
+        
+        // Log the reassembly command
+        let mut log_args = vec!["-framerate", "X", "-i", "frames"];
+        if self.config.preserve_audio {
+            log_args.extend(&["-i", "input", "-map", "0:v:0", "-map", "1:a?", "-c:a", "copy"]);
+        }
+        log_args.extend(&["-c:v", "codec", "-crf", "X", "-pix_fmt", "yuv420p"]);
+        
+        Self::log_command_execution("ffmpeg", &log_args, Some(&safe_output_path));
+        
         let mut cmd = Command::new("ffmpeg");
         
-        // Input frames
-        cmd.args(&[
-            "-framerate", &info.fps.to_string(),
-            "-i", frames_dir.join("frame_%06d.png").to_str()
-                .ok_or_else(|| SrganError::InvalidInput("Invalid frames directory path".to_string()))?,
-        ]);
+        // Input frames with validated FPS
+        let safe_fps = Self::validate_fps(info.fps)?;
+        cmd.arg("-framerate")
+           .arg(safe_fps.to_string())
+           .arg("-i")
+           .arg(&safe_frames_pattern);
         
         // Add original audio if requested
         if self.config.preserve_audio {
-            cmd.args(&[
-                "-i", self.config.input_path.to_str()
-                    .ok_or_else(|| SrganError::InvalidInput("Invalid input path".to_string()))?,
-                "-map", "0:v:0",
-                "-map", "1:a?",
-                "-c:a", "copy",
-            ]);
+            let safe_input_path = self.validate_and_canonicalize_path(&self.config.input_path)?;
+            cmd.arg("-i")
+               .arg(&safe_input_path)
+               .arg("-map")
+               .arg("0:v:0")
+               .arg("-map")
+               .arg("1:a?")
+               .arg("-c:a")
+               .arg("copy");
         }
         
-        // Video codec settings
-        cmd.args(&[
-            "-c:v", self.config.codec.to_ffmpeg_codec(),
-            "-crf", &format!("{}", self.config.quality.to_crf()),
-            "-pix_fmt", "yuv420p",
-        ]);
+        // Video codec settings (already safe as they come from enums)
+        cmd.arg("-c:v")
+           .arg(self.config.codec.to_ffmpeg_codec())
+           .arg("-crf")
+           .arg(self.config.quality.to_crf().to_string())
+           .arg("-pix_fmt")
+           .arg("yuv420p");
         
         // Output file
-        cmd.arg(&self.config.output_path);
+        cmd.arg(&safe_output_path);
+        
+        // Add security constraints
+        cmd.stdin(Stdio::null())
+           .stdout(Stdio::null())
+           .stderr(Stdio::null());
         
         let status = cmd.status()
             .map_err(|e| SrganError::InvalidInput(
@@ -362,6 +564,36 @@ impl VideoProcessor {
             codec: self.config.codec,
             quality: self.config.quality,
         }
+    }
+    
+    /// Validate time string format (HH:MM:SS or seconds)
+    fn validate_time_string(time: &str) -> Result<(), SrganError> {
+        // Allow formats: "HH:MM:SS", "MM:SS", "SS" or decimal seconds
+        let valid_chars = "0123456789:.";
+        if !time.chars().all(|c| valid_chars.contains(c)) {
+            return Err(SrganError::InvalidInput(
+                format!("Invalid time format: {}", time)
+            ));
+        }
+        
+        // Check for reasonable length
+        if time.len() > 12 {
+            return Err(SrganError::InvalidInput(
+                "Time string too long".to_string()
+            ));
+        }
+        
+        Ok(())
+    }
+    
+    /// Validate FPS value
+    fn validate_fps(fps: f32) -> Result<f32, SrganError> {
+        if fps <= 0.0 || fps > 240.0 || !fps.is_finite() {
+            return Err(SrganError::InvalidInput(
+                format!("Invalid FPS value: {}", fps)
+            ));
+        }
+        Ok(fps)
     }
 }
 
@@ -386,23 +618,48 @@ pub struct VideoStats {
 
 /// Extract a single frame from video for preview
 pub fn extract_preview_frame(video_path: &Path, time: Option<&str>) -> Result<DynamicImage, SrganError> {
-    let temp_file = std::env::temp_dir().join("preview_frame.png");
+    // Validate input path
+    VideoProcessor::validate_path(video_path)?;
+    
+    // Canonicalize the path
+    let safe_video_path = video_path.canonicalize()
+        .map_err(|e| SrganError::InvalidInput(format!("Invalid video path: {}", e)))?;
+    
+    let temp_file = std::env::temp_dir().join(format!("preview_frame_{}.png", 
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()));
+    
+    // Log the preview extraction command
+    let mut log_args = vec!["-i"];
+    if time.is_some() {
+        log_args.extend(&["-ss", "time"]);
+    }
+    log_args.extend(&["-vframes", "1", "-y"]);
+    
+    VideoProcessor::log_command_execution("ffmpeg", &log_args, Some(&safe_video_path));
     
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(&["-i", video_path.to_str()
-        .ok_or_else(|| SrganError::InvalidInput("Invalid video path".to_string()))?]);
+    cmd.arg("-i")
+       .arg(&safe_video_path);
     
     // Extract frame at specified time or first frame
     if let Some(t) = time {
-        cmd.args(&["-ss", t]);
+        VideoProcessor::validate_time_string(t)?;
+        cmd.arg("-ss")
+           .arg(t);
     }
     
-    cmd.args(&[
-        "-vframes", "1",
-        "-y",  // Overwrite
-        temp_file.to_str()
-            .ok_or_else(|| SrganError::InvalidInput("Invalid temp file path".to_string()))?,
-    ]);
+    cmd.arg("-vframes")
+       .arg("1")
+       .arg("-y")  // Overwrite
+       .arg(&temp_file);
+    
+    // Add security constraints
+    cmd.stdin(Stdio::null())
+       .stdout(Stdio::null())
+       .stderr(Stdio::null());
     
     let status = cmd.status()
         .map_err(|e| SrganError::InvalidInput(
