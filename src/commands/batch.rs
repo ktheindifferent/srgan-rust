@@ -1,13 +1,16 @@
 use crate::error::{Result, SrganError};
+use crate::parallel::ThreadSafeNetwork;
 use crate::validation;
 use crate::UpscalingNetwork;
 use clap::ArgMatches;
-use indicatif::{MultiProgress, ProgressBar};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{error, info, warn};
+use rayon::prelude::*;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
@@ -28,14 +31,29 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     let skip_existing = app_m.is_present("SKIP_EXISTING");
     let pattern = app_m.value_of("PATTERN").unwrap_or("*.{png,jpg,jpeg,gif,bmp}");
     
+    // Parse thread configuration
+    let num_threads = app_m.value_of("THREADS")
+        .and_then(|s| s.parse::<usize>().ok());
+    
+    // Configure thread pool if specified
+    if let Some(threads) = num_threads {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build_global()
+            .unwrap_or_else(|e| {
+                warn!("Failed to set thread pool size: {}. Using default.", e);
+            });
+    }
+    
     // Load network
     let factor = parse_factor(app_m);
     let network = load_network(app_m, factor)?;
-    let network = Arc::new(network);
+    let thread_safe_network = Arc::new(ThreadSafeNetwork::new(network));
 
-    info!("Starting batch processing with {} upscaling", network);
+    info!("Starting batch processing");
     info!("Input directory: {}", input_path.display());
     info!("Output directory: {}", output_path.display());
+    info!("Mode: {}", if parallel { "Parallel" } else { "Sequential" });
 
     // Collect image files
     let image_files = collect_image_files(&input_path, pattern, recursive)?;
@@ -49,9 +67,9 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
 
     // Create progress tracking
     let multi_progress = Arc::new(MultiProgress::new());
-    let overall_pb = multi_progress.add(ProgressBar::new(image_files.len() as u64));
+    let overall_pb = Arc::new(multi_progress.add(ProgressBar::new(image_files.len() as u64)));
     overall_pb.set_style(
-        indicatif::ProgressStyle::default_bar()
+        ProgressStyle::default_bar()
             .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
             .expect("Failed to set progress bar template")
             .progress_chars("#>-"),
@@ -59,36 +77,50 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     overall_pb.set_message("Processing images");
 
     let start_time = Instant::now();
-    let errors = Arc::new(Mutex::new(Vec::new()));
-    let successful = Arc::new(Mutex::new(0usize));
+    let errors = Arc::new(Mutex::new(Vec::<(PathBuf, String)>::new()));
+    let successful = Arc::new(AtomicUsize::new(0));
 
-    // Process images sequentially
-    // TODO: Parallel processing is disabled due to Send/Sync constraints in UpscalingNetwork
     if parallel {
-        warn!("Parallel processing is currently disabled due to technical constraints");
-        warn!("Processing images sequentially instead...");
-    }
-    
-    for image_file in &image_files {
-        process_single_image(
-            image_file,
-            &input_path,
-            &output_path,
-            &network,
-            skip_existing,
-            &overall_pb,
-            &errors,
-            &successful,
-        );
+        let thread_count = num_threads.unwrap_or_else(|| rayon::current_num_threads());
+        info!("Using parallel processing with {} threads", thread_count);
+        
+        // Process images in parallel
+        image_files.par_iter().for_each(|image_file| {
+            process_single_image_parallel(
+                image_file,
+                &input_path,
+                &output_path,
+                &thread_safe_network,
+                skip_existing,
+                &overall_pb,
+                &errors,
+                &successful,
+            );
+        });
+    } else {
+        info!("Using sequential processing");
+        
+        // Process images sequentially
+        for image_file in &image_files {
+            let network = thread_safe_network.get_network();
+            process_single_image(
+                image_file,
+                &input_path,
+                &output_path,
+                &network,
+                skip_existing,
+                &overall_pb,
+                &errors,
+                &successful,
+            );
+        }
     }
 
     overall_pb.finish_with_message("Batch processing complete");
 
     // Report results
     let duration = start_time.elapsed();
-    let successful_count = successful.lock()
-        .map(|count| *count)
-        .unwrap_or(0);
+    let successful_count = successful.load(Ordering::Relaxed);
     let error_list = errors.lock()
         .map_err(|_| SrganError::InvalidInput("Failed to acquire error lock".to_string()))?;
     
@@ -113,11 +145,11 @@ fn process_single_image(
     image_path: &Path,
     input_base: &Path,
     output_base: &Path,
-    network: &Arc<UpscalingNetwork>,
+    network: &UpscalingNetwork,
     skip_existing: bool,
-    progress: &ProgressBar,
+    progress: &Arc<ProgressBar>,
     errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
-    successful: &Arc<Mutex<usize>>,
+    successful: &Arc<AtomicUsize>,
 ) {
     // Calculate relative path and output path
     let relative_path = image_path
@@ -153,9 +185,68 @@ fn process_single_image(
     // Process the image
     match process_image(image_path, &output_path, network) {
         Ok(_) => {
-            if let Ok(mut count) = successful.lock() {
-                *count += 1;
+            successful.fetch_add(1, Ordering::Relaxed);
+            progress.inc(1);
+            progress.set_message(format!("Processed: {}", relative_path.display()));
+        }
+        Err(e) => {
+            if let Ok(mut errs) = errors.lock() {
+                errs.push((image_path.to_path_buf(), e.to_string()));
             }
+            progress.inc(1);
+            progress.set_message(format!("Failed: {}", relative_path.display()));
+        }
+    }
+}
+
+fn process_single_image_parallel(
+    image_path: &Path,
+    input_base: &Path,
+    output_base: &Path,
+    thread_safe_network: &Arc<ThreadSafeNetwork>,
+    skip_existing: bool,
+    progress: &Arc<ProgressBar>,
+    errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
+    successful: &Arc<AtomicUsize>,
+) {
+    // Get a network for this thread
+    let network = thread_safe_network.get_network();
+    
+    // Calculate relative path and output path
+    let relative_path = image_path
+        .strip_prefix(input_base)
+        .unwrap_or(image_path);
+    
+    let output_path = output_base.join(relative_path);
+    let output_path = output_path.with_extension("png"); // Always save as PNG
+
+    // Skip if exists and skip_existing is true
+    if skip_existing && output_path.exists() {
+        progress.inc(1);
+        progress.set_message(format!("Skipped: {}", relative_path.display()));
+        return;
+    }
+
+    // Create output directory if needed
+    if let Some(parent) = output_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                if let Ok(mut errs) = errors.lock() {
+                    errs.push((
+                        image_path.to_path_buf(),
+                        format!("Failed to create output directory: {}", e),
+                    ));
+                }
+                progress.inc(1);
+                return;
+            }
+        }
+    }
+
+    // Process the image
+    match process_image(image_path, &output_path, &network) {
+        Ok(_) => {
+            successful.fetch_add(1, Ordering::Relaxed);
             progress.inc(1);
             progress.set_message(format!("Processed: {}", relative_path.display()));
         }
