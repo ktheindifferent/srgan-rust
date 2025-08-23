@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::fs;
+use std::sync::atomic::{AtomicU64, Ordering};
 use image::{DynamicImage, ImageFormat};
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
@@ -159,8 +160,12 @@ impl VideoProcessor {
                 dir.push(format!("srgan_video_{}", 
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()));
+                        .map(|d| d.as_secs())
+                        .unwrap_or_else(|_| {
+                            use std::sync::atomic::{AtomicU64, Ordering};
+                            static COUNTER: AtomicU64 = AtomicU64::new(0);
+                            COUNTER.fetch_add(1, Ordering::SeqCst)
+                        })));
                 dir
             });
         
@@ -182,7 +187,8 @@ impl VideoProcessor {
                 "-count_packets",
                 "-show_entries", "stream=r_frame_rate,nb_read_packets,width,height",
                 "-of", "csv=p=0",
-                self.config.input_path.to_str().unwrap(),
+                self.config.input_path.to_str()
+                    .ok_or_else(|| SrganError::InvalidInput("Invalid input path".to_string()))?,
             ])
             .output()
             .map_err(|e| SrganError::InvalidInput(
@@ -199,8 +205,11 @@ impl VideoProcessor {
         // Parse frame rate (e.g., "30/1" or "30")
         let fps = if parts[0].contains('/') {
             let fps_parts: Vec<&str> = parts[0].split('/').collect();
-            fps_parts[0].parse::<f32>().unwrap_or(30.0) / 
-                fps_parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0)
+            let numerator = fps_parts[0].parse::<f32>().unwrap_or(30.0);
+            let denominator = fps_parts.get(1)
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(1.0);
+            numerator / denominator
         } else {
             parts[0].parse().unwrap_or(30.0)
         };
@@ -218,7 +227,9 @@ impl VideoProcessor {
         let frames_dir = temp_dir.join("frames");
         
         let mut cmd = Command::new("ffmpeg");
-        cmd.args(&["-i", self.config.input_path.to_str().unwrap()]);
+        let input_path_str = self.config.input_path.to_str()
+            .ok_or_else(|| SrganError::InvalidInput("Invalid input path".to_string()))?;
+        cmd.args(&["-i", input_path_str]);
         
         // Add time range if specified
         if let Some(ref start) = self.config.start_time {
@@ -230,7 +241,8 @@ impl VideoProcessor {
         
         cmd.args(&[
             "-vf", &format!("fps={}", info.fps),
-            frames_dir.join("frame_%06d.png").to_str().unwrap(),
+            frames_dir.join("frame_%06d.png").to_str()
+                .ok_or_else(|| SrganError::InvalidInput("Invalid frames directory path".to_string()))?,
         ]);
         
         let status = cmd.status()
@@ -264,7 +276,7 @@ impl VideoProcessor {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} frames ({eta})")
-                    .unwrap()
+                    .unwrap_or_else(|_| ProgressStyle::default_bar())
                     .progress_chars("=>-")
             );
             
@@ -288,7 +300,9 @@ impl VideoProcessor {
         let upscaled = network.upscale_image(&img)?;
         
         // Save processed frame
-        let output_path = output_dir.join(input_path.file_name().unwrap());
+        let file_name = input_path.file_name()
+            .ok_or_else(|| SrganError::InvalidInput("Invalid input frame filename".to_string()))?;
+        let output_path = output_dir.join(file_name);
         upscaled.save(&output_path)
             .map_err(|e| SrganError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         
@@ -301,14 +315,16 @@ impl VideoProcessor {
         
         // Input frames
         cmd.args(&[
-            "-framerate", &format!("{}", info.fps),
-            "-i", frames_dir.join("frame_%06d.png").to_str().unwrap(),
+            "-framerate", &info.fps.to_string(),
+            "-i", frames_dir.join("frame_%06d.png").to_str()
+                .ok_or_else(|| SrganError::InvalidInput("Invalid frames directory path".to_string()))?,
         ]);
         
         // Add original audio if requested
         if self.config.preserve_audio {
             cmd.args(&[
-                "-i", self.config.input_path.to_str().unwrap(),
+                "-i", self.config.input_path.to_str()
+                    .ok_or_else(|| SrganError::InvalidInput("Invalid input path".to_string()))?,
                 "-map", "0:v:0",
                 "-map", "1:a?",
                 "-c:a", "copy",
@@ -373,7 +389,8 @@ pub fn extract_preview_frame(video_path: &Path, time: Option<&str>) -> Result<Dy
     let temp_file = std::env::temp_dir().join("preview_frame.png");
     
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(&["-i", video_path.to_str().unwrap()]);
+    cmd.args(&["-i", video_path.to_str()
+        .ok_or_else(|| SrganError::InvalidInput("Invalid video path".to_string()))?]);
     
     // Extract frame at specified time or first frame
     if let Some(t) = time {
@@ -383,7 +400,8 @@ pub fn extract_preview_frame(video_path: &Path, time: Option<&str>) -> Result<Dy
     cmd.args(&[
         "-vframes", "1",
         "-y",  // Overwrite
-        temp_file.to_str().unwrap(),
+        temp_file.to_str()
+            .ok_or_else(|| SrganError::InvalidInput("Invalid temp file path".to_string()))?,
     ]);
     
     let status = cmd.status()

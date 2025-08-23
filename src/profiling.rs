@@ -109,7 +109,9 @@ impl MemoryProfiler {
 
     pub fn report(&self) -> MemoryReport {
         let usage = self.get_current_usage();
-        let allocations = ALLOCATIONS.lock().unwrap().clone();
+        let allocations = ALLOCATIONS.lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_else(|_| HashMap::new());
 
         MemoryReport {
             usage,
@@ -207,7 +209,9 @@ pub fn track_allocation(category: &str, bytes: usize) {
         return;
     }
 
-    let mut allocations = ALLOCATIONS.lock().unwrap();
+    let Ok(mut allocations) = ALLOCATIONS.lock() else {
+        return;
+    };
     let stats = allocations.entry(category.to_string()).or_default();
     stats.count += 1;
     stats.total_bytes += bytes;
@@ -222,7 +226,9 @@ pub fn track_deallocation(category: &str, bytes: usize) {
         return;
     }
 
-    let mut allocations = ALLOCATIONS.lock().unwrap();
+    let Ok(mut allocations) = ALLOCATIONS.lock() else {
+        return;
+    };
     if let Some(stats) = allocations.get_mut(category) {
         stats.current_bytes = stats.current_bytes.saturating_sub(bytes);
     }

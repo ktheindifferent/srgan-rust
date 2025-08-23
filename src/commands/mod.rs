@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod benchmark;
 pub mod convert_model;
+pub mod parallel_benchmark;
 pub mod downscale;
 pub mod generate_config;
 pub mod psnr;
@@ -17,6 +18,7 @@ pub mod video;
 pub use self::batch::batch_upscale;
 pub use self::benchmark::benchmark;
 pub use self::convert_model::{convert_model, list_formats};
+pub use self::parallel_benchmark::run_parallel_benchmark;
 pub use self::downscale::downscale;
 pub use self::generate_config::{generate_config, train_with_config};
 pub use self::psnr::psnr;
