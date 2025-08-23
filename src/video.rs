@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicU64, Ordering};
 use image::{DynamicImage, ImageFormat};
 use rayon::prelude::*;
 use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
@@ -92,7 +93,7 @@ impl VideoProcessor {
         // Check if ffmpeg is available
         if !Self::check_ffmpeg()? {
             return Err(SrganError::InvalidInput(
-                "FFmpeg is required for video processing. Please install ffmpeg.".to_string()
+                "FFmpeg is required for video processing. Please install ffmpeg.".into()
             ));
         }
         
@@ -124,7 +125,7 @@ impl VideoProcessor {
     /// Process the video
     pub fn process(&mut self) -> Result<(), SrganError> {
         let network = self.network.as_ref()
-            .ok_or_else(|| SrganError::InvalidInput("No network loaded".to_string()))?;
+            .ok_or_else(|| SrganError::InvalidInput("No network loaded".into()))?;
         
         info!("Processing video: {:?}", self.config.input_path);
         
@@ -246,7 +247,7 @@ impl VideoProcessor {
             .status()
             .map(|status| status.success())
             .map_err(|_| SrganError::InvalidInput(
-                "Failed to run ffmpeg. Please ensure ffmpeg is installed.".to_string()
+                "Failed to run ffmpeg. Please ensure ffmpeg is installed.".into()
             ))
     }
     
@@ -297,8 +298,12 @@ impl VideoProcessor {
                 dir.push(format!("srgan_video_{}", 
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()));
+                        .map(|d| d.as_secs())
+                        .unwrap_or_else(|_| {
+                            use std::sync::atomic::{AtomicU64, Ordering};
+                            static COUNTER: AtomicU64 = AtomicU64::new(0);
+                            COUNTER.fetch_add(1, Ordering::SeqCst)
+                        })));
                 dir
             });
         
@@ -350,14 +355,17 @@ impl VideoProcessor {
         let parts: Vec<&str> = info_str.trim().split(',').collect();
         
         if parts.len() < 4 {
-            return Err(SrganError::InvalidInput("Failed to parse video info".to_string()));
+            return Err(SrganError::InvalidInput("Failed to parse video info".into()));
         }
         
         // Parse frame rate (e.g., "30/1" or "30")
         let fps = if parts[0].contains('/') {
             let fps_parts: Vec<&str> = parts[0].split('/').collect();
-            fps_parts[0].parse::<f32>().unwrap_or(30.0) / 
-                fps_parts.get(1).and_then(|s| s.parse::<f32>().ok()).unwrap_or(1.0)
+            let numerator = fps_parts[0].parse::<f32>().unwrap_or(30.0);
+            let denominator = fps_parts.get(1)
+                .and_then(|s| s.parse::<f32>().ok())
+                .unwrap_or(1.0);
+            numerator / denominator
         } else {
             parts[0].parse().unwrap_or(30.0)
         };
@@ -423,7 +431,7 @@ impl VideoProcessor {
             ))?;
         
         if !status.success() {
-            return Err(SrganError::InvalidInput("Frame extraction failed".to_string()));
+            return Err(SrganError::InvalidInput("Frame extraction failed".into()));
         }
         
         Ok(())
@@ -448,7 +456,7 @@ impl VideoProcessor {
             pb.set_style(
                 ProgressStyle::default_bar()
                     .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} frames ({eta})")
-                    .unwrap()
+                    .unwrap_or_else(|_| ProgressStyle::default_bar())
                     .progress_chars("=>-")
             );
             
@@ -472,7 +480,9 @@ impl VideoProcessor {
         let upscaled = network.upscale_image(&img)?;
         
         // Save processed frame
-        let output_path = output_dir.join(input_path.file_name().unwrap());
+        let file_name = input_path.file_name()
+            .ok_or_else(|| SrganError::InvalidInput("Invalid input frame filename".to_string()))?;
+        let output_path = output_dir.join(file_name);
         upscaled.save(&output_path)
             .map_err(|e| SrganError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
         
@@ -539,7 +549,7 @@ impl VideoProcessor {
             ))?;
         
         if !status.success() {
-            return Err(SrganError::InvalidInput("Video reassembly failed".to_string()));
+            return Err(SrganError::InvalidInput("Video reassembly failed".into()));
         }
         
         Ok(())
@@ -657,7 +667,7 @@ pub fn extract_preview_frame(video_path: &Path, time: Option<&str>) -> Result<Dy
         ))?;
     
     if !status.success() {
-        return Err(SrganError::InvalidInput("Preview extraction failed".to_string()));
+        return Err(SrganError::InvalidInput("Preview extraction failed".into()));
     }
     
     let img = image::open(&temp_file)

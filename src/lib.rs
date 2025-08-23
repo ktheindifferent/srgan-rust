@@ -15,6 +15,7 @@ extern crate smallvec;
 extern crate xz2;
 
 pub mod aligned_crop;
+pub mod benchmarks;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -25,6 +26,7 @@ pub mod gpu;
 pub mod logging;
 pub mod model_converter;
 pub mod network;
+pub mod parallel;
 pub mod psnr;
 pub mod profiling;
 pub mod training;
@@ -71,7 +73,7 @@ pub fn old_network_from_bytes(data: &[u8]) -> ::std::result::Result<NetworkDescr
 	let decompressed = XzDecoder::new(data)
 		.bytes()
 		.collect::<::std::result::Result<Vec<_>, _>>()
-		.map_err(|e| e.to_string())?;
+		.map_err(|e| format!("{}", e))?;
 	let unshuffled = unshuffle(&decompressed, 4);
 	let deserialized: NetworkDescriptionOld =
 		deserialize(&unshuffled).map_err(|e| format!("NetworkDescription decoding failed: {}", e))?;
@@ -93,7 +95,7 @@ pub fn network_from_bytes(data: &[u8]) -> ::std::result::Result<NetworkDescripti
 	let decompressed = XzDecoder::new(data)
 		.bytes()
 		.collect::<::std::result::Result<Vec<_>, _>>()
-		.map_err(|e| e.to_string())?;
+		.map_err(|e| format!("{}", e))?;
 	let unshuffled = unshuffle(&decompressed, 4);
 	let deserialized: NetworkDescription =
 		deserialize(&unshuffled).map_err(|e| format!("NetworkDescription decoding failed: {}", e))?;
@@ -123,7 +125,7 @@ pub fn network_to_bytes(mut desc: NetworkDescription, quantise: bool) -> ::std::
 	let compressed = XzEncoder::new(shuffled.as_slice(), 7)
 		.bytes()
 		.collect::<::std::result::Result<Vec<_>, _>>()
-		.map_err(|e| e.to_string())?;
+		.map_err(|e| format!("{}", e))?;
 	Ok(compressed)
 }
 
@@ -161,7 +163,7 @@ pub fn read(file: &mut File) -> ImageResult<ArrayD<f32>> {
 		.map_err(|err| image::ImageError::IoError(err))?;
 	let input_image = image::load_from_memory(&vec)?;
 	let input = image_to_data(&input_image);
-	let shape = input.shape().to_vec();
+	let shape = input.shape();
 	let input = input.into_shape(IxDyn(&[1, shape[0], shape[1], shape[2]]))
 		.map_err(|_| image::ImageError::DimensionError)?;
 	Ok(input)
@@ -190,7 +192,9 @@ pub fn downscale(image: ArrayD<f32>, factor: usize, sRGB: bool) -> alumina::grap
 	let mut subgraph = graph.subgraph(&[input_id.clone()], &[output_id.clone()])?;
 	let result = subgraph.execute(vec![image])?;
 
-	Ok(result.into_map().remove(&output_id).unwrap())
+	// This unwrap is safe because we control the graph structure and know output_id exists
+	Ok(result.into_map().remove(&output_id)
+		.expect("Output node should exist in the graph result"))
 }
 
 /// A container type for upscaling networks
@@ -210,9 +214,9 @@ impl UpscalingNetwork {
 				desc.log_depth,
 				desc.global_node_factor as usize,
 			)
-			.map_err(|e| e.to_string())?,
+			.map_err(|e| format!("{}", e))?,
 			parameters: desc.parameters,
-			display: display.to_string(),
+			display: display.into(),
 		})
 	}
 	
@@ -241,9 +245,9 @@ impl UpscalingNetwork {
 						desc.log_depth,
 						desc.global_node_factor as usize,
 					)
-					.map_err(|e| e.to_string())?,
+					.map_err(|e| format!("{}", e))?,
 					parameters: desc.parameters,
-					display: "neural net trained on natural images with an L1 loss".to_string(),
+					display: "neural net trained on natural images with an L1 loss".into(),
 				})
 			},
 			"anime" => {
@@ -255,15 +259,15 @@ impl UpscalingNetwork {
 						desc.log_depth,
 						desc.global_node_factor as usize,
 					)
-					.map_err(|e| e.to_string())?,
+					.map_err(|e| format!("{}", e))?,
 					parameters: desc.parameters,
-					display: "neural net trained on animation images with an L1 loss".to_string(),
+					display: "neural net trained on animation images with an L1 loss".into(),
 				})
 			},
 			"bilinear" => Ok(UpscalingNetwork {
-				graph: bilinear_net(bilinear_factor.unwrap_or(4)).map_err(|e| e.to_string())?,
+				graph: bilinear_net(bilinear_factor.unwrap_or(4)).map_err(|e| format!("{}", e))?,
 				parameters: Vec::new(),
-				display: "bilinear interpolation".to_string(),
+				display: "bilinear interpolation".into(),
 			}),
 			_ => Err(format!("Unsupported network type. Could not parse: {}", label)),
 		}
@@ -334,7 +338,7 @@ impl UpscalingNetwork {
 		
 		// Upscale
 		let result = upscale(tensor, self)
-			.map_err(|e| crate::error::SrganError::GraphExecution(e.to_string()))?;
+			.map_err(|e| crate::error::SrganError::GraphExecution(format!("{}", e)))?;
 		
 		// Convert back to image
 		let upscaled_img = data_to_image(result.view());
@@ -368,5 +372,7 @@ pub fn upscale(image: ArrayD<f32>, network: &UpscalingNetwork) -> alumina::graph
 	let mut subgraph = graph.subgraph(&subgraph_inputs, &[output_id.clone()])?;
 	let result = subgraph.execute(input_vec)?;
 
-	Ok(result.into_map().remove(&output_id).unwrap())
+	// This unwrap is safe because we control the graph structure and know output_id exists
+	Ok(result.into_map().remove(&output_id)
+		.expect("Output node should exist in the graph result"))
 }

@@ -76,7 +76,7 @@ impl ModelConverter {
         let model_file = path.join("saved_model.pb");
         if !model_file.exists() {
             return Err(SrganError::InvalidInput(
-                "TensorFlow SavedModel format requires saved_model.pb".to_string()
+                "TensorFlow SavedModel format requires saved_model.pb".into()
             ));
         }
 
@@ -123,7 +123,7 @@ impl ModelConverter {
     /// Convert loaded model to SRGAN-Rust format
     pub fn convert_to_srgan(&self) -> Result<UpscalingNetwork, SrganError> {
         let metadata = self.metadata.as_ref()
-            .ok_or_else(|| SrganError::InvalidInput("No model loaded".to_string()))?;
+            .ok_or_else(|| SrganError::InvalidInput("No model loaded".into()))?;
 
         // Create network with converted parameters
         let network = UpscalingNetwork::new_from_config(self.config.clone())?;
@@ -147,7 +147,7 @@ impl ModelConverter {
     pub fn auto_detect_format(path: &Path) -> Result<ModelFormat, SrganError> {
         let extension = path.extension()
             .and_then(|e| e.to_str())
-            .ok_or_else(|| SrganError::InvalidInput("No file extension".to_string()))?;
+            .ok_or_else(|| SrganError::InvalidInput("No file extension".into()))?;
 
         match extension.to_lowercase().as_str() {
             "pth" | "pt" => Ok(ModelFormat::PyTorch),
@@ -165,18 +165,18 @@ impl ModelConverter {
         // This would need a proper pickle parser in production
         // For now, create placeholder metadata
         let mut metadata = ModelMetadata {
-            format: "pytorch".to_string(),
-            version: "1.0".to_string(),
+            format: "pytorch".into(),
+            version: "1.0".into(),
             input_shape: vec![1, 3, 256, 256],
             output_shape: vec![1, 3, 1024, 1024],
-            architecture: "srgan".to_string(),
+            architecture: "srgan".into(),
             parameters: HashMap::new(),
         };
 
         // Extract layer weights (simplified)
         // In reality, would parse pickle format
-        metadata.parameters.insert("conv1.weight".to_string(), vec![0.1; 64 * 3 * 9 * 9]);
-        metadata.parameters.insert("conv1.bias".to_string(), vec![0.0; 64]);
+        metadata.parameters.insert("conv1.weight".into(), vec![0.1; 64 * 3 * 9 * 9]);
+        metadata.parameters.insert("conv1.bias".into(), vec![0.0; 64]);
         
         self.metadata = Some(metadata);
         Ok(())
@@ -186,11 +186,11 @@ impl ModelConverter {
     fn parse_tensorflow_model(&mut self, path: &Path) -> Result<(), SrganError> {
         // This would need protobuf parsing in production
         let metadata = ModelMetadata {
-            format: "tensorflow".to_string(),
-            version: "2.0".to_string(),
+            format: "tensorflow".into(),
+            version: "2.0".into(),
             input_shape: vec![1, 256, 256, 3],  // Note: TF uses NHWC format
             output_shape: vec![1, 1024, 1024, 3],
-            architecture: "srgan".to_string(),
+            architecture: "srgan".into(),
             parameters: HashMap::new(),
         };
         
@@ -202,11 +202,11 @@ impl ModelConverter {
     fn parse_onnx_model(&mut self, data: &[u8]) -> Result<(), SrganError> {
         // Would need ONNX protobuf parser
         let metadata = ModelMetadata {
-            format: "onnx".to_string(),
-            version: "1.0".to_string(),
+            format: "onnx".into(),
+            version: "1.0".into(),
             input_shape: vec![1, 3, 256, 256],
             output_shape: vec![1, 3, 1024, 1024],
-            architecture: "srgan".to_string(),
+            architecture: "srgan".into(),
             parameters: HashMap::new(),
         };
         
@@ -218,11 +218,11 @@ impl ModelConverter {
     fn parse_keras_h5(&mut self, path: &Path) -> Result<(), SrganError> {
         // Would need HDF5 parser
         let metadata = ModelMetadata {
-            format: "keras".to_string(),
-            version: "2.0".to_string(),
+            format: "keras".into(),
+            version: "2.0".into(),
             input_shape: vec![256, 256, 3],  // Keras doesn't include batch dim
             output_shape: vec![1024, 1024, 3],
-            architecture: "srgan".to_string(),
+            architecture: "srgan".into(),
             parameters: HashMap::new(),
         };
         
@@ -251,14 +251,14 @@ impl ModelConverter {
         
         match format {
             "pytorch" => {
-                mapping.insert("conv1.weight".to_string(), "initial_conv".to_string());
-                mapping.insert("conv1.bias".to_string(), "initial_conv_bias".to_string());
-                mapping.insert("res_blocks.0.conv1.weight".to_string(), "res_block_0_conv1".to_string());
+                mapping.insert("conv1.weight".into(), "initial_conv".into());
+                mapping.insert("conv1.bias".into(), "initial_conv_bias".into());
+                mapping.insert("res_blocks.0.conv1.weight".into(), "res_block_0_conv1".into());
                 // Add more mappings...
             },
             "tensorflow" => {
-                mapping.insert("conv2d/kernel:0".to_string(), "initial_conv".to_string());
-                mapping.insert("conv2d/bias:0".to_string(), "initial_conv_bias".to_string());
+                mapping.insert("conv2d/kernel:0".into(), "initial_conv".into());
+                mapping.insert("conv2d/bias:0".into(), "initial_conv_bias".into());
                 // Add more mappings...
             },
             _ => {}
@@ -303,10 +303,10 @@ impl ModelConverter {
         let mut stats = HashMap::new();
         
         if let Some(ref metadata) = self.metadata {
-            stats.insert("format".to_string(), metadata.format.clone());
-            stats.insert("version".to_string(), metadata.version.clone());
-            stats.insert("architecture".to_string(), metadata.architecture.clone());
-            stats.insert("param_count".to_string(), 
+            stats.insert("format".into(), metadata.format.clone());
+            stats.insert("version".into(), metadata.version.clone());
+            stats.insert("architecture".into(), metadata.architecture.clone());
+            stats.insert("param_count".into(), 
                 metadata.parameters.values().map(|v| v.len()).sum::<usize>().to_string());
         }
         
@@ -333,7 +333,7 @@ pub fn batch_convert_models(input_dir: &Path, output_dir: &Path, format: Option<
                 .unwrap_or("unknown");
             
             let result = convert_single_model(&path, output_dir, format);
-            results.push((file_name.to_string(), result.is_ok()));
+            results.push((file_name.into(), result.is_ok()));
             
             if let Err(e) = result {
                 warn!("Failed to convert {}: {}", file_name, e);
@@ -407,16 +407,16 @@ mod tests {
     fn test_conversion_stats() {
         let mut converter = ModelConverter::new();
         converter.metadata = Some(ModelMetadata {
-            format: "test".to_string(),
-            version: "1.0".to_string(),
+            format: "test".into(),
+            version: "1.0".into(),
             input_shape: vec![1, 3, 256, 256],
             output_shape: vec![1, 3, 1024, 1024],
-            architecture: "srgan".to_string(),
+            architecture: "srgan".into(),
             parameters: HashMap::new(),
         });
         
         let stats = converter.get_conversion_stats();
-        assert_eq!(stats.get("format"), Some(&"test".to_string()));
-        assert_eq!(stats.get("version"), Some(&"1.0".to_string()));
+        assert_eq!(stats.get("format"), Some(&"test".into()));
+        assert_eq!(stats.get("version"), Some(&"1.0".into()));
     }
 }

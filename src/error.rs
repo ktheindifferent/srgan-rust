@@ -66,7 +66,7 @@ impl From<String> for SrganError {
 
 impl From<alumina::graph::Error> for SrganError {
 	fn from(err: alumina::graph::Error) -> Self {
-		SrganError::GraphConstruction(err.to_string())
+		SrganError::GraphConstruction(format!("{}", err))
 	}
 }
 

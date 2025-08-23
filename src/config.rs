@@ -28,15 +28,15 @@ impl NetworkConfig {
 	pub fn validate(&self) -> Result<()> {
 		if self.factor == 0 {
 			return Err(SrganError::InvalidParameter(
-				"Factor must be greater than 0".to_string(),
+				"Factor must be greater than 0".into(),
 			));
 		}
 		if self.width == 0 {
-			return Err(SrganError::InvalidParameter("Width must be greater than 0".to_string()));
+			return Err(SrganError::InvalidParameter("Width must be greater than 0".into()));
 		}
 		if self.log_depth == 0 {
 			return Err(SrganError::InvalidParameter(
-				"Log depth must be greater than 0".to_string(),
+				"Log depth must be greater than 0".into(),
 			));
 		}
 		Ok(())

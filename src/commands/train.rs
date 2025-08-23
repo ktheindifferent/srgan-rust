@@ -34,14 +34,14 @@ pub fn train(app_m: &ArgMatches) -> Result<()> {
 		scale,
 		training_config.srgb_downscale,
 	)
-	.map_err(|e| SrganError::GraphConstruction(e.to_string()))?;
+	.map_err(|e| SrganError::GraphConstruction(format!("{}", e)))?;
 
 	let training_folder = app_m
 		.value_of("TRAINING_FOLDER")
-		.ok_or_else(|| SrganError::InvalidParameter("No training folder specified".to_string()))?;
+		.ok_or_else(|| SrganError::InvalidParameter("No training folder specified".into()))?;
 	let param_file_path = app_m
 		.value_of("PARAMETER_FILE")
-		.ok_or_else(|| SrganError::InvalidParameter("No parameter file specified".to_string()))?;
+		.ok_or_else(|| SrganError::InvalidParameter("No parameter file specified".into()))?;
 	
 	// Validate training folder and output path
 	validation::validate_directory(training_folder)?;
@@ -72,7 +72,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.factor(
 			factor
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Factor must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Factor must be an integer".into()))?,
 		);
 	}
 
@@ -80,7 +80,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.width(
 			width
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Width must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Width must be an integer".into()))?,
 		);
 	}
 
@@ -88,7 +88,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.log_depth(
 			log_depth
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Log depth must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Log depth must be an integer".into()))?,
 		);
 	}
 
@@ -101,7 +101,7 @@ fn parse_training_config(app_m: &ArgMatches) -> Result<TrainingConfig> {
 	if let Some(lr) = app_m.value_of("LEARNING_RATE") {
 		builder = builder.learning_rate(
 			lr.parse()
-				.map_err(|_| SrganError::InvalidParameter("Learning rate must be a number".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Learning rate must be a number".into()))?,
 		);
 	}
 
@@ -109,7 +109,7 @@ fn parse_training_config(app_m: &ArgMatches) -> Result<TrainingConfig> {
 		builder = builder.patch_size(
 			patch_size
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Patch size must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Patch size must be an integer".into()))?,
 		);
 	}
 
@@ -117,7 +117,7 @@ fn parse_training_config(app_m: &ArgMatches) -> Result<TrainingConfig> {
 		builder = builder.batch_size(
 			batch_size
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Batch size must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Batch size must be an integer".into()))?,
 		);
 	}
 
