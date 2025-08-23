@@ -81,7 +81,7 @@ impl VideoProcessor {
         // Check if ffmpeg is available
         if !Self::check_ffmpeg()? {
             return Err(SrganError::InvalidInput(
-                "FFmpeg is required for video processing. Please install ffmpeg.".to_string()
+                "FFmpeg is required for video processing. Please install ffmpeg.".into()
             ));
         }
         
@@ -100,7 +100,7 @@ impl VideoProcessor {
     /// Process the video
     pub fn process(&mut self) -> Result<(), SrganError> {
         let network = self.network.as_ref()
-            .ok_or_else(|| SrganError::InvalidInput("No network loaded".to_string()))?;
+            .ok_or_else(|| SrganError::InvalidInput("No network loaded".into()))?;
         
         info!("Processing video: {:?}", self.config.input_path);
         
@@ -147,7 +147,7 @@ impl VideoProcessor {
             .status()
             .map(|status| status.success())
             .map_err(|_| SrganError::InvalidInput(
-                "Failed to run ffmpeg. Please ensure ffmpeg is installed.".to_string()
+                "Failed to run ffmpeg. Please ensure ffmpeg is installed.".into()
             ))
     }
     
@@ -193,7 +193,7 @@ impl VideoProcessor {
         let parts: Vec<&str> = info_str.trim().split(',').collect();
         
         if parts.len() < 4 {
-            return Err(SrganError::InvalidInput("Failed to parse video info".to_string()));
+            return Err(SrganError::InvalidInput("Failed to parse video info".into()));
         }
         
         // Parse frame rate (e.g., "30/1" or "30")
@@ -239,7 +239,7 @@ impl VideoProcessor {
             ))?;
         
         if !status.success() {
-            return Err(SrganError::InvalidInput("Frame extraction failed".to_string()));
+            return Err(SrganError::InvalidInput("Frame extraction failed".into()));
         }
         
         Ok(())
@@ -301,7 +301,7 @@ impl VideoProcessor {
         
         // Input frames
         cmd.args(&[
-            "-framerate", &info.fps.to_string(),
+            "-framerate", &format!("{}", info.fps),
             "-i", frames_dir.join("frame_%06d.png").to_str().unwrap(),
         ]);
         
@@ -318,7 +318,7 @@ impl VideoProcessor {
         // Video codec settings
         cmd.args(&[
             "-c:v", self.config.codec.to_ffmpeg_codec(),
-            "-crf", &self.config.quality.to_crf().to_string(),
+            "-crf", &format!("{}", self.config.quality.to_crf()),
             "-pix_fmt", "yuv420p",
         ]);
         
@@ -331,7 +331,7 @@ impl VideoProcessor {
             ))?;
         
         if !status.success() {
-            return Err(SrganError::InvalidInput("Video reassembly failed".to_string()));
+            return Err(SrganError::InvalidInput("Video reassembly failed".into()));
         }
         
         Ok(())
@@ -392,7 +392,7 @@ pub fn extract_preview_frame(video_path: &Path, time: Option<&str>) -> Result<Dy
         ))?;
     
     if !status.success() {
-        return Err(SrganError::InvalidInput("Preview extraction failed".to_string()));
+        return Err(SrganError::InvalidInput("Preview extraction failed".into()));
     }
     
     let img = image::open(&temp_file)
