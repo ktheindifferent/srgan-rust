@@ -30,7 +30,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
+            host: "127.0.0.1".into(),
             port: 8080,
             max_file_size: 50 * 1024 * 1024,  // 50MB
             cache_enabled: true,
@@ -137,7 +137,7 @@ impl RateLimiter {
             
             requests.push(now);
         } else {
-            self.requests.insert(client_id.to_string(), vec![now]);
+            self.requests.insert(client_id.into(), vec![now]);
         }
         
         true
@@ -169,7 +169,7 @@ impl WebServer {
     pub fn start(&self) -> Result<(), SrganError> {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
             .parse()
-            .map_err(|_| SrganError::InvalidInput("Invalid server address".to_string()))?;
+            .map_err(|_| SrganError::InvalidInput("Invalid server address".into()))?;
         
         info!("Starting web server at http://{}", addr);
         info!("API endpoints:");
@@ -303,7 +303,7 @@ impl WebServer {
                                 .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
                         )
                     }
-                    Err(e) => self.error_response(500, &e.to_string()),
+                    Err(e) => self.error_response(500, &format!("{}", e)),
                 }
             }
             Err(e) => self.error_response(400, &format!("Invalid request: {}", e)),
@@ -439,7 +439,7 @@ impl WebServer {
     /// Extract body from HTTP request
     fn extract_body(&self, request: &str) -> String {
         if let Some(idx) = request.find("\r\n\r\n") {
-            request[idx + 4..].to_string()
+            request[idx + 4..].into()
         } else {
             String::new()
         }
@@ -492,8 +492,8 @@ impl WebServer {
                 original_size,
                 upscaled_size,
                 processing_time_ms: processing_time,
-                format: format.to_string(),
-                model_used: request.model.unwrap_or_else(|| "natural".to_string()),
+                format: format.into(),
+                model_used: request.model.unwrap_or_else(|| "natural".into()),
             },
         })
     }
