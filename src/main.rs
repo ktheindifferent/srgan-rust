@@ -21,6 +21,7 @@ fn main() {
 		("upscale-gpu", Some(sub_m)) => commands::upscale_gpu(sub_m),
 		("list-gpus", Some(sub_m)) => commands::list_gpu_devices(sub_m),
 		("benchmark", Some(sub_m)) => commands::benchmark(sub_m),
+		("parallel-benchmark", Some(sub_m)) => commands::run_parallel_benchmark(sub_m),
 		("generate-config", Some(sub_m)) => commands::generate_config(sub_m),
 		("profile-memory", Some(sub_m)) => {
 			let input = sub_m.value_of("input").unwrap();

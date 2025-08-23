@@ -15,6 +15,7 @@ extern crate smallvec;
 extern crate xz2;
 
 pub mod aligned_crop;
+pub mod benchmarks;
 pub mod cli;
 pub mod commands;
 pub mod config;
@@ -25,6 +26,7 @@ pub mod gpu;
 pub mod logging;
 pub mod model_converter;
 pub mod network;
+pub mod parallel;
 pub mod psnr;
 pub mod profiling;
 pub mod training;
