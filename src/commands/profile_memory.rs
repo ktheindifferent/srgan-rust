@@ -27,7 +27,7 @@ pub fn profile_memory_command(
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} {msg} [{elapsed_precise}]")
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
     );
     pb.set_message("Profiling memory usage...");
     
@@ -118,7 +118,7 @@ pub fn analyze_memory_usage(
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.cyan} {msg} [{elapsed_precise}]")
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
     );
     pb.set_message(format!("Analyzing memory for '{}'...", command));
     

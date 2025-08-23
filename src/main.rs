@@ -23,19 +23,33 @@ fn main() {
 		("benchmark", Some(sub_m)) => commands::benchmark(sub_m),
 		("generate-config", Some(sub_m)) => commands::generate_config(sub_m),
 		("profile-memory", Some(sub_m)) => {
-			let input = sub_m.value_of("input").unwrap();
-			let model = sub_m.value_of("model");
-			let output = sub_m.value_of("output");
-			let report = sub_m.value_of("report");
-			let interval = sub_m.value_of("interval").unwrap().parse().unwrap_or(100);
-			commands::profile_memory_command(input, model, output, report, interval)
+			match sub_m.value_of("input") {
+				Some(input) => {
+					let model = sub_m.value_of("model");
+					let output = sub_m.value_of("output");
+					let report = sub_m.value_of("report");
+					let interval = sub_m.value_of("interval")
+						.and_then(|s| s.parse().ok())
+						.unwrap_or(100);
+					commands::profile_memory_command(input, model, output, report, interval)
+				},
+				None => Err(srgan_rust::error::SrganError::InvalidParameter("Missing input parameter".to_string()))
+			}
 		},
 		("analyze-memory", Some(sub_m)) => {
-			let command = sub_m.value_of("command").unwrap();
-			let args: Vec<&str> = sub_m.values_of("args").unwrap().collect();
-			let report = sub_m.value_of("report");
-			let interval = sub_m.value_of("interval").unwrap().parse().unwrap_or(100);
-			commands::analyze_memory_usage(command, args, report, interval)
+			match sub_m.value_of("command") {
+				Some(command) => {
+					let args: Vec<&str> = sub_m.values_of("args")
+						.map(|v| v.collect())
+						.unwrap_or_else(Vec::new);
+					let report = sub_m.value_of("report");
+					let interval = sub_m.value_of("interval")
+						.and_then(|s| s.parse().ok())
+						.unwrap_or(100);
+					commands::analyze_memory_usage(command, args, report, interval)
+				},
+				None => Err(srgan_rust::error::SrganError::InvalidParameter("Missing command parameter".to_string()))
+			}
 		},
 		_ => commands::upscale(&app_m),
 	};
