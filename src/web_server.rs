@@ -9,7 +9,7 @@ use image::{DynamicImage, ImageFormat, GenericImage};
 use serde::{Deserialize, Serialize};
 use log::{info, warn};
 use crate::error::SrganError;
-use crate::UpscalingNetwork;
+use crate::thread_safe_network::ThreadSafeNetwork;
 
 /// Web server configuration
 #[derive(Debug, Clone)]
@@ -95,7 +95,7 @@ pub struct JobInfo {
 /// Web API server
 pub struct WebServer {
     config: ServerConfig,
-    network: Arc<Mutex<UpscalingNetwork>>,
+    network: Arc<ThreadSafeNetwork>,
     cache: Arc<Mutex<HashMap<String, CachedResult>>>,
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     rate_limiter: Arc<Mutex<RateLimiter>>,
@@ -146,18 +146,18 @@ impl RateLimiter {
 impl WebServer {
     /// Create new web server
     pub fn new(config: ServerConfig) -> Result<Self, SrganError> {
-        // Load network
+        // Load network - no mutex needed!
         let network = if let Some(ref model_path) = config.model_path {
-            UpscalingNetwork::load_from_file(model_path)?
+            ThreadSafeNetwork::load_from_file(model_path)?
         } else {
-            UpscalingNetwork::load_builtin_natural()?
+            ThreadSafeNetwork::load_builtin_natural()?
         };
         
         let rate_limit = config.rate_limit.unwrap_or(60);
         
         Ok(Self {
             config,
-            network: Arc::new(Mutex::new(network)),
+            network: Arc::new(network),
             cache: Arc::new(Mutex::new(HashMap::new())),
             jobs: Arc::new(Mutex::new(HashMap::new())),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(rate_limit))),
@@ -330,6 +330,7 @@ impl WebServer {
                 let jobs = Arc::clone(&self.jobs);
                 let network = Arc::clone(&self.network);
                 let job_id_clone = job_id.clone();
+                let req_clone = req;
                 
                 thread::spawn(move || {
                     // Update status to processing
@@ -338,14 +339,30 @@ impl WebServer {
                         job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                     }
                     
-                    // Process image (simplified)
-                    // In real implementation, would process the image
-                    thread::sleep(Duration::from_secs(2));
+                    // Process image with thread-safe network
+                    let result = (|| -> Result<(), SrganError> {
+                        let image_data = base64::decode(&req_clone.image_data)
+                            .map_err(|e| SrganError::InvalidInput(format!("Invalid base64: {}", e)))?;
+                        let img = image::load_from_memory(&image_data)
+                            .map_err(|e| SrganError::Image(e))?;
+                        
+                        // Concurrent processing without mutex!
+                        let _upscaled = network.upscale_image(&img)?;
+                        Ok(())
+                    })();
                     
                     // Update job with result
                     if let Some(job) = jobs.lock().unwrap().get_mut(&job_id_clone) {
-                        job.status = JobStatus::Completed;
-                        job.result_url = Some(format!("/api/result/{}", job_id_clone));
+                        match result {
+                            Ok(_) => {
+                                job.status = JobStatus::Completed;
+                                job.result_url = Some(format!("/api/result/{}", job_id_clone));
+                            }
+                            Err(e) => {
+                                job.status = JobStatus::Failed(e.to_string());
+                                job.error = Some(e.to_string());
+                            }
+                        }
                         job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                     }
                 });
@@ -429,9 +446,8 @@ impl WebServer {
         
         let original_size = (img.width(), img.height());
         
-        // Upscale
-        let network = self.network.lock().unwrap();
-        let upscaled = network.upscale_image(&img)?;
+        // Upscale - no mutex lock needed!
+        let upscaled = self.network.upscale_image(&img)?;
         let upscaled_size = (upscaled.width(), upscaled.height());
         
         // Encode result

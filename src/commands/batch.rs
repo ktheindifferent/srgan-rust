@@ -1,11 +1,11 @@
 use crate::error::{Result, SrganError};
 use crate::validation;
-use crate::UpscalingNetwork;
+use crate::thread_safe_network::ThreadSafeNetwork;
 use clap::ArgMatches;
 use indicatif::{MultiProgress, ProgressBar};
 use log::{error, info, warn};
-use std::fs::{self, File};
-use std::io::Read;
+use rayon::prelude::*;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -28,7 +28,7 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     let skip_existing = app_m.is_present("SKIP_EXISTING");
     let pattern = app_m.value_of("PATTERN").unwrap_or("*.{png,jpg,jpeg,gif,bmp}");
     
-    // Load network
+    // Load thread-safe network - no Arc<Mutex<>> needed!
     let factor = parse_factor(app_m);
     let network = load_network(app_m, factor)?;
     let network = Arc::new(network);
@@ -62,24 +62,37 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     let errors = Arc::new(Mutex::new(Vec::new()));
     let successful = Arc::new(Mutex::new(0usize));
 
-    // Process images sequentially
-    // TODO: Parallel processing is disabled due to Send/Sync constraints in UpscalingNetwork
     if parallel {
-        warn!("Parallel processing is currently disabled due to technical constraints");
-        warn!("Processing images sequentially instead...");
-    }
-    
-    for image_file in &image_files {
-        process_single_image(
-            image_file,
-            &input_path,
-            &output_path,
-            &network,
-            skip_existing,
-            &overall_pb,
-            &errors,
-            &successful,
-        );
+        info!("Processing images in parallel using all available CPU cores");
+        
+        // Use rayon for parallel processing
+        image_files.par_iter().for_each(|image_file| {
+            process_single_image(
+                image_file,
+                &input_path,
+                &output_path,
+                &network,
+                skip_existing,
+                &overall_pb,
+                &errors,
+                &successful,
+            );
+        });
+    } else {
+        info!("Processing images sequentially");
+        
+        for image_file in &image_files {
+            process_single_image(
+                image_file,
+                &input_path,
+                &output_path,
+                &network,
+                skip_existing,
+                &overall_pb,
+                &errors,
+                &successful,
+            );
+        }
     }
 
     overall_pb.finish_with_message("Batch processing complete");
@@ -110,7 +123,7 @@ fn process_single_image(
     image_path: &Path,
     input_base: &Path,
     output_base: &Path,
-    network: &Arc<UpscalingNetwork>,
+    network: &Arc<ThreadSafeNetwork>,
     skip_existing: bool,
     progress: &ProgressBar,
     errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
@@ -160,12 +173,18 @@ fn process_single_image(
     }
 }
 
-fn process_image(input_path: &Path, output_path: &Path, network: &UpscalingNetwork) -> Result<()> {
-    let mut input_file = File::open(input_path)?;
-    let input = crate::read(&mut input_file)?;
-    let output = crate::upscale(input, network)?;
-    let mut output_file = File::create(output_path)?;
-    crate::save(output, &mut output_file)?;
+fn process_image(input_path: &Path, output_path: &Path, network: &ThreadSafeNetwork) -> Result<()> {
+    // Load image
+    let img = image::open(input_path)
+        .map_err(|e| SrganError::Image(e))?;
+    
+    // Upscale using thread-safe network
+    let upscaled = network.upscale_image(&img)?;
+    
+    // Save output (convert io::Error to string)
+    upscaled.save(output_path)
+        .map_err(|e| SrganError::Io(e))?;
+    
     Ok(())
 }
 
@@ -224,18 +243,12 @@ fn parse_factor(app_m: &ArgMatches) -> usize {
         .unwrap_or(4)
 }
 
-fn load_network(app_m: &ArgMatches, factor: usize) -> Result<UpscalingNetwork> {
+fn load_network(app_m: &ArgMatches, factor: usize) -> Result<ThreadSafeNetwork> {
     if let Some(file_str) = app_m.value_of("CUSTOM") {
         let param_path = validation::validate_input_file(file_str)?;
-        let mut param_file = File::open(&param_path)?;
-        let mut data = Vec::new();
-        param_file.read_to_end(&mut data)?;
-        let network_desc = crate::network_from_bytes(&data)?;
-        UpscalingNetwork::new(network_desc, "custom trained neural net")
-            .map_err(|e| SrganError::Network(e))
+        ThreadSafeNetwork::load_from_file(&param_path)
     } else {
         let param_type = app_m.value_of("PARAMETERS").unwrap_or("natural");
-        UpscalingNetwork::from_label(param_type, Some(factor))
-            .map_err(|e| SrganError::Network(e))
+        ThreadSafeNetwork::from_label(param_type, Some(factor))
     }
 }
