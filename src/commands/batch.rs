@@ -121,7 +121,8 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     // Report results
     let duration = start_time.elapsed();
     let successful_count = successful.load(Ordering::Relaxed);
-    let error_list = errors.lock().unwrap();
+    let error_list = errors.lock()
+        .map_err(|_| SrganError::InvalidInput("Failed to acquire error lock".to_string()))?;
     
     info!(
         "Processed {} of {} images in {:.2}s",
@@ -169,10 +170,12 @@ fn process_single_image(
     if let Some(parent) = output_path.parent() {
         if !parent.exists() {
             if let Err(e) = fs::create_dir_all(parent) {
-                errors.lock().unwrap().push((
+                if let Ok(mut errs) = errors.lock() {
+                    errs.push((
                     image_path.to_path_buf(),
-                    format!("Failed to create output directory: {}", e),
-                ));
+                        format!("Failed to create output directory: {}", e),
+                    ));
+                }
                 progress.inc(1);
                 return;
             }
@@ -187,7 +190,9 @@ fn process_single_image(
             progress.set_message(format!("Processed: {}", relative_path.display()));
         }
         Err(e) => {
-            errors.lock().unwrap().push((image_path.to_path_buf(), e.to_string()));
+            if let Ok(mut errs) = errors.lock() {
+                errs.push((image_path.to_path_buf(), e.to_string()));
+            }
             progress.inc(1);
             progress.set_message(format!("Failed: {}", relative_path.display()));
         }
@@ -226,10 +231,12 @@ fn process_single_image_parallel(
     if let Some(parent) = output_path.parent() {
         if !parent.exists() {
             if let Err(e) = fs::create_dir_all(parent) {
-                errors.lock().unwrap().push((
-                    image_path.to_path_buf(),
-                    format!("Failed to create output directory: {}", e),
-                ));
+                if let Ok(mut errs) = errors.lock() {
+                    errs.push((
+                        image_path.to_path_buf(),
+                        format!("Failed to create output directory: {}", e),
+                    ));
+                }
                 progress.inc(1);
                 return;
             }
@@ -244,7 +251,9 @@ fn process_single_image_parallel(
             progress.set_message(format!("Processed: {}", relative_path.display()));
         }
         Err(e) => {
-            errors.lock().unwrap().push((image_path.to_path_buf(), e.to_string()));
+            if let Ok(mut errs) = errors.lock() {
+                errs.push((image_path.to_path_buf(), e.to_string()));
+            }
             progress.inc(1);
             progress.set_message(format!("Failed: {}", relative_path.display()));
         }

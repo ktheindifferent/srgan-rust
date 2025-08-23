@@ -192,7 +192,9 @@ pub fn downscale(image: ArrayD<f32>, factor: usize, sRGB: bool) -> alumina::grap
 	let mut subgraph = graph.subgraph(&[input_id.clone()], &[output_id.clone()])?;
 	let result = subgraph.execute(vec![image])?;
 
-	Ok(result.into_map().remove(&output_id).unwrap())
+	// This unwrap is safe because we control the graph structure and know output_id exists
+	Ok(result.into_map().remove(&output_id)
+		.expect("Output node should exist in the graph result"))
 }
 
 /// A container type for upscaling networks
@@ -370,5 +372,7 @@ pub fn upscale(image: ArrayD<f32>, network: &UpscalingNetwork) -> alumina::graph
 	let mut subgraph = graph.subgraph(&subgraph_inputs, &[output_id.clone()])?;
 	let result = subgraph.execute(input_vec)?;
 
-	Ok(result.into_map().remove(&output_id).unwrap())
+	// This unwrap is safe because we control the graph structure and know output_id exists
+	Ok(result.into_map().remove(&output_id)
+		.expect("Output node should exist in the graph result"))
 }
