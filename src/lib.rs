@@ -29,6 +29,7 @@ pub mod network;
 pub mod parallel;
 pub mod psnr;
 pub mod profiling;
+pub mod thread_safe_network;
 pub mod training;
 pub mod utils;
 pub mod validation;
@@ -51,13 +52,13 @@ use byteorder::{BigEndian, ByteOrder};
 use ndarray::{ArrayD, Axis, IxDyn};
 use xz2::read::{XzDecoder, XzEncoder};
 
-use alumina::{
+pub use alumina::{
 	data::image_folder::{data_to_image, image_to_data},
 	graph::GraphDef,
 };
 
-const L1_SRGB_NATURAL_PARAMS: &[u8] = include_bytes!("res/L1_x4_UCID_x1node.rsr");
-const L1_SRGB_ANIME_PARAMS: &[u8] = include_bytes!("res/L1_x4_Anime_x1node.rsr");
+pub const L1_SRGB_NATURAL_PARAMS: &[u8] = include_bytes!("res/L1_x4_UCID_x1node.rsr");
+pub const L1_SRGB_ANIME_PARAMS: &[u8] = include_bytes!("res/L1_x4_Anime_x1node.rsr");
 
 /// A struct containing the network parameters and hyperparameters.
 #[derive(Debug, Serialize, Deserialize)]

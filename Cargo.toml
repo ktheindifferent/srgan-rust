@@ -26,6 +26,12 @@ serde_json = "1.0"
 rayon = "1.5"
 lazy_static = "1.4"
 ctrlc = "3.4"
+thread_local = "1.1"
 
 [dev-dependencies]
 tempfile = "3"
+criterion = "0.3"
+
+[[bench]]
+name = "thread_safety_bench"
+harness = false

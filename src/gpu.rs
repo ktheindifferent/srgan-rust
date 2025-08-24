@@ -1,6 +1,8 @@
 use crate::error::{Result, SrganError};
 use ndarray::ArrayD;
 use std::fmt;
+use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GpuBackend {
@@ -117,9 +119,24 @@ impl GpuCompute for ArrayD<f32> {
     }
 }
 
+/// Thread-safe GPU context that can be shared across threads
 pub struct GpuContext {
-    device: GpuDevice,
-    allocated_mb: usize,
+    device: Arc<GpuDevice>,
+    allocated_mb: Arc<RwLock<usize>>,
+    memory_pools: Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>,
+}
+
+/// Per-thread memory pool for GPU allocations
+struct MemoryPool {
+    allocations: Vec<GpuAllocation>,
+    total_size: usize,
+}
+
+/// Individual GPU memory allocation
+struct GpuAllocation {
+    size: usize,
+    #[allow(dead_code)]
+    data: Vec<u8>,  // Placeholder for actual GPU memory
 }
 
 impl GpuContext {
@@ -142,8 +159,9 @@ impl GpuContext {
         };
 
         Ok(GpuContext {
-            device,
-            allocated_mb: 0,
+            device: Arc::new(device),
+            allocated_mb: Arc::new(RwLock::new(0)),
+            memory_pools: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -152,14 +170,71 @@ impl GpuContext {
     }
 
     pub fn allocated_mb(&self) -> usize {
-        self.allocated_mb
+        *self.allocated_mb.read().unwrap()
     }
 
     pub fn available_mb(&self) -> usize {
-        if self.device.memory_mb > self.allocated_mb {
-            self.device.memory_mb - self.allocated_mb
+        let allocated = *self.allocated_mb.read().unwrap();
+        if self.device.memory_mb > allocated {
+            self.device.memory_mb - allocated
         } else {
             0
+        }
+    }
+    
+    /// Allocate memory for the current thread
+    pub fn allocate(&self, size_mb: usize) -> Result<()> {
+        let thread_id = std::thread::current().id();
+        let mut pools = self.memory_pools.write().unwrap();
+        let mut allocated = self.allocated_mb.write().unwrap();
+        
+        // Check if we have enough memory
+        if *allocated + size_mb > self.device.memory_mb {
+            return Err(SrganError::InvalidParameter(
+                format!("Insufficient GPU memory: requested {} MB, available {} MB", 
+                    size_mb, self.device.memory_mb - *allocated)
+            ));
+        }
+        
+        // Get or create thread pool
+        let pool = pools.entry(thread_id).or_insert(MemoryPool {
+            allocations: Vec::new(),
+            total_size: 0,
+        });
+        
+        // Add allocation
+        pool.allocations.push(GpuAllocation {
+            size: size_mb,
+            data: vec![0; size_mb * 1024 * 1024],  // Placeholder
+        });
+        pool.total_size += size_mb;
+        *allocated += size_mb;
+        
+        Ok(())
+    }
+    
+    /// Free memory for the current thread
+    pub fn free_thread_memory(&self) {
+        let thread_id = std::thread::current().id();
+        let mut pools = self.memory_pools.write().unwrap();
+        let mut allocated = self.allocated_mb.write().unwrap();
+        
+        if let Some(pool) = pools.remove(&thread_id) {
+            *allocated -= pool.total_size;
+        }
+    }
+}
+
+// Make GpuContext thread-safe
+unsafe impl Send for GpuContext {}
+unsafe impl Sync for GpuContext {}
+
+impl Clone for GpuContext {
+    fn clone(&self) -> Self {
+        GpuContext {
+            device: Arc::clone(&self.device),
+            allocated_mb: Arc::clone(&self.allocated_mb),
+            memory_pools: Arc::clone(&self.memory_pools),
         }
     }
 }

@@ -1,7 +1,6 @@
 use crate::error::{Result, SrganError};
-use crate::parallel::ThreadSafeNetwork;
+use crate::thread_safe_network::ThreadSafeNetwork;
 use crate::validation;
-use crate::UpscalingNetwork;
 use clap::ArgMatches;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{error, info, warn};
@@ -45,7 +44,7 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
             });
     }
     
-    // Load network
+    // Load thread-safe network - no Arc<Mutex<>> needed!
     let factor = parse_factor(app_m);
     let network = load_network(app_m, factor)?;
     let thread_safe_network = Arc::new(ThreadSafeNetwork::new(network));
@@ -145,7 +144,7 @@ fn process_single_image(
     image_path: &Path,
     input_base: &Path,
     output_base: &Path,
-    network: &UpscalingNetwork,
+    network: &ThreadSafeNetwork,
     skip_existing: bool,
     progress: &Arc<ProgressBar>,
     errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
@@ -260,12 +259,18 @@ fn process_single_image_parallel(
     }
 }
 
-fn process_image(input_path: &Path, output_path: &Path, network: &UpscalingNetwork) -> Result<()> {
-    let mut input_file = File::open(input_path)?;
-    let input = crate::read(&mut input_file)?;
-    let output = crate::upscale(input, network)?;
-    let mut output_file = File::create(output_path)?;
-    crate::save(output, &mut output_file)?;
+fn process_image(input_path: &Path, output_path: &Path, network: &ThreadSafeNetwork) -> Result<()> {
+    // Load image
+    let img = image::open(input_path)
+        .map_err(|e| SrganError::Image(e))?;
+    
+    // Upscale using thread-safe network
+    let upscaled = network.upscale_image(&img)?;
+    
+    // Save output (convert io::Error to string)
+    upscaled.save(output_path)
+        .map_err(|e| SrganError::Io(e))?;
+    
     Ok(())
 }
 
@@ -324,18 +329,12 @@ fn parse_factor(app_m: &ArgMatches) -> usize {
         .unwrap_or(4)
 }
 
-fn load_network(app_m: &ArgMatches, factor: usize) -> Result<UpscalingNetwork> {
+fn load_network(app_m: &ArgMatches, factor: usize) -> Result<ThreadSafeNetwork> {
     if let Some(file_str) = app_m.value_of("CUSTOM") {
         let param_path = validation::validate_input_file(file_str)?;
-        let mut param_file = File::open(&param_path)?;
-        let mut data = Vec::new();
-        param_file.read_to_end(&mut data)?;
-        let network_desc = crate::network_from_bytes(&data)?;
-        UpscalingNetwork::new(network_desc, "custom trained neural net")
-            .map_err(|e| SrganError::Network(e))
+        ThreadSafeNetwork::load_from_file(&param_path)
     } else {
         let param_type = app_m.value_of("PARAMETERS").unwrap_or("natural");
-        UpscalingNetwork::from_label(param_type, Some(factor))
-            .map_err(|e| SrganError::Network(e))
+        ThreadSafeNetwork::from_label(param_type, Some(factor))
     }
 }
