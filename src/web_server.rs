@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
@@ -29,7 +30,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".to_string(),
+            host: "127.0.0.1".into(),
             port: 8080,
             max_file_size: 50 * 1024 * 1024,  // 50MB
             cache_enabled: true,
@@ -136,7 +137,7 @@ impl RateLimiter {
             
             requests.push(now);
         } else {
-            self.requests.insert(client_id.to_string(), vec![now]);
+            self.requests.insert(client_id.into(), vec![now]);
         }
         
         true
@@ -168,7 +169,7 @@ impl WebServer {
     pub fn start(&self) -> Result<(), SrganError> {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
             .parse()
-            .map_err(|_| SrganError::InvalidInput("Invalid server address".to_string()))?;
+            .map_err(|_| SrganError::InvalidInput("Invalid server address".into()))?;
         
         info!("Starting web server at http://{}", addr);
         info!("API endpoints:");
@@ -256,7 +257,10 @@ impl WebServer {
         let response = serde_json::json!({
             "status": "healthy",
             "version": "0.2.0",
-            "uptime": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            "uptime": SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
         });
         
         format!(
@@ -295,10 +299,11 @@ impl WebServer {
                     Ok(response) => {
                         format!(
                             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
-                            serde_json::to_string(&response).unwrap()
+                            serde_json::to_string(&response)
+                                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
                         )
                     }
-                    Err(e) => self.error_response(500, &e.to_string()),
+                    Err(e) => self.error_response(500, &format!("{}", e)),
                 }
             }
             Err(e) => self.error_response(400, &format!("Invalid request: {}", e)),
@@ -318,13 +323,23 @@ impl WebServer {
                 let job = JobInfo {
                     id: job_id.clone(),
                     status: JobStatus::Pending,
-                    created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                    updated_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                    created_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    updated_at: SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
                     result_url: None,
                     error: None,
                 };
                 
-                self.jobs.lock().unwrap().insert(job_id.clone(), job.clone());
+                if let Ok(mut jobs) = self.jobs.lock() {
+                    jobs.insert(job_id.clone(), job.clone());
+                } else {
+                    return self.error_response(500, "Failed to acquire job lock");
+                }
                 
                 // Start processing in background
                 let jobs = Arc::clone(&self.jobs);
@@ -334,9 +349,14 @@ impl WebServer {
                 
                 thread::spawn(move || {
                     // Update status to processing
-                    if let Some(job) = jobs.lock().unwrap().get_mut(&job_id_clone) {
-                        job.status = JobStatus::Processing;
-                        job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+                    if let Ok(mut jobs_guard) = jobs.lock() {
+                        if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
+                            job.status = JobStatus::Processing;
+                            job.updated_at = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                        }
                     }
                     
                     // Process image with thread-safe network
@@ -352,18 +372,23 @@ impl WebServer {
                     })();
                     
                     // Update job with result
-                    if let Some(job) = jobs.lock().unwrap().get_mut(&job_id_clone) {
-                        match result {
-                            Ok(_) => {
-                                job.status = JobStatus::Completed;
-                                job.result_url = Some(format!("/api/result/{}", job_id_clone));
+                    if let Ok(mut jobs_guard) = jobs.lock() {
+                        if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
+                            match result {
+                                Ok(_) => {
+                                    job.status = JobStatus::Completed;
+                                    job.result_url = Some(format!("/api/result/{}", job_id_clone));
+                                }
+                                Err(e) => {
+                                    job.status = JobStatus::Failed(e.to_string());
+                                    job.error = Some(e.to_string());
+                                }
                             }
-                            Err(e) => {
-                                job.status = JobStatus::Failed(e.to_string());
-                                job.error = Some(e.to_string());
-                            }
+                            job.updated_at = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
                         }
-                        job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
                     }
                 });
                 
@@ -387,13 +412,18 @@ impl WebServer {
     fn handle_job_status(&self, path: &str) -> String {
         let job_id = path.trim_start_matches("/api/job/");
         
-        if let Some(job) = self.jobs.lock().unwrap().get(job_id) {
-            format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
-                serde_json::to_string(&job).unwrap()
-            )
+        if let Ok(jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get(job_id) {
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    serde_json::to_string(&job)
+                        .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+                )
+            } else {
+                self.error_response(404, "Job not found")
+            }
         } else {
-            self.error_response(404, "Job not found")
+            self.error_response(500, "Failed to acquire job lock")
         }
     }
     
@@ -426,7 +456,7 @@ impl WebServer {
     /// Extract body from HTTP request
     fn extract_body(&self, request: &str) -> String {
         if let Some(idx) = request.find("\r\n\r\n") {
-            request[idx + 4..].to_string()
+            request[idx + 4..].into()
         } else {
             String::new()
         }
@@ -465,7 +495,9 @@ impl WebServer {
         
         let encoded = base64::encode(&output);
         
-        let processing_time = start_time.elapsed().unwrap().as_millis() as u64;
+        let processing_time = start_time.elapsed()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         
         Ok(UpscaleResponse {
             success: true,
@@ -475,8 +507,8 @@ impl WebServer {
                 original_size,
                 upscaled_size,
                 processing_time_ms: processing_time,
-                format: format.to_string(),
-                model_used: request.model.unwrap_or_else(|| "natural".to_string()),
+                format: format.into(),
+                model_used: request.model.unwrap_or_else(|| "natural".into()),
             },
         })
     }
@@ -487,15 +519,21 @@ impl WebServer {
             return true;
         }
         
-        self.rate_limiter.lock().unwrap().check_rate_limit(client_id)
+        self.rate_limiter.lock()
+            .map(|mut limiter| limiter.check_rate_limit(client_id))
+            .unwrap_or(true)
     }
     
     /// Generate unique job ID
     fn generate_job_id(&self) -> String {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+            .map(|d| d.as_nanos())
+            .unwrap_or_else(|_| {
+                use std::sync::atomic::{AtomicU64, Ordering};
+                static COUNTER: AtomicU64 = AtomicU64::new(0);
+                COUNTER.fetch_add(1, Ordering::SeqCst) as u128
+            });
         
         format!("job_{}", timestamp)
     }
@@ -510,11 +548,13 @@ impl WebServer {
                 thread::sleep(Duration::from_secs(60));
                 
                 let now = SystemTime::now();
-                let mut cache = cache.lock().unwrap();
-                
-                cache.retain(|_, v| {
-                    now.duration_since(v.created_at).unwrap() < ttl
-                });
+                if let Ok(mut cache_guard) = cache.lock() {
+                    cache_guard.retain(|_, v| {
+                        now.duration_since(v.created_at)
+                            .map(|d| d < ttl)
+                            .unwrap_or(false)
+                    });
+                }
             }
         });
     }

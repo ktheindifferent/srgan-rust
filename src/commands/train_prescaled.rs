@@ -32,16 +32,16 @@ pub fn train_prescaled(app_m: &ArgMatches) -> Result<()> {
 		power,
 		scale,
 	)
-	.map_err(|e| SrganError::GraphConstruction(e.to_string()))?;
+	.map_err(|e| SrganError::GraphConstruction(format!("{}", e)))?;
 
 	let input_folders: Vec<&str> = app_m
 		.values_of("TRAINING_INPUT_FOLDER")
-		.ok_or_else(|| SrganError::InvalidParameter("No training input folder specified".to_string()))?
+		.ok_or_else(|| SrganError::InvalidParameter("No training input folder specified".into()))?
 		.collect();
 
 	let param_file_path = app_m
 		.value_of("PARAMETER_FILE")
-		.ok_or_else(|| SrganError::InvalidParameter("No parameter file specified".to_string()))?;
+		.ok_or_else(|| SrganError::InvalidParameter("No parameter file specified".into()))?;
 
 	let mut training_stream = DataLoader::create_prescaled_training_stream(
 		input_folders,
@@ -68,7 +68,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.factor(
 			factor
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Factor must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Factor must be an integer".into()))?,
 		);
 	}
 
@@ -76,7 +76,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.width(
 			width
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Width must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Width must be an integer".into()))?,
 		);
 	}
 
@@ -84,7 +84,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.log_depth(
 			log_depth
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Log depth must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Log depth must be an integer".into()))?,
 		);
 	}
 
@@ -92,7 +92,7 @@ fn parse_network_config(app_m: &ArgMatches) -> Result<NetworkConfig> {
 		builder = builder.global_node_factor(
 			global_size
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Global node factor must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Global node factor must be an integer".into()))?,
 		);
 	}
 
@@ -105,7 +105,7 @@ fn parse_training_config(app_m: &ArgMatches) -> Result<TrainingConfig> {
 	if let Some(lr) = app_m.value_of("LEARNING_RATE") {
 		builder = builder.learning_rate(
 			lr.parse()
-				.map_err(|_| SrganError::InvalidParameter("Learning rate must be a number".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Learning rate must be a number".into()))?,
 		);
 	}
 
@@ -113,7 +113,7 @@ fn parse_training_config(app_m: &ArgMatches) -> Result<TrainingConfig> {
 		builder = builder.patch_size(
 			patch_size
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Patch size must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Patch size must be an integer".into()))?,
 		);
 	}
 
@@ -121,7 +121,7 @@ fn parse_training_config(app_m: &ArgMatches) -> Result<TrainingConfig> {
 		builder = builder.batch_size(
 			batch_size
 				.parse()
-				.map_err(|_| SrganError::InvalidParameter("Batch size must be an integer".to_string()))?,
+				.map_err(|_| SrganError::InvalidParameter("Batch size must be an integer".into()))?,
 		);
 	}
 
@@ -203,12 +203,12 @@ fn create_prescaled_validation_stream(input_folders: Vec<&str>, recurse: bool) -
 
 	let mut folders_iter = input_folders.into_iter();
 	let first_folder = folders_iter.next()
-		.ok_or_else(|| SrganError::MissingFolder("At least one validation folder required".to_string()))?;
+		.ok_or_else(|| SrganError::MissingFolder("At least one validation folder required".into()))?;
 
 	let input_folder = Path::new(first_folder);
 	let mut target_folder = input_folder
 		.parent()
-		.ok_or_else(|| SrganError::InvalidInput("Don't use root as a validation folder".to_string()))?
+		.ok_or_else(|| SrganError::InvalidInput("Don't use root as a validation folder".into()))?
 		.to_path_buf();
 	target_folder.push("Base");
 

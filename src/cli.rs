@@ -21,6 +21,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_upscale_gpu_subcommand())
 		.subcommand(build_list_gpus_subcommand())
 		.subcommand(build_benchmark_subcommand())
+		.subcommand(build_parallel_benchmark_subcommand())
 		.subcommand(build_generate_config_subcommand())
 		.subcommand(build_profile_memory_subcommand())
 		.subcommand(build_analyze_memory_subcommand())
@@ -207,6 +208,21 @@ fn build_batch_subcommand() -> App<'static, 'static> {
 				.long("skip-existing")
 				.help("Skip images that already exist in the output directory")
 				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("THREADS")
+				.short("t")
+				.long("threads")
+				.help("Number of threads to use for parallel processing (default: all available)")
+				.value_name("N")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("CHUNK_SIZE")
+				.long("chunk-size")
+				.help("Number of images to process per batch (default: 10)")
+				.value_name("SIZE")
+				.empty_values(false),
 		)
 }
 
@@ -483,6 +499,44 @@ fn build_benchmark_subcommand() -> App<'static, 'static> {
 				.help("Compare with previous results file")
 				.short("c")
 				.long("compare"),
+		)
+}
+
+fn build_parallel_benchmark_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("parallel-benchmark")
+		.about("Benchmark parallel processing performance")
+		.arg(
+			Arg::with_name("BATCH_SIZES")
+				.help("Comma-separated list of batch sizes to test")
+				.short("b")
+				.long("batch-sizes")
+				.default_value("10,50,100")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("THREAD_COUNTS")
+				.help("Comma-separated list of thread counts to test")
+				.short("t")
+				.long("thread-counts")
+				.default_value("1,2,4,8")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("IMAGE_SIZE")
+				.help("Size of test images (e.g., 256 for 256x256)")
+				.short("s")
+				.long("image-size")
+				.default_value("256")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("MODEL")
+				.help("Model to use for benchmarking")
+				.short("m")
+				.long("model")
+				.possible_values(&["natural", "anime", "bilinear"])
+				.default_value("natural")
+				.empty_values(false),
 		)
 }
 

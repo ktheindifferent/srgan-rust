@@ -198,8 +198,10 @@ fn benchmark_model(
     
     // Calculate statistics
     let avg_time = total_time / iterations as u32;
-    let min_time = *times.iter().min().unwrap();
-    let max_time = *times.iter().max().unwrap();
+    let min_time = times.iter().min().copied()
+        .unwrap_or(Duration::from_secs(0));
+    let max_time = times.iter().max().copied()
+        .unwrap_or(Duration::from_secs(0));
     
     // Calculate throughput in megapixels per second
     let output_pixels = (output_width * output_height) as f64;
@@ -280,7 +282,8 @@ fn print_comparison(results: &[BenchmarkResult]) {
     
     // Find highest throughput
     if let Some(highest) = results.iter()
-        .max_by(|a, b| a.throughput_mpx_per_sec.partial_cmp(&b.throughput_mpx_per_sec).unwrap()) {
+        .max_by(|a, b| a.throughput_mpx_per_sec.partial_cmp(&b.throughput_mpx_per_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)) {
         println!("Highest throughput: {} ({:.2} MP/s)",
             highest.model_name,
             highest.throughput_mpx_per_sec
