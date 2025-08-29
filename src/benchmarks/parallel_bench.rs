@@ -163,6 +163,7 @@ pub fn print_benchmark_table(results: &[BenchmarkResult]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImage;
     
     #[test]
     fn test_generate_images() {

@@ -60,7 +60,7 @@ pub fn create_file_progress_bar(total_files: u64, message: &str) -> ProgressBar 
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{msg} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
-            .expect("Failed to set progress bar template")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("#>-"),
     );
     pb.set_message(message.to_string());
@@ -73,7 +73,7 @@ pub fn create_training_progress_bar(total_steps: u64) -> ProgressBar {
     pb.set_style(
         ProgressStyle::default_bar()
             .template("Training [{elapsed_precise}] [{bar:40.green/white}] Step {pos}/{len} | Loss: {msg}")
-            .expect("Failed to set progress bar template")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("=>-"),
     );
     pb
@@ -85,7 +85,7 @@ pub fn create_spinner(message: &str) -> ProgressBar {
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} {msg}")
-            .expect("Failed to set spinner template")
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
             .tick_chars("⠁⠂⠄⡀⢀⠠⠐⠈ "),
     );
     pb.set_message(message.to_string());

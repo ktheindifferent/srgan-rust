@@ -170,11 +170,13 @@ impl GpuContext {
     }
 
     pub fn allocated_mb(&self) -> usize {
-        *self.allocated_mb.read().unwrap()
+        *self.allocated_mb.read()
+            .expect("GPU memory tracking lock poisoned")
     }
 
     pub fn available_mb(&self) -> usize {
-        let allocated = *self.allocated_mb.read().unwrap();
+        let allocated = *self.allocated_mb.read()
+            .expect("GPU memory tracking lock poisoned");
         if self.device.memory_mb > allocated {
             self.device.memory_mb - allocated
         } else {
@@ -185,8 +187,10 @@ impl GpuContext {
     /// Allocate memory for the current thread
     pub fn allocate(&self, size_mb: usize) -> Result<()> {
         let thread_id = std::thread::current().id();
-        let mut pools = self.memory_pools.write().unwrap();
-        let mut allocated = self.allocated_mb.write().unwrap();
+        let mut pools = self.memory_pools.write()
+            .expect("GPU memory pools lock poisoned");
+        let mut allocated = self.allocated_mb.write()
+            .expect("GPU memory tracking lock poisoned");
         
         // Check if we have enough memory
         if *allocated + size_mb > self.device.memory_mb {
@@ -216,8 +220,10 @@ impl GpuContext {
     /// Free memory for the current thread
     pub fn free_thread_memory(&self) {
         let thread_id = std::thread::current().id();
-        let mut pools = self.memory_pools.write().unwrap();
-        let mut allocated = self.allocated_mb.write().unwrap();
+        let mut pools = self.memory_pools.write()
+            .expect("GPU memory pools lock poisoned");
+        let mut allocated = self.allocated_mb.write()
+            .expect("GPU memory tracking lock poisoned");
         
         if let Some(pool) = pools.remove(&thread_id) {
             *allocated -= pool.total_size;
@@ -305,11 +311,11 @@ mod tests {
 
     #[test]
     fn test_gpu_backend_from_str() {
-        assert_eq!(GpuBackend::from_str("cpu").unwrap(), GpuBackend::None);
-        assert_eq!(GpuBackend::from_str("cuda").unwrap(), GpuBackend::Cuda);
-        assert_eq!(GpuBackend::from_str("opencl").unwrap(), GpuBackend::OpenCL);
-        assert_eq!(GpuBackend::from_str("metal").unwrap(), GpuBackend::Metal);
-        assert_eq!(GpuBackend::from_str("vulkan").unwrap(), GpuBackend::Vulkan);
+        assert_eq!(GpuBackend::from_str("cpu").expect("Should parse cpu backend"), GpuBackend::None);
+        assert_eq!(GpuBackend::from_str("cuda").expect("Should parse cuda backend"), GpuBackend::Cuda);
+        assert_eq!(GpuBackend::from_str("opencl").expect("Should parse opencl backend"), GpuBackend::OpenCL);
+        assert_eq!(GpuBackend::from_str("metal").expect("Should parse metal backend"), GpuBackend::Metal);
+        assert_eq!(GpuBackend::from_str("vulkan").expect("Should parse vulkan backend"), GpuBackend::Vulkan);
         assert!(GpuBackend::from_str("invalid").is_err());
     }
 
@@ -322,7 +328,8 @@ mod tests {
 
     #[test]
     fn test_gpu_context_cpu() {
-        let context = GpuContext::new(GpuBackend::None).unwrap();
+        let context = GpuContext::new(GpuBackend::None)
+            .expect("Should create CPU backend context");
         assert_eq!(context.device().backend(), GpuBackend::None);
     }
 

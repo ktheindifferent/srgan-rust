@@ -400,32 +400,35 @@ mod tests {
     #[test]
     fn test_to_training_config() {
         let config_file = TrainingConfigFile::generate_default();
-        let training_config = config_file.to_training_config().unwrap();
+        let training_config = config_file.to_training_config()
+            .expect("Failed to convert to training config");
         assert_eq!(training_config.learning_rate, 0.003);
         assert_eq!(training_config.batch_size, 4);
     }
 
     #[test]
     fn test_save_load_toml() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("Failed to create temp dir for test");
         let path = dir.path().join("config.toml");
         
         let config = TrainingConfigFile::generate_default();
-        config.to_toml_file(&path).unwrap();
+        config.to_toml_file(&path).expect("Failed to save TOML config");
         
-        let loaded = TrainingConfigFile::from_toml_file(&path).unwrap();
+        let loaded = TrainingConfigFile::from_toml_file(&path)
+            .expect("Failed to load TOML config");
         assert_eq!(loaded.network.factor, config.network.factor);
     }
 
     #[test]
     fn test_save_load_json() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("Failed to create temp dir for test");
         let path = dir.path().join("config.json");
         
         let config = TrainingConfigFile::generate_default();
-        config.to_json_file(&path).unwrap();
+        config.to_json_file(&path).expect("Failed to save JSON config");
         
-        let loaded = TrainingConfigFile::from_json_file(&path).unwrap();
+        let loaded = TrainingConfigFile::from_json_file(&path)
+            .expect("Failed to load JSON config");
         assert_eq!(loaded.network.factor, config.network.factor);
     }
 }

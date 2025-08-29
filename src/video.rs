@@ -253,7 +253,7 @@ impl VideoProcessor {
     fn log_command_execution(command: &str, args: &[&str], input_file: Option<&Path>) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_secs();
         
         let args_str = args.join(" ");
@@ -627,7 +627,7 @@ pub fn extract_preview_frame(video_path: &Path, time: Option<&str>) -> Result<Dy
     let temp_file = std::env::temp_dir().join(format!("preview_frame_{}.png", 
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_else(|_| Duration::from_secs(0))
             .as_millis()));
     
     // Log the preview extraction command
