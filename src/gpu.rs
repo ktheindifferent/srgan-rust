@@ -225,7 +225,37 @@ impl GpuContext {
     }
 }
 
-// Make GpuContext thread-safe
+// SAFETY: GpuContext can be safely sent and shared between threads because:
+//
+// 1. All fields use thread-safe synchronization primitives:
+//    - `device: Arc<GpuDevice>` - Arc provides thread-safe reference counting
+//    - `allocated_mb: Arc<RwLock<usize>>` - RwLock ensures synchronized read/write access
+//    - `memory_pools: Arc<RwLock<HashMap<ThreadId, MemoryPool>>>` - Protected by RwLock
+//
+// 2. Memory Pool Isolation:
+//    - Each thread has its own MemoryPool indexed by ThreadId
+//    - No memory pool is shared between threads
+//    - RwLock ensures atomic updates to the HashMap
+//
+// 3. GpuDevice Safety:
+//    - GpuDevice contains only primitive types (backend enum, memory sizes)
+//    - No raw pointers or external resources
+//    - Immutable after construction (no interior mutability)
+//
+// 4. Allocation Safety:
+//    - All allocation/deallocation operations acquire write locks
+//    - Memory accounting (allocated_mb) is protected by RwLock
+//    - Thread-local pools prevent cross-thread memory corruption
+//
+// 5. No GPU API calls:
+//    - Currently, this is a placeholder implementation
+//    - When real GPU APIs are added, they must be thread-safe or protected
+//    - Most GPU APIs (CUDA, OpenCL) have their own thread safety guarantees
+//
+// Note: When implementing actual GPU backends, ensure that:
+// - GPU context handles are thread-safe or wrapped in synchronization primitives
+// - Memory operations are properly synchronized
+// - Command queues/streams are either thread-local or synchronized
 unsafe impl Send for GpuContext {}
 unsafe impl Sync for GpuContext {}
 

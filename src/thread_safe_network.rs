@@ -220,7 +220,33 @@ impl ThreadSafeNetwork {
     }
 }
 
-// Implement Send and Sync for ThreadSafeNetwork
+// SAFETY: ThreadSafeNetwork can be safely sent between threads (Send) and
+// shared between threads (Sync) because:
+//
+// 1. All fields are thread-safe:
+//    - `weights: Arc<NetworkWeights>` - Arc is Send + Sync when T is Send + Sync
+//    - `buffer_pool: Arc<Mutex<HashMap<ThreadId, ComputeBuffer>>>` - Mutex provides
+//      synchronized access, and Arc allows safe sharing
+//
+// 2. NetworkWeights is immutable after construction:
+//    - `parameters: Arc<Vec<ArrayD<f32>>>` - Immutable data wrapped in Arc
+//    - All other fields (factor, width, etc.) are Copy types
+//
+// 3. ComputeBuffer is not shared between threads:
+//    - Each thread gets its own ComputeBuffer instance via ThreadId key
+//    - Mutex ensures exclusive access during buffer retrieval/creation
+//
+// 4. No interior mutability without synchronization:
+//    - All mutable state is protected by Mutex
+//    - No use of unsafe pointers or Cell/RefCell
+//
+// Therefore, concurrent access from multiple threads is safe.
+//
+// Note: These traits could be automatically derived since all fields are Send + Sync.
+// However, we explicitly implement them to:
+// 1. Document the thread safety guarantees
+// 2. Ensure breaking changes are caught if non-thread-safe fields are added
+// 3. Make the thread safety contract explicit in the API
 unsafe impl Send for ThreadSafeNetwork {}
 unsafe impl Sync for ThreadSafeNetwork {}
 

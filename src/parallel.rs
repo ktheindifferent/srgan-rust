@@ -81,7 +81,30 @@ impl ThreadSafeNetwork {
     }
 }
 
-// Mark as Send and Sync since we clone the network for each thread
+// SAFETY: ThreadSafeNetwork in parallel.rs can be safely sent and shared between threads because:
+//
+// 1. Design Pattern - Clone-per-thread:
+//    - The struct contains only an `UpscalingNetwork` field
+//    - `get_network()` creates a deep clone for each thread
+//    - No shared mutable state between threads
+//
+// 2. Thread Isolation:
+//    - Each thread operates on its own independent copy of the network
+//    - No references or pointers are shared across thread boundaries
+//    - Cloning ensures complete data isolation
+//
+// 3. Underlying Type Safety:
+//    - UpscalingNetwork must implement Clone
+//    - The clone operation creates fully independent instances
+//    - No use of Rc, raw pointers, or other !Send/!Sync types
+//
+// 4. Rayon Integration:
+//    - Used with rayon's parallel iterators which require Send
+//    - Each closure gets its own network clone via `get_network()`
+//    - Results are collected safely through rayon's infrastructure
+//
+// This approach trades memory usage for simplicity and safety - each thread
+// has its own copy, eliminating any possibility of data races.
 unsafe impl Send for ThreadSafeNetwork {}
 unsafe impl Sync for ThreadSafeNetwork {}
 
