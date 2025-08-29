@@ -1,7 +1,7 @@
 use crate::parallel::ThreadSafeNetwork;
 use crate::UpscalingNetwork;
 use alumina::data::image_folder::image_to_data;
-use image::{DynamicImage, ImageBuffer, Rgb};
+use image::{DynamicImage, ImageBuffer, Rgb, GenericImage};
 use std::time::{Duration, Instant};
 
 /// Benchmark results for parallel processing
@@ -163,6 +163,7 @@ pub fn print_benchmark_table(results: &[BenchmarkResult]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImage;
     
     #[test]
     fn test_generate_images() {

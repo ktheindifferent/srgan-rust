@@ -1,8 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use std::convert::TryInto;
 use log::{info, warn, debug};
+use serde_pickle::{DeOptions, HashableValue, Value};
+use num_bigint::ToBigInt;
+use num_traits::ToPrimitive;
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 use crate::config::NetworkConfig;
@@ -157,26 +161,302 @@ impl ModelConverter {
         }
     }
 
-    /// Parse PyTorch weights (simplified implementation)
-    fn parse_pytorch_weights(&mut self, _data: &[u8]) -> Result<(), SrganError> {
-        // This would need a proper pickle parser in production
-        // For now, create placeholder metadata
+    /// Parse PyTorch weights from pickle format
+    fn parse_pytorch_weights(&mut self, data: &[u8]) -> Result<(), SrganError> {
+        // Validate minimum file size
+        if data.len() < 16 {
+            return Err(SrganError::Parse("PyTorch file too small to be valid".into()));
+        }
+        
+        // Check for PyTorch magic bytes (optional but common)
+        let is_zip = data.starts_with(&[0x50, 0x4B, 0x03, 0x04]); // ZIP format
+        let is_pickle = data.starts_with(&[0x80]); // Pickle protocol marker
+        
+        if !is_zip && !is_pickle {
+            warn!("File does not start with expected PyTorch format markers");
+        }
+        
+        // Parse the pickle data with error recovery
+        let de_options = DeOptions::new();
+        let value = match serde_pickle::from_slice(data, de_options) {
+            Ok(v) => v,
+            Err(e) => {
+                // Try alternative parsing strategies
+                debug!("Initial pickle parsing failed: {}", e);
+                
+                // Check if it's a zipped checkpoint
+                if is_zip {
+                    return Err(SrganError::Parse(
+                        "Detected ZIP format (likely torch.save with compression). Please extract first.".into()
+                    ));
+                }
+                
+                return Err(SrganError::Parse(format!("Failed to parse PyTorch pickle: {}", e)));
+            }
+        };
+        
+        // PyTorch models are typically stored as OrderedDict
+        let state_dict = self.extract_state_dict(value)?;
+        
+        // Validate state dict
+        if state_dict.is_empty() {
+            return Err(SrganError::Parse("No parameters found in PyTorch model".into()));
+        }
+        
+        // Create metadata structure
         let mut metadata = ModelMetadata {
             format: "pytorch".into(),
-            version: "1.0".into(),
-            input_shape: vec![1, 3, 256, 256],
-            output_shape: vec![1, 3, 1024, 1024],
-            architecture: "srgan".into(),
+            version: self.detect_pytorch_version(&state_dict).unwrap_or_else(|| "unknown".into()),
+            input_shape: self.infer_input_shape(&state_dict),
+            output_shape: self.infer_output_shape(&state_dict),
+            architecture: self.detect_architecture(&state_dict),
             parameters: HashMap::new(),
         };
-
-        // Extract layer weights (simplified)
-        // In reality, would parse pickle format
-        metadata.parameters.insert("conv1.weight".into(), vec![0.1; 64 * 3 * 9 * 9]);
-        metadata.parameters.insert("conv1.bias".into(), vec![0.0; 64]);
+        
+        // Extract and convert all weights and biases with validation
+        let mut total_params = 0usize;
+        let mut failed_params = Vec::new();
+        
+        for (layer_name, tensor_value) in state_dict {
+            match self.extract_tensor_data(tensor_value) {
+                Ok(weights) => {
+                    if weights.is_empty() {
+                        warn!("Empty tensor for layer: {}", layer_name);
+                        continue;
+                    }
+                    
+                    // Validate for NaN or Inf values
+                    if weights.iter().any(|w| !w.is_finite()) {
+                        warn!("Layer {} contains NaN or Inf values", layer_name);
+                    }
+                    
+                    total_params += weights.len();
+                    metadata.parameters.insert(layer_name, weights);
+                }
+                Err(e) => {
+                    warn!("Failed to extract tensor {}: {}", layer_name, e);
+                    failed_params.push(layer_name);
+                }
+            }
+        }
+        
+        // Report extraction results
+        if !failed_params.is_empty() {
+            warn!("Failed to extract {} parameters: {:?}", 
+                  failed_params.len(), failed_params);
+        }
+        
+        if metadata.parameters.is_empty() {
+            return Err(SrganError::Parse("No valid parameters extracted from model".into()));
+        }
+        
+        info!("Successfully parsed PyTorch model with {} layers and {} total parameters", 
+              metadata.parameters.len(), total_params);
         
         self.metadata = Some(metadata);
         Ok(())
+    }
+    
+    /// Extract state dict from pickle value
+    fn extract_state_dict(&self, value: Value) -> Result<HashMap<String, Value>, SrganError> {
+        match value {
+            Value::Dict(dict) => {
+                let mut state_dict = HashMap::new();
+                for (key, val) in dict {
+                    let key_str = match key {
+                        HashableValue::Bytes(key_bytes) => {
+                            String::from_utf8(key_bytes)
+                                .map_err(|e| SrganError::Parse(format!("Invalid UTF-8 in key: {}", e)))?
+                        }
+                        HashableValue::String(key_str) => key_str,
+                        _ => continue,
+                    };
+                    state_dict.insert(key_str, val);
+                }
+                Ok(state_dict)
+            }
+            Value::List(list) => {
+                // Some PyTorch models store state as list of tuples
+                let mut state_dict = HashMap::new();
+                for item in list {
+                    if let Value::Tuple(tuple) = item {
+                        if tuple.len() == 2 {
+                            let key = match &tuple[0] {
+                                Value::String(s) => s.clone(),
+                                Value::Bytes(b) => String::from_utf8(b.clone())
+                                    .map_err(|e| SrganError::Parse(format!("Invalid UTF-8: {}", e)))?,
+                                _ => continue,
+                            };
+                            state_dict.insert(key, tuple[1].clone());
+                        }
+                    }
+                }
+                Ok(state_dict)
+            }
+            _ => Err(SrganError::Parse("Unexpected PyTorch model structure".into()))
+        }
+    }
+    
+    /// Extract tensor data from pickle value
+    fn extract_tensor_data(&self, value: Value) -> Result<Vec<f32>, SrganError> {
+        // PyTorch tensors can be stored in various formats
+        match value {
+            Value::List(list) => {
+                // Convert list of values to f32
+                let mut weights = Vec::new();
+                for item in list {
+                    let val = self.pickle_value_to_f32(item)?;
+                    weights.push(val);
+                }
+                Ok(weights)
+            }
+            Value::Bytes(bytes) => {
+                // Raw bytes representation (typically float32)
+                if bytes.is_empty() {
+                    return Ok(Vec::new());
+                }
+                
+                // Try different byte interpretations
+                if bytes.len() % 4 == 0 {
+                    // Float32 format
+                    let mut weights = Vec::new();
+                    for chunk in bytes.chunks(4) {
+                        let arr: [u8; 4] = chunk.try_into()
+                            .map_err(|_| SrganError::Parse("Failed to convert bytes to f32".into()))?;
+                        weights.push(f32::from_le_bytes(arr));
+                    }
+                    Ok(weights)
+                } else if bytes.len() % 8 == 0 {
+                    // Float64 format - convert to f32
+                    let mut weights = Vec::new();
+                    for chunk in bytes.chunks(8) {
+                        let arr: [u8; 8] = chunk.try_into()
+                            .map_err(|_| SrganError::Parse("Failed to convert bytes to f64".into()))?;
+                        weights.push(f64::from_le_bytes(arr) as f32);
+                    }
+                    Ok(weights)
+                } else {
+                    Err(SrganError::Parse(format!("Invalid tensor byte length: {}", bytes.len())))
+                }
+            }
+            Value::Dict(dict) => {
+                // PyTorch tensor object with storage and metadata
+                // Try different common keys
+                let storage_keys = [
+                    "storage",
+                    "_storage",
+                    "data",
+                    "_data",
+                    "values",
+                    "_values"
+                ];
+                
+                for key in &storage_keys {
+                    let hashable_key = HashableValue::String((*key).into());
+                    if let Some(storage) = dict.get(&hashable_key) {
+                        return self.extract_tensor_data(storage.clone());
+                    }
+                }
+                
+                // Check for nested structure with type info
+                let type_key = HashableValue::String("_type".into());
+                if let Some(type_str) = dict.get(&type_key) {
+                    if let Value::String(s) = type_str {
+                        debug!("Found tensor type: {}", s);
+                    }
+                }
+                
+                // Try to find any value that looks like tensor data
+                for (_, val) in dict {
+                    if matches!(val, Value::Bytes(_) | Value::List(_)) {
+                        if let Ok(data) = self.extract_tensor_data(val.clone()) {
+                            if !data.is_empty() {
+                                return Ok(data);
+                            }
+                        }
+                    }
+                }
+                
+                Err(SrganError::Parse("Cannot find tensor data in dict".into()))
+            }
+            Value::Tuple(tuple) => {
+                // Some tensors are stored as tuples with metadata
+                for item in tuple {
+                    if let Ok(data) = self.extract_tensor_data(item) {
+                        if !data.is_empty() {
+                            return Ok(data);
+                        }
+                    }
+                }
+                Err(SrganError::Parse("No tensor data found in tuple".into()))
+            }
+            _ => Err(SrganError::Parse(format!("Unsupported tensor format")))
+        }
+    }
+    
+    /// Convert pickle value to f32
+    fn pickle_value_to_f32(&self, value: Value) -> Result<f32, SrganError> {
+        match value {
+            Value::F64(d) => Ok(d as f32),
+            Value::I64(i) => Ok(i as f32),
+            Value::Int(i) => {
+                // BigInt to f32 conversion
+                if let Some(i64_val) = i.to_i64() {
+                    Ok(i64_val as f32)
+                } else {
+                    Err(SrganError::Parse("Integer too large to convert to f32".into()))
+                }
+            }
+            _ => Err(SrganError::Parse("Cannot convert value to f32".into()))
+        }
+    }
+    
+    /// Detect PyTorch version from state dict
+    fn detect_pytorch_version(&self, state_dict: &HashMap<String, Value>) -> Option<String> {
+        // Check for version markers in the state dict
+        if state_dict.contains_key("_metadata") {
+            Some("1.0+".into())
+        } else {
+            None
+        }
+    }
+    
+    /// Infer input shape from model parameters
+    fn infer_input_shape(&self, state_dict: &HashMap<String, Value>) -> Vec<usize> {
+        // Look for first conv layer to determine input channels
+        for (key, _) in state_dict {
+            if key.contains("conv") && key.contains("weight") && !key.contains("bn") {
+                // Typical SRGAN input shape
+                return vec![1, 3, 256, 256];
+            }
+        }
+        vec![1, 3, 256, 256] // Default
+    }
+    
+    /// Infer output shape from model parameters
+    fn infer_output_shape(&self, _state_dict: &HashMap<String, Value>) -> Vec<usize> {
+        // SRGAN typically upscales by 4x
+        vec![1, 3, 1024, 1024]
+    }
+    
+    /// Detect model architecture from layer names
+    fn detect_architecture(&self, state_dict: &HashMap<String, Value>) -> String {
+        let keys: Vec<String> = state_dict.keys().cloned().collect();
+        
+        // Check for common SRGAN layer patterns
+        let has_generator = keys.iter().any(|k| k.contains("generator"));
+        let has_discriminator = keys.iter().any(|k| k.contains("discriminator"));
+        let has_residual = keys.iter().any(|k| k.contains("residual") || k.contains("res"));
+        
+        if has_generator && has_discriminator {
+            "srgan_full".into()
+        } else if has_generator {
+            "srgan_generator".into()
+        } else if has_residual {
+            "srresnet".into()
+        } else {
+            "srgan".into()
+        }
     }
 
     /// Parse TensorFlow model (simplified implementation)

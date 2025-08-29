@@ -25,12 +25,12 @@ pub fn train_network(
 		.beta2(training_constants::ADAM_BETA2)
 		.bias_correct(false);
 
-	let params = initial_params.unwrap_or_else(|| {
-		graph
+	let params = match initial_params {
+		Some(p) => p,
+		None => graph
 			.initialise_nodes(solver.parameters())
-			.map_err(|e| crate::error::SrganError::Training(format!("Could not initialise parameters: {}", e)))
-			.unwrap()
-	});
+			.map_err(|e| crate::error::SrganError::Training(format!("Could not initialise parameters: {}", e)))?
+	};
 
 	let checkpoint_path_owned = checkpoint_path.to_string();
 	let network_config_clone = network_config.clone();

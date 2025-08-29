@@ -87,7 +87,8 @@ impl ComputeBuffer {
         let result = subgraph.execute(input_vec)?;
         
         // Extract output
-        Ok(result.into_map().remove(&output_id).unwrap())
+        result.into_map().remove(&output_id)
+            .ok_or_else(|| alumina::graph::Error::from("Output node not found in result"))
     }
 }
 
@@ -174,7 +175,8 @@ impl ThreadSafeNetwork {
         
         // Try to get existing buffer for this thread
         let needs_creation = {
-            let pool = self.buffer_pool.lock().unwrap();
+            let pool = self.buffer_pool.lock()
+                .expect("Buffer pool mutex poisoned");
             !pool.contains_key(&thread_id)
         };
         
@@ -182,13 +184,16 @@ impl ThreadSafeNetwork {
         if needs_creation {
             let new_buffer = ComputeBuffer::new(&self.weights)
                 .map_err(|e| SrganError::GraphExecution(e.to_string()))?;
-            let mut pool = self.buffer_pool.lock().unwrap();
+            let mut pool = self.buffer_pool.lock()
+                .expect("Buffer pool mutex poisoned");
             pool.insert(thread_id, new_buffer);
         }
         
         // Execute inference
-        let mut pool = self.buffer_pool.lock().unwrap();
-        let buffer = pool.get_mut(&thread_id).unwrap();
+        let mut pool = self.buffer_pool.lock()
+            .expect("Buffer pool mutex poisoned");
+        let buffer = pool.get_mut(&thread_id)
+            .ok_or_else(|| SrganError::GraphExecution("Buffer not found for thread".to_string()))?;
         buffer.execute(input, &self.weights)
             .map_err(|e| SrganError::GraphExecution(e.to_string()))
     }
@@ -264,13 +269,15 @@ mod tests {
 
     #[test]
     fn test_thread_safe_network_creation() {
-        let network = ThreadSafeNetwork::load_builtin_natural().unwrap();
+        let network = ThreadSafeNetwork::load_builtin_natural()
+            .expect("Failed to load builtin network for test");
         assert_eq!(network.factor(), 4);
     }
 
     #[test]
     fn test_concurrent_inference() {
-        let network = Arc::new(ThreadSafeNetwork::load_builtin_natural().unwrap());
+        let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+            .expect("Failed to load builtin network for test"));
         let mut handles = vec![];
 
         // Spawn multiple threads to perform inference concurrently
@@ -287,14 +294,15 @@ mod tests {
 
         // Wait for all threads to complete
         for handle in handles {
-            handle.join().unwrap();
+            handle.join().expect("Thread panicked during concurrent inference test");
         }
     }
 
     #[test]
     fn test_no_mutex_required() {
         // This test verifies that the network can be used without wrapping in Arc<Mutex<>>
-        let network = ThreadSafeNetwork::load_builtin_natural().unwrap();
+        let network = ThreadSafeNetwork::load_builtin_natural()
+            .expect("Failed to load builtin network for test");
         let input = ArrayD::<f32>::zeros(vec![1, 32, 32, 3]);
         
         // Multiple sequential calls should work without mutex
