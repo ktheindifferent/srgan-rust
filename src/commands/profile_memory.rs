@@ -243,18 +243,18 @@ mod tests {
 
     #[test]
     fn test_memory_profiling_command() {
-        let dir = tempdir().unwrap();
+        let dir = tempdir().expect("Failed to create temp dir for test");
         let report_path = dir.path().join("test_profile.txt");
         
         let test_image = dir.path().join("test.png");
         let img = image::RgbImage::new(64, 64);
-        img.save(&test_image).unwrap();
+        img.save(&test_image).expect("Failed to save test image");
         
         let result = profile_memory_command(
-            test_image.to_str().unwrap(),
+            test_image.to_str().expect("Failed to convert path to str"),
             None,
             None,
-            Some(report_path.to_str().unwrap()),
+            Some(report_path.to_str().expect("Failed to convert path to str")),
             100,
         );
         

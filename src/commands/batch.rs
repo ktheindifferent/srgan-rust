@@ -68,7 +68,7 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     overall_pb.set_style(
         ProgressStyle::default_bar()
             .template("[{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta}) {msg}")
-            .expect("Failed to set progress bar template")
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("#>-"),
     );
     overall_pb.set_message("Processing images");

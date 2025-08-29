@@ -6,7 +6,8 @@ use crate::model_converter::{ModelConverter, ModelFormat, batch_convert_models};
 
 /// Convert external model to SRGAN-Rust format
 pub fn convert_model(matches: &ArgMatches) -> Result<(), SrganError> {
-    let input_path = Path::new(matches.value_of("input").unwrap());
+    let input_path = Path::new(matches.value_of("input")
+        .ok_or_else(|| SrganError::InvalidParameter("Input path is required".to_string()))?);
     let output_path = Path::new(matches.value_of("output").unwrap_or("converted_model.rsr"));
     
     // Parse format if specified

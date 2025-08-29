@@ -43,7 +43,8 @@ fn print_performance_analysis(results: &[crate::benchmarks::BenchmarkResult]) {
             .collect();
         
         if let Some(best) = batch_results.iter().max_by(|a, b| {
-            a.speedup.partial_cmp(&b.speedup).unwrap()
+            a.speedup.partial_cmp(&b.speedup)
+                .unwrap_or(std::cmp::Ordering::Equal)
         }) {
             println!("\nBatch size {}:", batch_size);
             println!("  Best configuration: {} threads", best.num_threads);

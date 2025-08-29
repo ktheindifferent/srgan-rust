@@ -7,8 +7,10 @@ use crate::video::{VideoProcessor, VideoConfig, VideoCodec, VideoQuality, extrac
 
 /// Upscale a video file frame by frame
 pub fn upscale_video(matches: &ArgMatches) -> Result<(), SrganError> {
-    let input_path = PathBuf::from(matches.value_of("input").unwrap());
-    let output_path = PathBuf::from(matches.value_of("output").unwrap());
+    let input_path = PathBuf::from(matches.value_of("input")
+        .ok_or_else(|| SrganError::InvalidParameter("Input path is required".to_string()))?);
+    let output_path = PathBuf::from(matches.value_of("output")
+        .ok_or_else(|| SrganError::InvalidParameter("Output path is required".to_string()))?);
     
     // Check input file exists
     if !input_path.exists() {
@@ -137,8 +139,10 @@ fn load_network_from_matches(matches: &ArgMatches) -> Result<UpscalingNetwork, S
 
 /// Batch process multiple videos
 pub fn batch_video(matches: &ArgMatches) -> Result<(), SrganError> {
-    let input_dir = Path::new(matches.value_of("input-dir").unwrap());
-    let output_dir = Path::new(matches.value_of("output-dir").unwrap());
+    let input_dir = Path::new(matches.value_of("input-dir")
+        .ok_or_else(|| SrganError::InvalidParameter("Input directory is required".to_string()))?);
+    let output_dir = Path::new(matches.value_of("output-dir")
+        .ok_or_else(|| SrganError::InvalidParameter("Output directory is required".to_string()))?);
     
     if !input_dir.is_dir() {
         return Err(SrganError::InvalidInput(

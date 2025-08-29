@@ -685,7 +685,8 @@ mod tests {
             let _data = vec![0u8; 1024];
         }
         
-        let allocations = ALLOCATIONS.lock().unwrap();
+        let allocations = ALLOCATIONS.lock()
+            .expect("Allocations tracking lock poisoned");
         if let Some(stats) = allocations.get("test_allocation") {
             assert!(stats.total_bytes > 0);
         }

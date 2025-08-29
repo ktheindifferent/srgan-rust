@@ -10,8 +10,10 @@ use std::path::Path;
 use std::time::Instant;
 
 pub fn upscale_gpu(app_m: &ArgMatches) -> Result<()> {
-    let input_path = app_m.value_of("input").unwrap();
-    let output_path = app_m.value_of("output").unwrap();
+    let input_path = app_m.value_of("input")
+        .ok_or_else(|| SrganError::InvalidParameter("Input path is required".to_string()))?;
+    let output_path = app_m.value_of("output")
+        .ok_or_else(|| SrganError::InvalidParameter("Output path is required".to_string()))?;
     let network_label = app_m.value_of("network").unwrap_or("natural");
     let gpu_backend = app_m.value_of("gpu").unwrap_or("auto");
     
@@ -41,7 +43,7 @@ pub fn upscale_gpu(app_m: &ArgMatches) -> Result<()> {
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} {msg} [{elapsed_precise}]")
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_spinner())
     );
     pb.enable_steady_tick(std::time::Duration::from_millis(100));
     

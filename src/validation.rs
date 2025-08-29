@@ -177,11 +177,11 @@ mod tests {
 
     #[test]
     fn test_validate_input_file_exists() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("Failed to create temp dir for test");
         let file_path = dir.path().join("test.png");
-        File::create(&file_path).unwrap();
+        File::create(&file_path).expect("Failed to create test file");
         
-        let result = validate_input_file(file_path.to_str().unwrap());
+        let result = validate_input_file(file_path.to_str().expect("Failed to convert path to str"));
         assert!(result.is_ok());
     }
 
@@ -193,18 +193,18 @@ mod tests {
 
     #[test]
     fn test_validate_output_path_valid() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("Failed to create temp dir for test");
         let file_path = dir.path().join("output.png");
         
-        let result = validate_output_path(file_path.to_str().unwrap());
+        let result = validate_output_path(file_path.to_str().expect("Failed to convert path to str"));
         assert!(result.is_ok());
     }
 
     #[test]
     fn test_validate_directory_exists() {
-        let dir = TempDir::new().unwrap();
+        let dir = TempDir::new().expect("Failed to create temp dir for test");
         
-        let result = validate_directory(dir.path().to_str().unwrap());
+        let result = validate_directory(dir.path().to_str().expect("Failed to convert path to str"));
         assert!(result.is_ok());
     }
 
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_validate_positive_int() {
-        assert_eq!(validate_positive_int("5", "test").unwrap(), 5);
+        assert_eq!(validate_positive_int("5", "test").expect("Should parse valid positive int"), 5);
         assert!(validate_positive_int("0", "test").is_err());
         assert!(validate_positive_int("-1", "test").is_err());
         assert!(validate_positive_int("abc", "test").is_err());
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_validate_positive_float() {
-        assert_eq!(validate_positive_float("3.5", "test").unwrap(), 3.5);
+        assert_eq!(validate_positive_float("3.5", "test").expect("Should parse valid positive float"), 3.5);
         assert!(validate_positive_float("0", "test").is_err());
         assert!(validate_positive_float("-1.5", "test").is_err());
         assert!(validate_positive_float("inf", "test").is_err());

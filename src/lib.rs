@@ -41,6 +41,9 @@ pub mod validation;
 pub mod video;
 pub mod web_server;
 
+#[cfg(test)]
+mod error_handling_tests;
+
 use std::{
 	fmt,
 	fs::*,
@@ -224,9 +227,8 @@ pub fn downscale(image: ArrayD<f32>, factor: usize, sRGB: bool) -> alumina::grap
 	let mut subgraph = graph.subgraph(&[input_id.clone()], &[output_id.clone()])?;
 	let result = subgraph.execute(vec![image])?;
 
-	// This unwrap is safe because we control the graph structure and know output_id exists
-	Ok(result.into_map().remove(&output_id)
-		.expect("Output node should exist in the graph result"))
+	result.into_map().remove(&output_id)
+		.ok_or_else(|| alumina::graph::Error::from("Output node not found in downscale graph result"))
 }
 
 /// A container type for upscaling networks
@@ -404,7 +406,6 @@ pub fn upscale(image: ArrayD<f32>, network: &UpscalingNetwork) -> alumina::graph
 	let mut subgraph = graph.subgraph(&subgraph_inputs, &[output_id.clone()])?;
 	let result = subgraph.execute(input_vec)?;
 
-	// This unwrap is safe because we control the graph structure and know output_id exists
-	Ok(result.into_map().remove(&output_id)
-		.expect("Output node should exist in the graph result"))
+	result.into_map().remove(&output_id)
+		.ok_or_else(|| alumina::graph::Error::from("Output node not found in upscale graph result"))
 }
