@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use ndarray::ArrayD;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImage};
 
 /// Test concurrent inference with multiple threads
 #[test]

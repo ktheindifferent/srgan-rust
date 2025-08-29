@@ -130,7 +130,7 @@ fn test_network_operations_no_panic() {
     // Test that network operations handle errors gracefully
     let result = panic::catch_unwind(|| {
         // Try to load a nonexistent network file
-        let _ = UpscalingNetwork::load_from_file("/nonexistent/model.rsr");
+        let _ = UpscalingNetwork::load_from_file(std::path::Path::new("/nonexistent/model.rsr"));
     });
     
     assert!(result.is_ok(), "Network operations should not panic");
