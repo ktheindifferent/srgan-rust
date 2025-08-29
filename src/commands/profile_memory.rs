@@ -20,7 +20,7 @@ pub fn profile_memory_command(
     let report_path = report_path.unwrap_or("memory_profile.txt");
     let csv_path = report_path.replace(".txt", ".csv");
     
-    let mut profiler = MemoryProfiler::new(sampling_interval_ms);
+    let profiler = MemoryProfiler::new(sampling_interval_ms);
     profiler.start();
     
     let pb = ProgressBar::new_spinner();
@@ -72,7 +72,7 @@ pub fn profile_memory_command(
     
     pb.finish_with_message("Profiling complete");
     
-    if let Ok(mut p) = profiler_clone.lock() {
+    if let Ok(p) = profiler_clone.lock() {
         p.stop();
         
         let usage = p.get_current_usage();
@@ -111,7 +111,7 @@ pub fn analyze_memory_usage(
     let report_path = report_path.unwrap_or("memory_analysis.txt");
     let csv_path = report_path.replace(".txt", ".csv");
     
-    let mut profiler = MemoryProfiler::new(sampling_interval_ms);
+    let profiler = MemoryProfiler::new(sampling_interval_ms);
     profiler.start();
     
     let pb = ProgressBar::new_spinner();
@@ -196,7 +196,7 @@ pub fn analyze_memory_usage(
     
     pb.finish_with_message("Analysis complete");
     
-    if let Ok(mut p) = profiler_clone.lock() {
+    if let Ok(p) = profiler_clone.lock() {
         p.stop();
         
         let report = p.report();

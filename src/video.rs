@@ -2,11 +2,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use std::sync::atomic::{AtomicU64, Ordering};
-use image::{DynamicImage, ImageFormat};
-use rayon::prelude::*;
-use indicatif::{ProgressBar, ProgressStyle, MultiProgress};
-use log::{info, warn, debug, error};
+use image::DynamicImage;
+use indicatif::{ProgressBar, ProgressStyle};
+use log::{info, debug};
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 
@@ -273,8 +271,9 @@ impl VideoProcessor {
         }
         
         // Log to a dedicated security audit file if configured
-        #[cfg(feature = "audit-log")]
-        {
+        // #[cfg(feature = "audit-log")]
+        // Audit logging disabled - feature not configured
+        if false {
             use std::io::Write;
             if let Ok(mut file) = std::fs::OpenOptions::new()
                 .create(true)

@@ -1,13 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
 use std::net::SocketAddr;
 use std::io::Write;
-use image::{DynamicImage, ImageFormat, GenericImage};
-use serde::{Deserialize, Serialize};
+use image::{ImageFormat, GenericImage};
 use log::{info, warn};
 use crate::error::SrganError;
 use crate::thread_safe_network::ThreadSafeNetwork;
@@ -179,7 +177,7 @@ impl WebServer {
         info!("  GET  /api/health        - Health check");
         info!("  GET  /api/models        - List available models");
         
-        if let Some(ref api_key) = self.config.api_key {
+        if let Some(ref _api_key) = self.config.api_key {
             info!("API key authentication enabled");
         }
         
@@ -568,7 +566,7 @@ mod base64 {
         format!("base64:{}", data.len())
     }
     
-    pub fn decode(data: &str) -> Result<Vec<u8>, String> {
+    pub fn decode(_data: &str) -> Result<Vec<u8>, String> {
         // Simplified base64 decoding
         // In production, use base64 crate
         Ok(vec![0; 100])

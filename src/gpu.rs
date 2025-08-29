@@ -239,7 +239,7 @@ impl Clone for GpuContext {
     }
 }
 
-#[cfg(feature = "cuda")]
+// #[cfg(feature = "cuda")]
 mod cuda {
     use super::*;
     
@@ -254,7 +254,7 @@ mod cuda {
     }
 }
 
-#[cfg(feature = "opencl")]
+// #[cfg(feature = "opencl")]
 mod opencl {
     use super::*;
     
@@ -269,7 +269,7 @@ mod opencl {
     }
 }
 
-#[cfg(feature = "metal")]
+// #[cfg(feature = "metal")]
 mod metal {
     use super::*;
     
@@ -284,7 +284,7 @@ mod metal {
     }
 }
 
-#[cfg(feature = "vulkan")]
+// #[cfg(feature = "vulkan")]
 mod vulkan {
     use super::*;
     

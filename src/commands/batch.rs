@@ -5,8 +5,7 @@ use clap::ArgMatches;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use log::{error, info, warn};
 use rayon::prelude::*;
-use std::fs::{self, File};
-use std::io::Read;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -46,8 +45,7 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
     
     // Load thread-safe network - no Arc<Mutex<>> needed!
     let factor = parse_factor(app_m);
-    let network = load_network(app_m, factor)?;
-    let thread_safe_network = Arc::new(ThreadSafeNetwork::new(network));
+    let thread_safe_network = Arc::new(load_network(app_m, factor)?);
 
     info!("Starting batch processing");
     info!("Input directory: {}", input_path.display());
@@ -101,12 +99,11 @@ pub fn batch_upscale(app_m: &ArgMatches) -> Result<()> {
         
         // Process images sequentially
         for image_file in &image_files {
-            let network = thread_safe_network.get_network();
             process_single_image(
                 image_file,
                 &input_path,
                 &output_path,
-                &network,
+                &thread_safe_network,
                 skip_existing,
                 &overall_pb,
                 &errors,
@@ -144,7 +141,7 @@ fn process_single_image(
     image_path: &Path,
     input_base: &Path,
     output_base: &Path,
-    network: &ThreadSafeNetwork,
+    network: &Arc<ThreadSafeNetwork>,
     skip_existing: bool,
     progress: &Arc<ProgressBar>,
     errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
@@ -208,9 +205,6 @@ fn process_single_image_parallel(
     errors: &Arc<Mutex<Vec<(PathBuf, String)>>>,
     successful: &Arc<AtomicUsize>,
 ) {
-    // Get a network for this thread
-    let network = thread_safe_network.get_network();
-    
     // Calculate relative path and output path
     let relative_path = image_path
         .strip_prefix(input_base)
@@ -243,7 +237,7 @@ fn process_single_image_parallel(
     }
 
     // Process the image
-    match process_image(image_path, &output_path, &network) {
+    match process_image(image_path, &output_path, thread_safe_network) {
         Ok(_) => {
             successful.fetch_add(1, Ordering::Relaxed);
             progress.inc(1);

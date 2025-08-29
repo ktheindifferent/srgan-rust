@@ -1,10 +1,7 @@
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::path::Path;
-use serde::{Deserialize, Serialize};
-use serde_json;
-use ndarray::{Array4, ArrayView4, Axis};
 use log::{info, warn, debug};
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
@@ -122,7 +119,7 @@ impl ModelConverter {
 
     /// Convert loaded model to SRGAN-Rust format
     pub fn convert_to_srgan(&self) -> Result<UpscalingNetwork, SrganError> {
-        let metadata = self.metadata.as_ref()
+        let _metadata = self.metadata.as_ref()
             .ok_or_else(|| SrganError::InvalidInput("No model loaded".into()))?;
 
         // Create network with converted parameters
@@ -161,7 +158,7 @@ impl ModelConverter {
     }
 
     /// Parse PyTorch weights (simplified implementation)
-    fn parse_pytorch_weights(&mut self, data: &[u8]) -> Result<(), SrganError> {
+    fn parse_pytorch_weights(&mut self, _data: &[u8]) -> Result<(), SrganError> {
         // This would need a proper pickle parser in production
         // For now, create placeholder metadata
         let mut metadata = ModelMetadata {
@@ -183,7 +180,7 @@ impl ModelConverter {
     }
 
     /// Parse TensorFlow model (simplified implementation)
-    fn parse_tensorflow_model(&mut self, path: &Path) -> Result<(), SrganError> {
+    fn parse_tensorflow_model(&mut self, _path: &Path) -> Result<(), SrganError> {
         // This would need protobuf parsing in production
         let metadata = ModelMetadata {
             format: "tensorflow".into(),
@@ -199,7 +196,7 @@ impl ModelConverter {
     }
 
     /// Parse ONNX model (simplified implementation)
-    fn parse_onnx_model(&mut self, data: &[u8]) -> Result<(), SrganError> {
+    fn parse_onnx_model(&mut self, _data: &[u8]) -> Result<(), SrganError> {
         // Would need ONNX protobuf parser
         let metadata = ModelMetadata {
             format: "onnx".into(),
@@ -215,7 +212,7 @@ impl ModelConverter {
     }
 
     /// Parse Keras H5 model (simplified implementation)
-    fn parse_keras_h5(&mut self, path: &Path) -> Result<(), SrganError> {
+    fn parse_keras_h5(&mut self, _path: &Path) -> Result<(), SrganError> {
         // Would need HDF5 parser
         let metadata = ModelMetadata {
             format: "keras".into(),
@@ -268,7 +265,7 @@ impl ModelConverter {
     }
 
     /// Transfer weights with format conversion
-    fn transfer_weights(&self, network: &mut UpscalingNetwork, layer: &str, weights: &[f32], format: &str) -> Result<(), SrganError> {
+    fn transfer_weights(&self, _network: &mut UpscalingNetwork, layer: &str, weights: &[f32], format: &str) -> Result<(), SrganError> {
         // Handle different tensor formats (NCHW vs NHWC)
         let converted_weights = match format {
             "tensorflow" | "keras" => self.convert_nhwc_to_nchw(weights)?,
@@ -288,7 +285,7 @@ impl ModelConverter {
     }
 
     /// Validate converted model
-    pub fn validate_conversion(&self, original_path: &Path, converted_network: &UpscalingNetwork) -> Result<bool, SrganError> {
+    pub fn validate_conversion(&self, original_path: &Path, _converted_network: &UpscalingNetwork) -> Result<bool, SrganError> {
         info!("Validating conversion from {:?}", original_path);
         
         // Compare layer counts

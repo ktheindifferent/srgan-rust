@@ -43,7 +43,7 @@ use std::{
 	num::FpCategory,
 };
 
-use bincode::{deserialize, serialize};
+use bincode::{deserialize, serialize, DefaultOptions, Options};
 use image::{ImageFormat, ImageResult};
 
 pub use network::*;
@@ -98,8 +98,34 @@ pub fn network_from_bytes(data: &[u8]) -> ::std::result::Result<NetworkDescripti
 		.collect::<::std::result::Result<Vec<_>, _>>()
 		.map_err(|e| format!("{}", e))?;
 	let unshuffled = unshuffle(&decompressed, 4);
-	let deserialized: NetworkDescription =
-		deserialize(&unshuffled).map_err(|e| format!("NetworkDescription decoding failed: {}", e))?;
+	
+	// Try with different bincode configurations to handle version compatibility
+	let options = DefaultOptions::new()
+		.with_fixint_encoding()
+		.allow_trailing_bytes();
+	
+	// Try to deserialize with compatibility options
+	let deserialized: NetworkDescription = options
+		.deserialize(&unshuffled)
+		.or_else(|_| {
+			// Fallback to standard deserialize
+			deserialize(&unshuffled)
+		})
+		.or_else(|_| {
+			// Try as old format and convert
+			if let Ok(old_desc) = old_network_from_bytes(data) {
+				Ok(NetworkDescription {
+					factor: old_desc.factor,
+					width: 32, // Default width for old models
+					log_depth: old_desc.log_depth,
+					global_node_factor: old_desc.global_node_factor,
+					parameters: old_desc.parameters,
+				})
+			} else {
+				Err("Failed to deserialize with any method".to_string())
+			}
+		})
+		.map_err(|e| format!("NetworkDescription decoding failed: {}", e))?;
 	Ok(deserialized)
 }
 
@@ -164,7 +190,7 @@ pub fn read(file: &mut File) -> ImageResult<ArrayD<f32>> {
 		.map_err(|err| image::ImageError::IoError(err))?;
 	let input_image = image::load_from_memory(&vec)?;
 	let input = image_to_data(&input_image);
-	let shape = input.shape();
+	let shape = input.shape().to_vec();
 	let input = input.into_shape(IxDyn(&[1, shape[0], shape[1], shape[2]]))
 		.map_err(|_| image::ImageError::DimensionError)?;
 	Ok(input)

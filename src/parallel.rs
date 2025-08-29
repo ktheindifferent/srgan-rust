@@ -1,8 +1,6 @@
-use crate::error::{Result, SrganError};
+use crate::error::Result;
 use crate::UpscalingNetwork;
 use ndarray::ArrayD;
-use std::sync::{Arc, Mutex};
-use std::thread;
 
 /// Thread-safe wrapper for UpscalingNetwork that enables parallel processing
 /// 
