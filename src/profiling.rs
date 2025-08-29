@@ -314,6 +314,35 @@ pub fn track_deallocation(category: &str, bytes: usize) {
 
 pub struct TrackingAllocator;
 
+// SAFETY: TrackingAllocator's GlobalAlloc implementation is thread-safe because:
+//
+// 1. Atomic Operations:
+//    - ALLOCATED, DEALLOCATED, PEAK_MEMORY use AtomicUsize with proper ordering
+//    - fetch_add operations are atomic and thread-safe
+//    - compare_exchange_weak loop ensures atomic peak memory updates
+//
+// 2. Memory Ordering:
+//    - SeqCst ordering provides strongest guarantees
+//    - Ensures all threads see consistent memory state
+//    - No data races on the atomic counters
+//
+// 3. Delegation to System Allocator:
+//    - Actual allocation/deallocation delegated to System allocator
+//    - System allocator is already thread-safe
+//    - TrackingAllocator only adds atomic bookkeeping
+//
+// 4. Lock-free Design:
+//    - No mutexes in the hot path (alloc/dealloc)
+//    - Only atomic operations for performance
+//    - Peak memory update uses CAS loop for correctness
+//
+// 5. No Shared Mutable State:
+//    - Static atomics are the only shared state
+//    - No raw pointers or unsafe memory manipulation
+//    - Statistics tracking is separate (uses Mutex when needed)
+//
+// This allocator can be safely used as a global allocator in multi-threaded
+// programs. The tracking overhead is minimal due to lock-free atomic operations.
 impl TrackingAllocator {
     fn check_memory_limit(&self, size: usize) -> bool {
         let limit = MEMORY_LIMIT.load(Ordering::Relaxed);

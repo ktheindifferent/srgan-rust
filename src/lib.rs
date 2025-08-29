@@ -35,6 +35,7 @@ pub mod parallel;
 pub mod psnr;
 pub mod profiling;
 pub mod thread_safe_network;
+pub mod thread_safety_tests;
 pub mod training;
 pub mod utils;
 pub mod validation;
