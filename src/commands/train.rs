@@ -28,7 +28,7 @@ pub fn train(app_m: &ArgMatches) -> Result<()> {
 		network_config.factor,
 		network_config.width,
 		network_config.log_depth,
-		0,
+		2, // Use default global_node_factor for compatibility with inference
 		crate::constants::training::REGULARIZATION_EPSILON,
 		power,
 		scale,
