@@ -1,3 +1,8 @@
+use profiling::TrackingAllocator;
+
+#[global_allocator]
+static GLOBAL: TrackingAllocator = TrackingAllocator;
+
 #[macro_use]
 extern crate alumina;
 extern crate clap;
