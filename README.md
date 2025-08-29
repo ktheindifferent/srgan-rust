@@ -48,6 +48,7 @@ CC-BY-SA @benarent
 - 🚀 Fast image upscaling using SRGAN neural networks
 - 🎨 Pre-trained models for natural images and anime/artwork  
 - 🔧 Train custom models on your own datasets
+- 🔄 Import PyTorch, TensorFlow, ONNX, and Keras models
 - 📊 PSNR calculation for quality metrics
 - ✅ Comprehensive input validation and error handling
 - 🧪 CI/CD pipeline with GitHub Actions
@@ -56,6 +57,7 @@ CC-BY-SA @benarent
 ## Documentation
 
 - [Usage Guide](USAGE.md) - Detailed usage instructions and examples
+- [Model Converter](docs/MODEL_CONVERTER.md) - Import models from PyTorch, TensorFlow, ONNX, and Keras
 - [Training Guide](USAGE.md#training-custom-models) - How to train custom models
 - [Project Development](project_description.md) - Development progress and todo list
 

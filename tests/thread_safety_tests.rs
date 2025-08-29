@@ -3,7 +3,7 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
 use ndarray::ArrayD;
-use image::DynamicImage;
+use image::{DynamicImage, GenericImage};
 
 // Import test helpers for better error handling
 #[path = "test_helpers.rs"]
