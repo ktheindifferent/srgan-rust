@@ -57,7 +57,8 @@ fn main() {
     }
     
     for handle in handles {
-        handle.join().unwrap();
+        handle.join()
+            .expect("Thread panicked in multiple thread references test");
     }
     
     println!("✅ All threads successfully accessed network\n");
@@ -89,7 +90,8 @@ fn main() {
     }
     
     for handle in handles {
-        handle.join().unwrap();
+        handle.join()
+            .expect("Thread panicked in concurrent method calls test");
     }
     
     let duration = start.elapsed();

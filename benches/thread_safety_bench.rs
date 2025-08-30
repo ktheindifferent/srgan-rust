@@ -6,7 +6,8 @@ use std::thread;
 use rayon::prelude::*;
 
 fn bench_single_thread_inference(c: &mut Criterion) {
-    let network = ThreadSafeNetwork::load_builtin_natural().unwrap();
+    let network = ThreadSafeNetwork::load_builtin_natural()
+        .expect("Failed to load built-in natural network for benchmark");
     
     let mut group = c.benchmark_group("single_thread");
     for size in [16, 32, 64].iter() {
@@ -26,7 +27,8 @@ fn bench_single_thread_inference(c: &mut Criterion) {
 }
 
 fn bench_multi_thread_inference(c: &mut Criterion) {
-    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural().unwrap());
+    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+        .expect("Failed to load built-in natural network for multi-thread benchmark"));
     
     let mut group = c.benchmark_group("multi_thread");
     for num_threads in [2, 4, 8].iter() {
@@ -40,14 +42,16 @@ fn bench_multi_thread_inference(c: &mut Criterion) {
                     let mut handles = vec![];
                     for _ in 0..*num_threads {
                         let network_clone = Arc::clone(&network);
-                        let input_clone = input.clone();
+                        let input_clone = (*input).clone();
                         let handle = thread::spawn(move || {
-                            network_clone.process(black_box(input_clone))
+                            network_clone.process(input_clone)
                         });
                         handles.push(handle);
                     }
                     for handle in handles {
-                        handle.join().unwrap().unwrap();
+                        handle.join()
+                            .expect("Thread panicked during multi-thread benchmark")
+                            .expect("Network processing failed during multi-thread benchmark");
                     }
                 });
             },
@@ -57,7 +61,8 @@ fn bench_multi_thread_inference(c: &mut Criterion) {
 }
 
 fn bench_rayon_parallel(c: &mut Criterion) {
-    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural().unwrap());
+    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+        .expect("Failed to load built-in natural network for rayon benchmark"));
     
     let mut group = c.benchmark_group("rayon_parallel");
     for batch_size in [8, 16, 32].iter() {
@@ -72,7 +77,8 @@ fn bench_rayon_parallel(c: &mut Criterion) {
             |b, inputs| {
                 b.iter(|| {
                     inputs.par_iter().for_each(|input| {
-                        network.process(black_box(input.clone())).unwrap();
+                        network.process(black_box(input.clone()))
+                            .expect("Network processing failed in rayon benchmark");
                     });
                 });
             },
@@ -87,26 +93,32 @@ fn bench_memory_overhead(c: &mut Criterion) {
     // Benchmark network creation
     group.bench_function("network_creation", |b| {
         b.iter(|| {
-            ThreadSafeNetwork::load_builtin_natural().unwrap()
+            ThreadSafeNetwork::load_builtin_natural()
+                .expect("Failed to load network in creation benchmark")
         });
     });
     
     // Benchmark first inference (includes buffer creation)
-    let network = ThreadSafeNetwork::load_builtin_natural().unwrap();
+    let network = ThreadSafeNetwork::load_builtin_natural()
+        .expect("Failed to load network for memory benchmark");
     let input = ArrayD::<f32>::zeros(vec![1, 32, 32, 3]);
     group.bench_function("first_inference", |b| {
         b.iter(|| {
             // Create new network each time to measure first inference overhead
-            let network = ThreadSafeNetwork::load_builtin_natural().unwrap();
-            network.process(black_box(input.clone())).unwrap()
+            let network = ThreadSafeNetwork::load_builtin_natural()
+                .expect("Failed to load network in first inference benchmark");
+            network.process(black_box(input.clone()))
+                .expect("Network processing failed in first inference benchmark")
         });
     });
     
     // Benchmark subsequent inference (reuses buffer)
-    network.process(input.clone()).unwrap(); // Warm up
+    network.process(input.clone())
+        .expect("Failed to warm up network for subsequent inference benchmark"); // Warm up
     group.bench_function("subsequent_inference", |b| {
         b.iter(|| {
-            network.process(black_box(input.clone())).unwrap()
+            network.process(black_box(input.clone()))
+                .expect("Network processing failed in subsequent inference benchmark")
         });
     });
     
@@ -114,7 +126,8 @@ fn bench_memory_overhead(c: &mut Criterion) {
 }
 
 fn bench_thread_contention(c: &mut Criterion) {
-    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural().unwrap());
+    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+        .expect("Failed to load network for contention benchmark"));
     
     let mut group = c.benchmark_group("thread_contention");
     
@@ -127,12 +140,14 @@ fn bench_thread_contention(c: &mut Criterion) {
                 let size = 16 + i * 8;  // Different sizes
                 let handle = thread::spawn(move || {
                     let input = ArrayD::<f32>::zeros(vec![1, size, size, 3]);
-                    network_clone.process(black_box(input)).unwrap()
+                    network_clone.process(black_box(input))
+                        .expect("Network processing failed in contention benchmark")
                 });
                 handles.push(handle);
             }
             for handle in handles {
-                handle.join().unwrap();
+                handle.join()
+                    .expect("Thread panicked in contention benchmark");
             }
         });
     });
@@ -145,12 +160,14 @@ fn bench_thread_contention(c: &mut Criterion) {
                 let network_clone = Arc::clone(&network);
                 let handle = thread::spawn(move || {
                     let input = ArrayD::<f32>::zeros(vec![1, 32, 32, 3]);
-                    network_clone.process(black_box(input)).unwrap()
+                    network_clone.process(black_box(input))
+                        .expect("Network processing failed in contention benchmark")
                 });
                 handles.push(handle);
             }
             for handle in handles {
-                handle.join().unwrap();
+                handle.join()
+                    .expect("Thread panicked in contention benchmark");
             }
         });
     });
@@ -159,7 +176,8 @@ fn bench_thread_contention(c: &mut Criterion) {
 }
 
 fn bench_scaling_efficiency(c: &mut Criterion) {
-    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural().unwrap());
+    let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+        .expect("Failed to load network for scaling benchmark"));
     let input = ArrayD::<f32>::zeros(vec![1, 32, 32, 3]);
     
     let mut group = c.benchmark_group("scaling_efficiency");
@@ -174,7 +192,8 @@ fn bench_scaling_efficiency(c: &mut Criterion) {
                 b.iter(|| {
                     if num_threads == 1 {
                         // Single thread baseline
-                        network.process(black_box(input.clone())).unwrap();
+                        network.process(black_box(input.clone()))
+                            .expect("Network processing failed in single-thread scaling benchmark");
                     } else {
                         // Multi-threaded
                         let mut handles = vec![];
@@ -182,12 +201,14 @@ fn bench_scaling_efficiency(c: &mut Criterion) {
                             let network_clone = Arc::clone(&network);
                             let input_clone = input.clone();
                             let handle = thread::spawn(move || {
-                                network_clone.process(black_box(input_clone)).unwrap()
+                                network_clone.process(input_clone)
+                                    .expect("Network processing failed in multi-thread scaling benchmark")
                             });
                             handles.push(handle);
                         }
                         for handle in handles {
-                            handle.join().unwrap();
+                            handle.join()
+                                .expect("Thread panicked in scaling benchmark");
                         }
                     }
                 });

@@ -79,7 +79,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
         
         let handles: Vec<_> = (0..NUM_THREADS)
-            .map(|_thread_id| {
+            .map(|thread_id| {
                 let context = Arc::clone(&context);
                 let barrier = Arc::clone(&barrier);
                 
@@ -219,7 +219,7 @@ mod tests {
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
         
         let handles: Vec<_> = (0..NUM_THREADS)
-            .map(|_thread_id| {
+            .map(|thread_id| {
                 let network = Arc::clone(&network);
                 let gpu_context = Arc::clone(&gpu_context);
                 let stop = Arc::clone(&stop_flag);
