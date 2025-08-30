@@ -1,15 +1,35 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::convert::TryInto;
 use log::{info, warn, debug};
 use serde_pickle::{DeOptions, HashableValue, Value};
-use num_bigint::ToBigInt;
 use num_traits::ToPrimitive;
 use crate::error::SrganError;
 use crate::UpscalingNetwork;
 use crate::config::NetworkConfig;
+
+#[path = "model_converter/tensorflow_simple.rs"]
+mod tensorflow;
+#[path = "model_converter/onnx_simple.rs"]
+mod onnx;
+#[path = "model_converter/common.rs"]
+mod common;
+#[cfg(feature = "keras-support")]
+#[path = "model_converter/keras.rs"]
+mod keras;
+#[cfg(not(feature = "keras-support"))]
+#[path = "model_converter/keras_simple.rs"]
+mod keras_simple;
+
+use tensorflow::TensorFlowParser;
+use onnx::OnnxParser;
+#[cfg(feature = "keras-support")]
+use keras::KerasParser;
+#[cfg(not(feature = "keras-support"))]
+use keras_simple::KerasParser;
+use common::{WeightExtractor, TensorData, convert_nhwc_to_nchw, tensor_statistics};
 
 /// Supported model formats for conversion
 #[derive(Debug, Clone, Copy)]
@@ -21,7 +41,7 @@ pub enum ModelFormat {
 }
 
 /// Model metadata for conversion
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelMetadata {
     pub format: String,
     pub version: String,
@@ -81,8 +101,8 @@ impl ModelConverter {
             ));
         }
 
-        // Parse TensorFlow protobuf (simplified)
-        self.parse_tensorflow_model(&model_file)?;
+        // Parse TensorFlow model (pass directory, not file)
+        self.parse_tensorflow_model(path)?;
         
         info!("Loaded TensorFlow model from {:?}", path);
         Ok(())
@@ -459,51 +479,157 @@ impl ModelConverter {
         }
     }
 
-    /// Parse TensorFlow model (simplified implementation)
-    fn parse_tensorflow_model(&mut self, _path: &Path) -> Result<(), SrganError> {
-        // This would need protobuf parsing in production
+    /// Parse TensorFlow model using the dedicated parser
+    fn parse_tensorflow_model(&mut self, path: &Path) -> Result<(), SrganError> {
+        let mut parser = TensorFlowParser::new();
+        
+        // Load the SavedModel
+        parser.load_saved_model(path)?;
+        
+        // Extract weights
+        parser.extract_weights_from_nodes()?;
+        let weights = parser.extract_weights()?;
+        
+        // Get model info
+        let model_info = parser.get_model_info();
+        
+        // Convert TensorData to parameters HashMap
+        let mut parameters = HashMap::new();
+        for (name, tensor_data) in weights {
+            // Convert NHWC to NCHW if needed for Conv layers
+            let converted_data = if name.contains("conv") && tensor_data.shape.len() == 4 {
+                convert_nhwc_to_nchw(&tensor_data.data, &tensor_data.shape)?
+            } else {
+                tensor_data.data
+            };
+            
+            parameters.insert(name, converted_data);
+        }
+        
         let metadata = ModelMetadata {
             format: "tensorflow".into(),
-            version: "2.0".into(),
-            input_shape: vec![1, 256, 256, 3],  // Note: TF uses NHWC format
-            output_shape: vec![1, 1024, 1024, 3],
-            architecture: "srgan".into(),
-            parameters: HashMap::new(),
+            version: model_info.version,
+            input_shape: model_info.input_shape,
+            output_shape: model_info.output_shape,
+            architecture: if model_info.architecture_hints.iter()
+                .any(|h| h.contains("SRGAN") || h.contains("super-resolution")) {
+                "srgan".into()
+            } else {
+                "unknown".into()
+            },
+            parameters,
         };
         
         self.metadata = Some(metadata);
+        info!("Parsed TensorFlow model with {} parameters", 
+              self.metadata.as_ref().unwrap().parameters.len());
         Ok(())
     }
 
-    /// Parse ONNX model (simplified implementation)
-    fn parse_onnx_model(&mut self, _data: &[u8]) -> Result<(), SrganError> {
-        // Would need ONNX protobuf parser
+    /// Parse ONNX model using the dedicated parser
+    fn parse_onnx_model(&mut self, data: &[u8]) -> Result<(), SrganError> {
+        let mut parser = OnnxParser::new();
+        
+        // Create a temporary file for the parser
+        let temp_path = std::env::temp_dir().join("temp_onnx_model.onnx");
+        let mut temp_file = File::create(&temp_path)
+            .map_err(|e| SrganError::Io(e))?;
+        temp_file.write_all(data)
+            .map_err(|e| SrganError::Io(e))?;
+        
+        // Load the ONNX model
+        parser.load_model(&temp_path)?;
+        
+        // Clean up temp file
+        let _ = std::fs::remove_file(&temp_path);
+        
+        // Extract weights
+        let weights = parser.extract_weights()?;
+        
+        // Get model info
+        let model_info = parser.get_model_info();
+        
+        // Convert TensorData to parameters HashMap
+        let mut parameters = HashMap::new();
+        for (name, tensor_data) in weights {
+            // Get statistics for validation
+            let stats = tensor_statistics(&tensor_data.data);
+            debug!("Tensor {}: min={:.4}, max={:.4}, mean={:.4}, std={:.4}",
+                   name, stats.min, stats.max, stats.mean, stats.std_dev);
+            
+            parameters.insert(name, tensor_data.data);
+        }
+        
         let metadata = ModelMetadata {
             format: "onnx".into(),
-            version: "1.0".into(),
-            input_shape: vec![1, 3, 256, 256],
-            output_shape: vec![1, 3, 1024, 1024],
-            architecture: "srgan".into(),
-            parameters: HashMap::new(),
+            version: model_info.version,
+            input_shape: model_info.input_shape,
+            output_shape: model_info.output_shape,
+            architecture: if model_info.architecture_hints.iter()
+                .any(|h| h.contains("super-resolution")) {
+                "srgan".into()
+            } else {
+                "unknown".into()
+            },
+            parameters,
         };
         
         self.metadata = Some(metadata);
+        info!("Parsed ONNX model with {} parameters", 
+              self.metadata.as_ref().unwrap().parameters.len());
         Ok(())
     }
 
-    /// Parse Keras H5 model (simplified implementation)
-    fn parse_keras_h5(&mut self, _path: &Path) -> Result<(), SrganError> {
-        // Would need HDF5 parser
+    /// Parse Keras H5 model using the dedicated parser
+    fn parse_keras_h5(&mut self, path: &Path) -> Result<(), SrganError> {
+        let mut parser = KerasParser::new();
+        
+        // Load the H5 model
+        parser.load_h5_model(path)?;
+        
+        // Convert Keras weights from NHWC to NCHW
+        parser.convert_keras_weights_to_nchw()?;
+        
+        // Extract weights
+        let weights = parser.extract_weights()?;
+        
+        // Get model info
+        let model_info = parser.get_model_info();
+        
+        // Convert TensorData to parameters HashMap
+        let mut parameters = HashMap::new();
+        for (name, tensor_data) in weights {
+            // Validate tensor data
+            if !tensor_data.data.is_empty() {
+                let stats = tensor_statistics(&tensor_data.data);
+                if stats.min.is_finite() && stats.max.is_finite() {
+                    parameters.insert(name, tensor_data.data);
+                } else {
+                    warn!("Skipping tensor {} with invalid values", name);
+                }
+            }
+        }
+        
         let metadata = ModelMetadata {
             format: "keras".into(),
-            version: "2.0".into(),
-            input_shape: vec![256, 256, 3],  // Keras doesn't include batch dim
-            output_shape: vec![1024, 1024, 3],
-            architecture: "srgan".into(),
-            parameters: HashMap::new(),
+            version: model_info.version,
+            input_shape: model_info.input_shape,
+            output_shape: model_info.output_shape,
+            architecture: if model_info.architecture_hints.iter()
+                .any(|h| h.contains("super-resolution") || h.contains("SRGAN")) {
+                "srgan".into()
+            } else if model_info.architecture_hints.iter()
+                .any(|h| h.contains("Residual")) {
+                "srresnet".into()
+            } else {
+                "unknown".into()
+            },
+            parameters,
         };
         
         self.metadata = Some(metadata);
+        info!("Parsed Keras model with {} parameters", 
+              self.metadata.as_ref().unwrap().parameters.len());
         Ok(())
     }
 

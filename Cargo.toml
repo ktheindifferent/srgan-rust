@@ -30,6 +30,17 @@ thread_local = "1.1"
 serde-pickle = "1.1"
 num-bigint = "0.4"
 num-traits = "0.2"
+# For TensorFlow SavedModel parsing
+prost = "0.12"
+prost-types = "0.12"
+# For ONNX model parsing  
+protobuf = "3.3"
+# For Keras/H5 model parsing
+hdf5 = { version = "0.8", optional = true }
+
+[features]
+default = []
+keras-support = ["hdf5"]
 
 [dev-dependencies]
 tempfile = "3"
