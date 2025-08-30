@@ -72,7 +72,8 @@ fn main() {
     
     // Wait for all threads to complete
     for handle in handles {
-        handle.join().unwrap();
+        handle.join()
+            .expect("Thread panicked in multi-threaded processing test");
     }
     
     let multi_duration = start.elapsed();
@@ -112,7 +113,8 @@ fn main() {
     }
     
     for handle in handles {
-        handle.join().unwrap();
+        handle.join()
+            .expect("Thread panicked in concurrent access test");
     }
     
     let concurrent_duration = start.elapsed();
