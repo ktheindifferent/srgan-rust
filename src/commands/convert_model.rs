@@ -11,13 +11,17 @@ pub fn convert_model(matches: &ArgMatches) -> Result<(), SrganError> {
     let output_path = Path::new(matches.value_of("output").unwrap_or("converted_model.rsr"));
     
     // Parse format if specified
-    let format = matches.value_of("format").map(|f| match f {
-        "pytorch" => ModelFormat::PyTorch,
-        "tensorflow" => ModelFormat::TensorFlow,
-        "onnx" => ModelFormat::ONNX,
-        "keras" => ModelFormat::Keras,
-        _ => unreachable!(),
-    });
+    let format = matches.value_of("format")
+        .map(|f| match f {
+            "pytorch" => Ok(ModelFormat::PyTorch),
+            "tensorflow" => Ok(ModelFormat::TensorFlow),
+            "onnx" => Ok(ModelFormat::ONNX),
+            "keras" => Ok(ModelFormat::Keras),
+            _ => Err(SrganError::InvalidInput(
+                format!("Invalid model format '{}'. Valid formats are: pytorch, tensorflow, onnx, keras", f)
+            )),
+        })
+        .transpose()?;
     
     // Check if batch mode
     if matches.is_present("batch") {

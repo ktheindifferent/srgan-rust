@@ -29,7 +29,7 @@ mod tests {
         
         // Spawn threads
         let handles: Vec<_> = (0..NUM_THREADS)
-            .map(|_thread_id| {
+            .map(|thread_id| {
                 let network = Arc::clone(&network);
                 let barrier = Arc::clone(&barrier);
                 
