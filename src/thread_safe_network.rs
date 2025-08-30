@@ -176,7 +176,7 @@ impl ThreadSafeNetwork {
         // Try to get existing buffer for this thread
         let needs_creation = {
             let pool = self.buffer_pool.lock()
-                .expect("Buffer pool mutex poisoned");
+                .expect("Critical error: Buffer pool mutex is poisoned. This indicates a panic in another thread while holding the lock");
             !pool.contains_key(&thread_id)
         };
         
@@ -185,13 +185,13 @@ impl ThreadSafeNetwork {
             let new_buffer = ComputeBuffer::new(&self.weights)
                 .map_err(|e| SrganError::GraphExecution(e.to_string()))?;
             let mut pool = self.buffer_pool.lock()
-                .expect("Buffer pool mutex poisoned");
+                .expect("Critical error: Buffer pool mutex is poisoned during buffer creation. This indicates a panic in another thread");
             pool.insert(thread_id, new_buffer);
         }
         
         // Execute inference
         let mut pool = self.buffer_pool.lock()
-            .expect("Buffer pool mutex poisoned");
+            .expect("Critical error: Buffer pool mutex is poisoned during inference. This indicates a panic in another thread");
         let buffer = pool.get_mut(&thread_id)
             .ok_or_else(|| SrganError::GraphExecution("Buffer not found for thread".to_string()))?;
         buffer.execute(input, &self.weights)
