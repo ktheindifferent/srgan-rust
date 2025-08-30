@@ -27,8 +27,11 @@ pub mod config;
 pub mod config_file;
 pub mod constants;
 pub mod error;
+pub mod error_recovery;
 pub mod gpu;
+pub mod init;
 pub mod logging;
+pub mod metrics_wrapper;
 pub mod model_converter;
 pub mod network;
 pub mod parallel;
@@ -41,9 +44,12 @@ pub mod utils;
 pub mod validation;
 pub mod video;
 pub mod web_server;
+pub mod web_server_improved;
 
 #[cfg(test)]
 mod error_handling_tests;
+#[cfg(test)]
+mod error_recovery_tests;
 
 use std::{
 	fmt,

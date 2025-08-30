@@ -31,6 +31,22 @@ serde-pickle = "1.1"
 num-bigint = "0.4"
 num-traits = "0.2"
 
+# New dependencies for error recovery and logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+tracing-appender = "0.2"
+thiserror = "1.0"
+anyhow = "1.0"
+backtrace = "0.3"
+tokio = { version = "1", features = ["time", "sync"] }
+async-trait = "0.1"
+dashmap = "5.5"
+metrics = "0.21"
+metrics-exporter-prometheus = "0.12"
+sys-info = "0.9"
+uuid = { version = "1.4", features = ["v4"] }
+base64 = "0.21"
+
 [dev-dependencies]
 tempfile = "3"
 criterion = "0.3"
