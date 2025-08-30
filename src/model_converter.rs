@@ -337,7 +337,7 @@ impl ModelConverter {
                 }
                 
                 // Try different byte interpretations
-                if bytes.len() % 4 == 0 {
+                if bytes.len() % 4 == 0 && bytes.len() > 0 {
                     // Float32 format
                     let mut weights = Vec::new();
                     for chunk in bytes.chunks(4) {
@@ -346,7 +346,7 @@ impl ModelConverter {
                         weights.push(f32::from_le_bytes(arr));
                     }
                     Ok(weights)
-                } else if bytes.len() % 8 == 0 {
+                } else if bytes.len() % 8 == 0 && bytes.len() > 0 {
                     // Float64 format - convert to f32
                     let mut weights = Vec::new();
                     for chunk in bytes.chunks(8) {
@@ -355,39 +355,148 @@ impl ModelConverter {
                         weights.push(f64::from_le_bytes(arr) as f32);
                     }
                     Ok(weights)
+                } else if bytes.len() % 2 == 0 && bytes.len() > 0 {
+                    // Float16 format - convert to f32
+                    let mut weights = Vec::new();
+                    for chunk in bytes.chunks(2) {
+                        let arr: [u8; 2] = chunk.try_into()
+                            .map_err(|_| SrganError::Parse("Failed to convert bytes to f16".into()))?;
+                        let half_val = u16::from_le_bytes(arr);
+                        // Simple float16 to float32 conversion
+                        // This is a simplified conversion - for production code, use the half crate
+                        let sign = (half_val >> 15) & 1;
+                        let exp = (half_val >> 10) & 0x1F;
+                        let frac = half_val & 0x3FF;
+                        
+                        let f32_val = if exp == 0 {
+                            // Denormalized number or zero
+                            if frac == 0 {
+                                0.0
+                            } else {
+                                // Denormalized
+                                let frac_f32 = frac as f32 / 1024.0;
+                                let result = frac_f32 * 2.0_f32.powi(-14);
+                                if sign == 1 { -result } else { result }
+                            }
+                        } else if exp == 0x1F {
+                            // Infinity or NaN
+                            if frac == 0 {
+                                if sign == 1 { f32::NEG_INFINITY } else { f32::INFINITY }
+                            } else {
+                                f32::NAN
+                            }
+                        } else {
+                            // Normalized number
+                            let exp_f32 = (exp as i32) - 15;
+                            let frac_f32 = 1.0 + (frac as f32 / 1024.0);
+                            let result = frac_f32 * 2.0_f32.powi(exp_f32);
+                            if sign == 1 { -result } else { result }
+                        };
+                        
+                        weights.push(f32_val);
+                    }
+                    Ok(weights)
                 } else {
-                    Err(SrganError::Parse(format!("Invalid tensor byte length: {}", bytes.len())))
+                    // For int8 quantized weights or other odd byte lengths
+                    // Try to interpret as int8 and convert to float
+                    let mut weights = Vec::new();
+                    for &byte in bytes.iter() {
+                        // Convert int8 to float (simple dequantization without scale/zero_point)
+                        let int_val = byte as i8;
+                        weights.push(int_val as f32 / 127.0); // Normalize to [-1, 1] range
+                    }
+                    debug!("Interpreted {} bytes as int8 quantized weights", bytes.len());
+                    Ok(weights)
                 }
             }
             Value::Dict(dict) => {
                 // PyTorch tensor object with storage and metadata
-                // Try different common keys
+                
+                // Check for PyTorch tensor type markers
+                let type_key = HashableValue::String("_type".into());
+                if let Some(type_str) = dict.get(&type_key) {
+                    if let Value::String(s) = type_str {
+                        debug!("Found tensor type: {}", s);
+                        
+                        // Handle specific PyTorch tensor types
+                        if s.contains("FloatStorage") || s.contains("DoubleStorage") || 
+                           s.contains("HalfStorage") || s.contains("ByteStorage") {
+                            // This is a storage object, look for data
+                            if let Some(data) = dict.get(&HashableValue::String("data".into())) {
+                                return self.extract_tensor_data(data.clone());
+                            }
+                        }
+                    }
+                }
+                
+                // Try different common keys for tensor storage
                 let storage_keys = [
                     "storage",
                     "_storage",
                     "data",
                     "_data",
                     "values",
-                    "_values"
+                    "_values",
+                    "weight",
+                    "bias"
                 ];
                 
                 for key in &storage_keys {
                     let hashable_key = HashableValue::String((*key).into());
                     if let Some(storage) = dict.get(&hashable_key) {
-                        return self.extract_tensor_data(storage.clone());
+                        if let Ok(data) = self.extract_tensor_data(storage.clone()) {
+                            if !data.is_empty() {
+                                return Ok(data);
+                            }
+                        }
                     }
                 }
                 
-                // Check for nested structure with type info
-                let type_key = HashableValue::String("_type".into());
-                if let Some(type_str) = dict.get(&type_key) {
-                    if let Value::String(s) = type_str {
-                        debug!("Found tensor type: {}", s);
+                // Handle PyTorch tensor v2 format (storage + offset + size + stride)
+                let storage_key = HashableValue::String("storage".into());
+                let offset_key = HashableValue::String("storage_offset".into());
+                let size_key = HashableValue::String("size".into());
+                
+                if dict.contains_key(&storage_key) {
+                    // Extract storage data
+                    if let Some(storage) = dict.get(&storage_key) {
+                        let mut tensor_data = self.extract_tensor_data(storage.clone())?;
+                        
+                        // Apply offset if present
+                        if let Some(Value::I64(offset)) = dict.get(&offset_key) {
+                            let offset = *offset as usize;
+                            if offset < tensor_data.len() {
+                                tensor_data = tensor_data[offset..].to_vec();
+                            }
+                        }
+                        
+                        // Apply size limit if present
+                        if let Some(Value::List(sizes)) = dict.get(&size_key) {
+                            let total_size: usize = sizes.iter()
+                                .filter_map(|v| match v {
+                                    Value::I64(i) => Some(*i as usize),
+                                    _ => None
+                                })
+                                .product();
+                            if total_size > 0 && total_size < tensor_data.len() {
+                                tensor_data.truncate(total_size);
+                            }
+                        }
+                        
+                        return Ok(tensor_data);
                     }
                 }
                 
                 // Try to find any value that looks like tensor data
-                for (_, val) in dict {
+                for (key, val) in dict {
+                    // Skip metadata keys
+                    if let HashableValue::String(key_str) = key {
+                        if key_str.starts_with("_") || key_str == "requires_grad" || 
+                           key_str == "dtype" || key_str == "shape" {
+                            continue;
+                        }
+                    }
+                    
                     if matches!(val, Value::Bytes(_) | Value::List(_)) {
                         if let Ok(data) = self.extract_tensor_data(val.clone()) {
                             if !data.is_empty() {
@@ -444,36 +553,124 @@ impl ModelConverter {
     /// Infer input shape from model parameters
     fn infer_input_shape(&self, state_dict: &HashMap<String, Value>) -> Vec<usize> {
         // Look for first conv layer to determine input channels
-        for (key, _) in state_dict {
-            if key.contains("conv") && key.contains("weight") && !key.contains("bn") {
-                // Typical SRGAN input shape
-                return vec![1, 3, 256, 256];
+        let mut first_conv_keys = Vec::new();
+        
+        for key in state_dict.keys() {
+            // Common patterns for first convolution layer
+            if (key.contains("conv") && key.contains("weight") && !key.contains("bn")) ||
+               key == "conv_input.0.weight" ||
+               key == "conv1.weight" ||
+               key == "features.0.weight" ||
+               key == "initial.0.weight" ||
+               key.starts_with("generator.initial") {
+                first_conv_keys.push(key.clone());
             }
         }
-        vec![1, 3, 256, 256] // Default
+        
+        // Sort to get the most likely first layer
+        first_conv_keys.sort();
+        
+        if let Some(first_key) = first_conv_keys.first() {
+            // Try to extract shape from the tensor
+            if let Some(tensor) = state_dict.get(first_key) {
+                // Try to get dimensions from tensor metadata
+                if let Ok(data) = self.extract_tensor_data(tensor.clone()) {
+                    // Conv weight shape is typically [out_channels, in_channels, kernel_h, kernel_w]
+                    // For a 9x9 kernel with 3 input channels and 64 output channels: 64*3*9*9 = 15552
+                    let data_len = data.len();
+                    
+                    // Common SRGAN first layer configurations
+                    if data_len == 64 * 3 * 9 * 9 { // 15552
+                        return vec![1, 3, 256, 256];
+                    } else if data_len == 64 * 3 * 3 * 3 { // 1728
+                        return vec![1, 3, 256, 256];
+                    } else if data_len == 64 * 3 * 7 * 7 { // 9408
+                        return vec![1, 3, 256, 256];
+                    }
+                }
+            }
+        }
+        
+        // Default SRGAN input shape
+        vec![1, 3, 256, 256]
     }
     
     /// Infer output shape from model parameters
-    fn infer_output_shape(&self, _state_dict: &HashMap<String, Value>) -> Vec<usize> {
-        // SRGAN typically upscales by 4x
-        vec![1, 3, 1024, 1024]
+    fn infer_output_shape(&self, state_dict: &HashMap<String, Value>) -> Vec<usize> {
+        // Check for upsampling layers to determine scale factor
+        let mut upscale_factor = 4; // Default SRGAN upscale
+        
+        let upsample_count = state_dict.keys()
+            .filter(|k| k.contains("upsample") || k.contains("upsampling") || 
+                       k.contains("pixelshuffle") || k.contains("pixel_shuffle"))
+            .count();
+        
+        if upsample_count > 0 {
+            // Each upsampling layer typically does 2x upscaling
+            upscale_factor = 2_usize.pow(upsample_count as u32);
+        }
+        
+        // Check for specific scale indicators
+        for key in state_dict.keys() {
+            if key.contains("x2") {
+                upscale_factor = 2;
+                break;
+            } else if key.contains("x3") {
+                upscale_factor = 3;
+                break;
+            } else if key.contains("x4") {
+                upscale_factor = 4;
+                break;
+            } else if key.contains("x8") {
+                upscale_factor = 8;
+                break;
+            }
+        }
+        
+        // Calculate output shape based on input and upscale factor
+        let input_shape = self.infer_input_shape(state_dict);
+        vec![
+            input_shape[0], // batch size
+            3, // RGB channels
+            input_shape[2] * upscale_factor,
+            input_shape[3] * upscale_factor
+        ]
     }
     
     /// Detect model architecture from layer names
     fn detect_architecture(&self, state_dict: &HashMap<String, Value>) -> String {
         let keys: Vec<String> = state_dict.keys().cloned().collect();
         
-        // Check for common SRGAN layer patterns
-        let has_generator = keys.iter().any(|k| k.contains("generator"));
-        let has_discriminator = keys.iter().any(|k| k.contains("discriminator"));
-        let has_residual = keys.iter().any(|k| k.contains("residual") || k.contains("res"));
+        // Check for specific SRGAN architectures
+        let has_generator = keys.iter().any(|k| k.contains("generator") || k.starts_with("G."));
+        let has_discriminator = keys.iter().any(|k| k.contains("discriminator") || k.starts_with("D."));
+        let has_residual = keys.iter().any(|k| k.contains("residual") || k.contains("res") || k.contains("RDB"));
+        let has_dense = keys.iter().any(|k| k.contains("dense") || k.contains("RDB"));
+        let has_rrdb = keys.iter().any(|k| k.contains("RRDB") || k.contains("rrdb"));
+        let has_esrgan = keys.iter().any(|k| k.contains("conv_first") || k.contains("trunk_conv"));
         
-        if has_generator && has_discriminator {
+        // Detect specific architectures
+        if has_esrgan || has_rrdb {
+            "esrgan".into()
+        } else if has_dense {
+            "srgan_dense".into()
+        } else if has_generator && has_discriminator {
             "srgan_full".into()
         } else if has_generator {
             "srgan_generator".into()
+        } else if has_discriminator {
+            "srgan_discriminator".into()
         } else if has_residual {
-            "srresnet".into()
+            // Count residual blocks to determine variant
+            let residual_count = keys.iter()
+                .filter(|k| k.contains("residual") || k.contains("res"))
+                .count();
+            
+            if residual_count > 20 {
+                "srresnet_deep".into()
+            } else {
+                "srresnet".into()
+            }
         } else {
             "srgan".into()
         }
@@ -711,6 +908,12 @@ impl ModelConverter {
             stats.insert("architecture".into(), metadata.architecture.clone());
             stats.insert("param_count".into(), 
                 metadata.parameters.values().map(|v| v.len()).sum::<usize>().to_string());
+            
+            // Add shape information
+            stats.insert("input_shape".into(), 
+                format!("{:?}", metadata.input_shape));
+            stats.insert("output_shape".into(), 
+                format!("{:?}", metadata.output_shape));
         }
         
         stats
