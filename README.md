@@ -16,7 +16,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 ### Basic Usage
 ```bash
-# Upscale an image using default settings
+# Upscale a single image using default settings
 srgan-rust input.jpg output.png
 
 # Use anime-optimized model
@@ -24,6 +24,12 @@ srgan-rust -p anime anime.png anime_4x.png
 
 # Custom upscaling factor
 srgan-rust -f 2 photo.jpg photo_2x.png
+
+# Batch process multiple images in parallel
+srgan-rust batch input_dir/ output_dir/ --threads 4
+
+# Process recursively with custom pattern
+srgan-rust batch input_dir/ output_dir/ --recursive --pattern "*.jpg"
 ```
 
 For detailed usage instructions, see [USAGE.md](USAGE.md).  
@@ -46,6 +52,7 @@ CC-BY-SA @benarent
 ## Features
 
 - 🚀 Fast image upscaling using SRGAN neural networks
+- ⚡ Parallel batch processing with configurable thread pools
 - 🎨 Pre-trained models for natural images and anime/artwork  
 - 🔧 Train custom models on your own datasets
 - 🔄 Import PyTorch, TensorFlow, ONNX, and Keras models
@@ -57,6 +64,7 @@ CC-BY-SA @benarent
 ## Documentation
 
 - [Usage Guide](USAGE.md) - Detailed usage instructions and examples
+- [Parallel Processing Guide](PARALLEL_PROCESSING_GUIDE.md) - Batch processing and performance optimization
 - [Model Converter](docs/MODEL_CONVERTER.md) - Import models from PyTorch, TensorFlow, ONNX, and Keras
 - [Training Guide](USAGE.md#training-custom-models) - How to train custom models
 - [Project Development](project_description.md) - Development progress and todo list
