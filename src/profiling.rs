@@ -1,6 +1,6 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Mutex, RwLock, Arc};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::fs::File;
@@ -9,9 +9,12 @@ use chrono::Local;
 use log::{info, warn, error};
 use std::ptr;
 use std::cell::Cell;
+use std::panic::Location;
 
 #[cfg(debug_assertions)]
 use std::collections::HashSet;
+#[cfg(debug_assertions)]
+use std::backtrace::Backtrace;
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 static DEALLOCATED: AtomicUsize = AtomicUsize::new(0);
@@ -33,6 +36,9 @@ lazy_static::lazy_static! {
 lazy_static::lazy_static! {
     static ref ACTIVE_ALLOCATIONS: Mutex<HashSet<usize>> = Mutex::new(HashSet::new());
     static ref ALLOCATION_BACKTRACE: Mutex<HashMap<usize, String>> = Mutex::new(HashMap::new());
+    static ref ALLOCATION_METADATA: Mutex<HashMap<usize, AllocationMetadata>> = Mutex::new(HashMap::new());
+    static ref FREED_ALLOCATIONS: Mutex<HashSet<usize>> = Mutex::new(HashSet::new());
+    static ref MEMORY_FRAGMENTATION: RwLock<FragmentationStats> = RwLock::new(FragmentationStats::new());
 }
 
 thread_local! {
@@ -67,6 +73,67 @@ pub struct OomEvent {
     pub current_allocated: usize,
     pub memory_limit: usize,
 }
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct AllocationMetadata {
+    pub size: usize,
+    pub alignment: usize,
+    pub source_file: String,
+    pub source_line: u32,
+    pub timestamp: Instant,
+    pub freed: AtomicBool,
+    pub backtrace: String,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct FragmentationStats {
+    pub total_allocations: usize,
+    pub total_deallocations: usize,
+    pub fragmentation_ratio: f64,
+    pub largest_free_block: usize,
+    pub allocation_patterns: HashMap<usize, usize>,
+}
+
+#[cfg(debug_assertions)]
+impl FragmentationStats {
+    fn new() -> Self {
+        FragmentationStats {
+            total_allocations: 0,
+            total_deallocations: 0,
+            fragmentation_ratio: 0.0,
+            largest_free_block: 0,
+            allocation_patterns: HashMap::new(),
+        }
+    }
+    
+    fn update_allocation(&mut self, size: usize) {
+        self.total_allocations += 1;
+        *self.allocation_patterns.entry(size).or_insert(0) += 1;
+        self.calculate_fragmentation();
+    }
+    
+    fn update_deallocation(&mut self, _size: usize) {
+        self.total_deallocations += 1;
+        self.calculate_fragmentation();
+    }
+    
+    fn calculate_fragmentation(&mut self) {
+        let allocated = ALLOCATED.load(Ordering::Relaxed);
+        let deallocated = DEALLOCATED.load(Ordering::Relaxed);
+        let _net_allocated = allocated.saturating_sub(deallocated);
+        
+        if allocated > 0 {
+            self.fragmentation_ratio = (deallocated as f64) / (allocated as f64);
+        }
+    }
+}
+
+const MAX_ALLOCATION_SIZE: usize = 1 << 30;
+const POISON_BYTE: u8 = 0xDE;
+const GUARD_BYTE: u8 = 0xFD;
+const GUARD_SIZE: usize = 16;
 
 impl AllocationTelemetry {
     fn new() -> Self {
@@ -413,7 +480,8 @@ impl TrackingAllocator {
     }
     
     #[cfg(debug_assertions)]
-    fn track_allocation(&self, ptr: *mut u8, size: usize) {
+    #[track_caller]
+    fn track_allocation(&self, ptr: *mut u8, size: usize, layout: Layout) {
         if RECURSION_GUARD.with(|g| g.replace(true)) {
             return;
         }
@@ -423,35 +491,95 @@ impl TrackingAllocator {
             active.insert(ptr_addr);
         }
         
-        RECURSION_GUARD.with(|g| g.set(false));
-    }
-    
-    #[cfg(debug_assertions)]
-    fn track_deallocation(&self, ptr: *mut u8) {
-        if RECURSION_GUARD.with(|g| g.replace(true)) {
-            return;
+        let metadata = self.get_allocation_metadata(ptr, size, layout);
+        
+        if let Ok(mut meta_map) = ALLOCATION_METADATA.lock() {
+            meta_map.insert(ptr_addr, metadata);
         }
         
-        let ptr_addr = ptr as usize;
-        if let Ok(mut active) = ACTIVE_ALLOCATIONS.lock() {
-            if !active.remove(&ptr_addr) {
-                warn!("Possible double-free detected at {:p}", ptr);
+        if let Ok(mut fragmentation) = MEMORY_FRAGMENTATION.write() {
+            fragmentation.update_allocation(size);
+        }
+        
+        if std::env::var("TRACK_ALLOCATIONS").is_ok() {
+            if let Ok(mut backtraces) = ALLOCATION_BACKTRACE.lock() {
+                let bt = Backtrace::capture();
+                backtraces.insert(ptr_addr, format!("{:?}", bt));
             }
         }
         
         RECURSION_GUARD.with(|g| g.set(false));
     }
     
-    #[cfg(not(debug_assertions))]
-    fn track_allocation(&self, _ptr: *mut u8, _size: usize) {}
+    #[cfg(debug_assertions)]
+    fn track_deallocation(&self, ptr: *mut u8, layout: Layout) {
+        if RECURSION_GUARD.with(|g| g.replace(true)) {
+            return;
+        }
+        
+        let ptr_addr = ptr as usize;
+        
+        if let Err(e) = self.check_double_free(ptr) {
+            error!("Memory error: {} at {:p}", e, ptr);
+        }
+        
+        #[cfg(debug_assertions)]
+        if let Err(e) = self.check_guard_bytes(ptr, layout) {
+            error!("Guard bytes corrupted: {} at {:p}", e, ptr);
+        }
+        
+        if let Ok(mut active) = ACTIVE_ALLOCATIONS.lock() {
+            if !active.remove(&ptr_addr) {
+                warn!("Deallocating unknown pointer: {:p}", ptr);
+            }
+        }
+        
+        if let Ok(mut metadata) = ALLOCATION_METADATA.lock() {
+            if let Some(meta) = metadata.get(&ptr_addr) {
+                meta.freed.store(true, Ordering::SeqCst);
+            }
+            metadata.remove(&ptr_addr);
+        }
+        
+        if let Ok(mut freed) = FREED_ALLOCATIONS.lock() {
+            freed.insert(ptr_addr);
+            
+            if freed.len() > 10000 {
+                let oldest = *freed.iter().next().unwrap();
+                freed.remove(&oldest);
+            }
+        }
+        
+        if let Ok(mut fragmentation) = MEMORY_FRAGMENTATION.write() {
+            fragmentation.update_deallocation(layout.size());
+        }
+        
+        if let Ok(mut backtraces) = ALLOCATION_BACKTRACE.lock() {
+            backtraces.remove(&ptr_addr);
+        }
+        
+        self.poison_memory(ptr, layout.size());
+        
+        RECURSION_GUARD.with(|g| g.set(false));
+    }
     
     #[cfg(not(debug_assertions))]
-    fn track_deallocation(&self, _ptr: *mut u8) {}
+    fn track_allocation(&self, _ptr: *mut u8, _size: usize, _layout: Layout) {}
+    
+    #[cfg(not(debug_assertions))]
+    fn track_deallocation(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
 unsafe impl GlobalAlloc for TrackingAllocator {
+    #[track_caller]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
+        
+        if let Err(e) = self.validate_allocation_size(size) {
+            error!("Invalid allocation: {}", e);
+            ALLOCATION_FAILURES.fetch_add(1, Ordering::Relaxed);
+            return ptr::null_mut();
+        }
         
         ALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
         
@@ -461,13 +589,28 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             return self.handle_oom(layout);
         }
         
-        let ret = System.alloc(layout);
+        #[cfg(debug_assertions)]
+        let actual_size = size + 2 * GUARD_SIZE;
+        #[cfg(not(debug_assertions))]
+        let actual_size = size;
+        
+        #[cfg(debug_assertions)]
+        let actual_layout = Layout::from_size_align_unchecked(actual_size, layout.align());
+        #[cfg(not(debug_assertions))]
+        let actual_layout = layout;
+        
+        let ret = System.alloc(actual_layout);
         
         if ret.is_null() {
             ALLOCATION_FAILURES.fetch_add(1, Ordering::Relaxed);
             self.record_allocation_telemetry(size, false);
             return self.handle_oom(layout);
         }
+        
+        #[cfg(debug_assertions)]
+        let user_ptr = self.add_guard_bytes(ret, layout);
+        #[cfg(not(debug_assertions))]
+        let user_ptr = ret;
         
         let old = ALLOCATED.fetch_add(size, Ordering::AcqRel);
         let current = old.saturating_add(size);
@@ -488,10 +631,10 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             }
         }
         
-        self.track_allocation(ret, size);
+        self.track_allocation(user_ptr, size, layout);
         self.record_allocation_telemetry(size, true);
         
-        ret
+        user_ptr
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -502,9 +645,22 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         
         DEALLOCATION_COUNT.fetch_add(1, Ordering::Relaxed);
         
-        self.track_deallocation(ptr);
+        self.track_deallocation(ptr, layout);
         
-        System.dealloc(ptr, layout);
+        #[cfg(debug_assertions)]
+        let real_ptr = ptr.sub(GUARD_SIZE);
+        #[cfg(not(debug_assertions))]
+        let real_ptr = ptr;
+        
+        #[cfg(debug_assertions)]
+        let actual_layout = Layout::from_size_align_unchecked(
+            layout.size() + 2 * GUARD_SIZE,
+            layout.align()
+        );
+        #[cfg(not(debug_assertions))]
+        let actual_layout = layout;
+        
+        System.dealloc(real_ptr, actual_layout);
         
         let size = layout.size();
         DEALLOCATED.fetch_add(size, Ordering::AcqRel);
@@ -552,8 +708,9 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         
         #[cfg(debug_assertions)]
         {
-            self.track_deallocation(ptr);
-            self.track_allocation(new_ptr, new_size);
+            self.track_deallocation(ptr, layout);
+            let new_layout = Layout::from_size_align_unchecked(new_size, layout.align());
+            self.track_allocation(new_ptr, new_size, new_layout);
         }
         
         new_ptr
@@ -635,12 +792,35 @@ pub fn get_telemetry() -> Option<AllocationTelemetry> {
 }
 
 #[cfg(debug_assertions)]
-pub fn check_memory_leaks() -> Vec<usize> {
+pub fn check_memory_leaks() -> MemoryLeakReport {
+    let mut report = MemoryLeakReport::new();
+    
     if let Ok(active) = ACTIVE_ALLOCATIONS.lock() {
-        active.iter().cloned().collect()
-    } else {
-        Vec::new()
+        report.leaked_addresses = active.iter().cloned().collect();
+        report.total_leaked_count = active.len();
     }
+    
+    if let Ok(metadata) = ALLOCATION_METADATA.lock() {
+        for (addr, meta) in metadata.iter() {
+            if !meta.freed.load(Ordering::SeqCst) {
+                report.total_leaked_bytes += meta.size;
+                report.leaked_allocations.push(LeakedAllocation {
+                    address: *addr,
+                    size: meta.size,
+                    source_file: meta.source_file.clone(),
+                    source_line: meta.source_line,
+                    timestamp: meta.timestamp,
+                    backtrace: meta.backtrace.clone(),
+                });
+            }
+        }
+    }
+    
+    if let Ok(fragmentation) = MEMORY_FRAGMENTATION.read() {
+        report.fragmentation_ratio = fragmentation.fragmentation_ratio;
+    }
+    
+    report
 }
 
 #[cfg(debug_assertions)]
@@ -670,6 +850,63 @@ pub struct AllocationStatistics {
     pub deallocation_count: usize,
     pub allocation_failures: usize,
     pub memory_limit: usize,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct MemoryLeakReport {
+    pub total_leaked_bytes: usize,
+    pub total_leaked_count: usize,
+    pub leaked_addresses: Vec<usize>,
+    pub leaked_allocations: Vec<LeakedAllocation>,
+    pub fragmentation_ratio: f64,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Debug, Clone)]
+pub struct LeakedAllocation {
+    pub address: usize,
+    pub size: usize,
+    pub source_file: String,
+    pub source_line: u32,
+    pub timestamp: Instant,
+    pub backtrace: String,
+}
+
+#[cfg(debug_assertions)]
+impl MemoryLeakReport {
+    fn new() -> Self {
+        MemoryLeakReport {
+            total_leaked_bytes: 0,
+            total_leaked_count: 0,
+            leaked_addresses: Vec::new(),
+            leaked_allocations: Vec::new(),
+            fragmentation_ratio: 0.0,
+        }
+    }
+    
+    pub fn print_report(&self) {
+        if self.total_leaked_count == 0 {
+            info!("No memory leaks detected");
+            return;
+        }
+        
+        error!("Memory leak detected: {} bytes in {} allocations", 
+               self.total_leaked_bytes, self.total_leaked_count);
+        
+        for leak in &self.leaked_allocations {
+            error!("  Leaked {} bytes at 0x{:x}", leak.size, leak.address);
+            error!("    Source: {}:{}", leak.source_file, leak.source_line);
+            if std::env::var("PRINT_LEAK_BACKTRACE").is_ok() {
+                error!("    Backtrace:\n{}", leak.backtrace);
+            }
+        }
+        
+        if self.fragmentation_ratio > 0.5 {
+            warn!("High memory fragmentation detected: {:.2}%", 
+                  self.fragmentation_ratio * 100.0);
+        }
+    }
 }
 
 impl AllocationStatistics {
