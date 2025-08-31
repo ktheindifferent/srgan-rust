@@ -10,6 +10,8 @@ use crate::error::SrganError;
 use crate::UpscalingNetwork;
 use crate::config::NetworkConfig;
 
+#[path = "model_converter/pytorch.rs"]
+mod pytorch;
 #[path = "model_converter/tensorflow_simple.rs"]
 mod tensorflow;
 #[path = "model_converter/onnx_simple.rs"]
@@ -23,6 +25,7 @@ mod keras;
 #[path = "model_converter/keras_simple.rs"]
 mod keras_simple;
 
+use pytorch::PyTorchParser;
 use tensorflow::TensorFlowParser;
 use onnx::OnnxParser;
 #[cfg(feature = "keras-support")]
@@ -68,22 +71,53 @@ impl ModelConverter {
 
     /// Load a PyTorch model from a .pth file
     pub fn load_pytorch(&mut self, path: &Path) -> Result<(), SrganError> {
-        if !path.exists() {
-            return Err(SrganError::FileNotFound(path.to_path_buf()));
+        let mut parser = PyTorchParser::new();
+        
+        // Load the model using the enhanced parser
+        parser.load_model(path)?;
+        
+        // Validate model integrity
+        parser.validate_model()?;
+        
+        // Extract weights
+        let weights = parser.extract_weights()?;
+        
+        // Get model info
+        let model_info = parser.get_model_info();
+        
+        // Convert TensorData to parameters HashMap
+        let mut parameters = HashMap::new();
+        for (name, tensor_data) in weights {
+            // Validate tensor data
+            let stats = tensor_statistics(&tensor_data.data);
+            if !stats.min.is_finite() || !stats.max.is_finite() {
+                warn!("Tensor {} contains NaN or Inf values", name);
+            }
+            
+            parameters.insert(name, tensor_data.data);
         }
-
-        // Read the file
-        let mut file = File::open(path)
-            .map_err(|e| SrganError::Io(e))?;
         
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .map_err(|e| SrganError::Io(e))?;
-
-        // Parse PyTorch pickle format (simplified - real implementation would need pickle parser)
-        self.parse_pytorch_weights(&buffer)?;
+        // Create metadata
+        let metadata = ModelMetadata {
+            format: "pytorch".into(),
+            version: model_info.version,
+            input_shape: model_info.input_shape,
+            output_shape: model_info.output_shape,
+            architecture: if model_info.architecture_hints.contains(&"ESRGAN".to_string()) {
+                "esrgan".into()
+            } else if model_info.architecture_hints.contains(&"SRGAN".to_string()) {
+                "srgan".into()
+            } else if model_info.architecture_hints.contains(&"ResNet".to_string()) {
+                "srresnet".into()
+            } else {
+                "unknown".into()
+            },
+            parameters,
+        };
         
-        info!("Loaded PyTorch model from {:?}", path);
+        self.metadata = Some(metadata);
+        info!("Loaded PyTorch model from {:?} with {} parameters", 
+              path, self.metadata.as_ref().unwrap().parameters.len());
         Ok(())
     }
 
@@ -181,7 +215,9 @@ impl ModelConverter {
         }
     }
 
-    /// Parse PyTorch weights from pickle format
+    /// Parse PyTorch weights from pickle format (deprecated - use PyTorchParser instead)
+    #[deprecated(note = "Use PyTorchParser for enhanced PyTorch model parsing")]
+    #[allow(dead_code)]
     fn parse_pytorch_weights(&mut self, data: &[u8]) -> Result<(), SrganError> {
         // Validate minimum file size
         if data.len() < 16 {

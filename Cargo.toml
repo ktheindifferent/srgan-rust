@@ -30,6 +30,7 @@ thread_local = "1.1"
 serde-pickle = "1.1"
 num-bigint = "0.4"
 num-traits = "0.2"
+zip = "0.6"
 # For TensorFlow SavedModel parsing
 prost = "0.12"
 prost-types = "0.12"
@@ -60,7 +61,16 @@ keras-support = ["hdf5"]
 [dev-dependencies]
 tempfile = "3"
 criterion = "0.3"
+proptest = "1.0"
+quickcheck = "1.0"
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = { version = "0.7", features = ["checkpoint"] }
 
 [[bench]]
 name = "thread_safety_bench"
+harness = false
+
+[[bench]]
+name = "pytorch_parser_bench"
 harness = false
