@@ -30,6 +30,7 @@ thread_local = "1.1"
 serde-pickle = "1.1"
 num-bigint = "0.4"
 num-traits = "0.2"
+zip = "0.6"
 # For TensorFlow SavedModel parsing
 prost = "0.12"
 prost-types = "0.12"
@@ -68,4 +69,8 @@ loom = { version = "0.7", features = ["checkpoint"] }
 
 [[bench]]
 name = "thread_safety_bench"
+harness = false
+
+[[bench]]
+name = "pytorch_parser_bench"
 harness = false
