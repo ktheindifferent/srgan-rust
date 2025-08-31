@@ -1,0 +1,33 @@
+# Valgrind suppressions for Rust thread safety tests
+
+# Suppress known Rust runtime issues
+{
+   rust_std_thread_spawn
+   Helgrind:Race
+   ...
+   fun:_ZN3std6thread*spawn*
+}
+
+# Suppress Arc reference counting races (benign)
+{
+   arc_strong_count
+   Helgrind:Race
+   ...
+   fun:*Arc*strong_count*
+}
+
+# Suppress parking_lot mutex internals
+{
+   parking_lot_mutex
+   Helgrind:Race
+   ...
+   obj:*/parking_lot*
+}
+
+# Suppress rayon thread pool internals
+{
+   rayon_thread_pool
+   Helgrind:Race
+   ...
+   obj:*/rayon*
+}

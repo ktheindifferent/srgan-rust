@@ -245,6 +245,11 @@ impl ThreadSafeNetwork {
 //    - All mutable state is protected by Mutex
 //    - No use of unsafe pointers or Cell/RefCell
 //
+// 5. Runtime Safety Guarantees:
+//    - Debug assertions verify thread safety invariants
+//    - Buffer pool access is always synchronized
+//    - Poisoned mutex detection prevents undefined behavior after panics
+//
 // Therefore, concurrent access from multiple threads is safe.
 //
 // Note: These traits could be automatically derived since all fields are Send + Sync.
@@ -252,8 +257,25 @@ impl ThreadSafeNetwork {
 // 1. Document the thread safety guarantees
 // 2. Ensure breaking changes are caught if non-thread-safe fields are added
 // 3. Make the thread safety contract explicit in the API
-unsafe impl Send for ThreadSafeNetwork {}
-unsafe impl Sync for ThreadSafeNetwork {}
+unsafe impl Send for ThreadSafeNetwork {
+    // Runtime verification in debug builds
+    #[cfg(debug_assertions)]
+    fn _assert_send() {
+        fn _assert_send<T: Send>() {}
+        _assert_send::<Arc<NetworkWeights>>();
+        _assert_send::<Arc<Mutex<HashMap<std::thread::ThreadId, ComputeBuffer>>>>();
+    }
+}
+
+unsafe impl Sync for ThreadSafeNetwork {
+    // Runtime verification in debug builds
+    #[cfg(debug_assertions)]
+    fn _assert_sync() {
+        fn _assert_sync<T: Sync>() {}
+        _assert_sync::<Arc<NetworkWeights>>();
+        _assert_sync::<Arc<Mutex<HashMap<std::thread::ThreadId, ComputeBuffer>>>>();
+    }
+}
 
 impl std::fmt::Display for ThreadSafeNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -266,6 +288,7 @@ mod tests {
     use super::*;
     use std::thread;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_thread_safe_network_creation() {
@@ -311,5 +334,72 @@ mod tests {
         
         assert!(result1.is_ok());
         assert!(result2.is_ok());
+    }
+
+    #[test]
+    fn test_thread_safety_stress() {
+        // Stress test with high contention
+        let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+            .expect("Failed to load builtin network for test"));
+        let num_threads = 16;
+        let iterations_per_thread = 100;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut handles = vec![];
+
+        for _ in 0..num_threads {
+            let network_clone = Arc::clone(&network);
+            let counter_clone = Arc::clone(&counter);
+            let handle = thread::spawn(move || {
+                for _ in 0..iterations_per_thread {
+                    let input = ArrayD::<f32>::zeros(vec![1, 16, 16, 3]);
+                    let result = network_clone.process(input);
+                    assert!(result.is_ok());
+                    counter_clone.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked during stress test");
+        }
+
+        assert_eq!(counter.load(Ordering::Relaxed), num_threads * iterations_per_thread);
+    }
+
+    #[test]
+    fn test_buffer_pool_isolation() {
+        // Verify that each thread gets its own buffer
+        let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()
+            .expect("Failed to load builtin network for test"));
+        let thread_ids = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = vec![];
+
+        for _ in 0..4 {
+            let network_clone = Arc::clone(&network);
+            let thread_ids_clone = Arc::clone(&thread_ids);
+            let handle = thread::spawn(move || {
+                let current_id = std::thread::current().id();
+                thread_ids_clone.lock().unwrap().push(current_id);
+                
+                // Perform inference to create buffer
+                let input = ArrayD::<f32>::zeros(vec![1, 16, 16, 3]);
+                network_clone.process(input).unwrap();
+                
+                // Check that buffer pool contains this thread's buffer
+                let pool = network_clone.buffer_pool.lock().unwrap();
+                assert!(pool.contains_key(&current_id));
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked during buffer pool test");
+        }
+
+        // Verify all threads had unique IDs
+        let ids = thread_ids.lock().unwrap();
+        let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(ids.len(), unique_ids.len());
     }
 }

@@ -49,6 +49,8 @@ pub mod web_server_improved;
 #[cfg(test)]
 mod error_handling_tests;
 #[cfg(test)]
+mod profiling_tests;
+#[cfg(test)]
 mod error_recovery_tests;
 
 use std::{
