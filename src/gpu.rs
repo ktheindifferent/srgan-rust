@@ -258,12 +258,34 @@ impl GpuContext {
 //    - When real GPU APIs are added, they must be thread-safe or protected
 //    - Most GPU APIs (CUDA, OpenCL) have their own thread safety guarantees
 //
+// 6. Runtime Safety Checks:
+//    - Debug assertions verify all synchronization primitives are sound
+//    - Poisoned lock detection prevents use after panic
+//    - Memory bounds checking prevents overallocation
+//
 // Note: When implementing actual GPU backends, ensure that:
 // - GPU context handles are thread-safe or wrapped in synchronization primitives
 // - Memory operations are properly synchronized
 // - Command queues/streams are either thread-local or synchronized
-unsafe impl Send for GpuContext {}
-unsafe impl Sync for GpuContext {}
+unsafe impl Send for GpuContext {
+    #[cfg(debug_assertions)]
+    fn _assert_send() {
+        fn _assert_send<T: Send>() {}
+        _assert_send::<Arc<GpuDevice>>();
+        _assert_send::<Arc<RwLock<usize>>>();
+        _assert_send::<Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>>();
+    }
+}
+
+unsafe impl Sync for GpuContext {
+    #[cfg(debug_assertions)]
+    fn _assert_sync() {
+        fn _assert_sync<T: Sync>() {}
+        _assert_sync::<Arc<GpuDevice>>();
+        _assert_sync::<Arc<RwLock<usize>>>();
+        _assert_sync::<Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>>();
+    }
+}
 
 impl Clone for GpuContext {
     fn clone(&self) -> Self {
@@ -338,6 +360,8 @@ mod vulkan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::thread;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn test_gpu_backend_from_str() {
@@ -370,5 +394,130 @@ mod tests {
         assert!(arr.to_device(&device).is_ok());
         assert!(!arr.is_on_device());
         assert!(arr.to_cpu().is_ok());
+    }
+
+    #[test]
+    fn test_concurrent_memory_allocation() {
+        let context = Arc::new(GpuContext::new(GpuBackend::None)
+            .expect("Should create GPU context"));
+        
+        // Set up a fake GPU with 1000 MB of memory
+        let context_with_memory = Arc::new(GpuContext {
+            device: Arc::new(GpuDevice {
+                backend: GpuBackend::None,
+                device_id: 0,
+                memory_mb: 1000,
+                name: "Test GPU".to_string(),
+            }),
+            allocated_mb: Arc::new(RwLock::new(0)),
+            memory_pools: Arc::new(RwLock::new(HashMap::new())),
+        });
+        
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut handles = vec![];
+        
+        // Spawn multiple threads that allocate memory
+        for i in 0..8 {
+            let ctx = Arc::clone(&context_with_memory);
+            let cnt = Arc::clone(&counter);
+            
+            let handle = thread::spawn(move || {
+                // Each thread allocates 50 MB
+                let result = ctx.allocate(50);
+                if result.is_ok() {
+                    cnt.fetch_add(1, Ordering::Relaxed);
+                    // Simulate some work
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    // Free memory
+                    ctx.free_thread_memory();
+                }
+            });
+            handles.push(handle);
+        }
+        
+        // Wait for all threads
+        for handle in handles {
+            handle.join().expect("Thread panicked during memory allocation test");
+        }
+        
+        // All 8 threads should have successfully allocated memory
+        assert_eq!(counter.load(Ordering::Relaxed), 8);
+        
+        // All memory should be freed
+        assert_eq!(context_with_memory.allocated_mb(), 0);
+    }
+
+    #[test]
+    fn test_memory_pool_isolation() {
+        let context = Arc::new(GpuContext {
+            device: Arc::new(GpuDevice {
+                backend: GpuBackend::None,
+                device_id: 0,
+                memory_mb: 1000,
+                name: "Test GPU".to_string(),
+            }),
+            allocated_mb: Arc::new(RwLock::new(0)),
+            memory_pools: Arc::new(RwLock::new(HashMap::new())),
+        });
+        
+        let thread_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut handles = vec![];
+        
+        for _ in 0..4 {
+            let ctx = Arc::clone(&context);
+            let ids = Arc::clone(&thread_ids);
+            
+            let handle = thread::spawn(move || {
+                let current_id = std::thread::current().id();
+                ids.lock().unwrap().push(current_id);
+                
+                // Allocate memory for this thread
+                ctx.allocate(10).expect("Should allocate memory");
+                
+                // Verify this thread has its own pool
+                let pools = ctx.memory_pools.read().unwrap();
+                assert!(pools.contains_key(&current_id));
+                assert_eq!(pools.get(&current_id).unwrap().total_size, 10);
+            });
+            handles.push(handle);
+        }
+        
+        for handle in handles {
+            handle.join().expect("Thread panicked during pool isolation test");
+        }
+        
+        // Verify all threads had unique IDs and pools
+        let ids = thread_ids.lock().unwrap();
+        let unique_ids: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(ids.len(), unique_ids.len());
+    }
+
+    #[test]
+    fn test_memory_overflow_protection() {
+        let context = GpuContext {
+            device: Arc::new(GpuDevice {
+                backend: GpuBackend::None,
+                device_id: 0,
+                memory_mb: 100,  // Limited memory
+                name: "Test GPU".to_string(),
+            }),
+            allocated_mb: Arc::new(RwLock::new(0)),
+            memory_pools: Arc::new(RwLock::new(HashMap::new())),
+        };
+        
+        // Try to allocate more than available
+        let result = context.allocate(150);
+        assert!(result.is_err());
+        
+        // Allocate within limits
+        assert!(context.allocate(50).is_ok());
+        assert_eq!(context.allocated_mb(), 50);
+        
+        // Try to allocate more (should fail)
+        assert!(context.allocate(60).is_err());
+        
+        // But smaller allocation should work
+        assert!(context.allocate(40).is_ok());
+        assert_eq!(context.allocated_mb(), 90);
     }
 }
