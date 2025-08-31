@@ -3,8 +3,8 @@
 ## Overview
 This document describes the parallel processing implementation for batch operations in SRGAN-Rust, which provides significant performance improvements for processing multiple images.
 
-## Problem Statement
-The original batch processing implementation in `src/commands/batch.rs:66` had parallel processing disabled with the TODO comment: "Parallel processing is disabled due to Send/Sync constraints in UpscalingNetwork". This limitation severely impacted performance for batch operations.
+## Background
+The original batch processing implementation had parallel processing disabled due to Send/Sync constraints in the UpscalingNetwork. This limitation has been fully resolved with the implementation of a thread-safe wrapper that enables efficient parallel processing for batch operations.
 
 ## Solution Architecture
 
@@ -48,23 +48,69 @@ The parallel processing implementation shows:
 
 ### Basic Parallel Batch Processing
 ```bash
-# Process images in parallel (default)
+# Process images in parallel (default - uses all CPU cores)
 srgan-rust batch input_dir/ output_dir/
 
-# Specify thread count
+# Specify thread count for better control
 srgan-rust batch input_dir/ output_dir/ --threads 4
 
-# Force sequential processing
+# Process with specific network type
+srgan-rust batch input_dir/ output_dir/ --network anime --threads 8
+
+# Skip existing files and use custom pattern
+srgan-rust batch input_dir/ output_dir/ --skip-existing --pattern "*.jpg"
+
+# Recursive processing with parallel execution
+srgan-rust batch input_dir/ output_dir/ --recursive --threads 4
+
+# Force sequential processing (useful for debugging or low memory)
 srgan-rust batch input_dir/ output_dir/ --sequential
+```
+
+### Programmatic API Usage
+```rust
+use srgan_rust::thread_safe_network::ThreadSafeNetwork;
+use std::sync::Arc;
+use rayon::prelude::*;
+
+// Load thread-safe network
+let network = Arc::new(ThreadSafeNetwork::load_builtin_natural()?);
+
+// Process multiple images in parallel
+let images = vec![image1, image2, image3, image4];
+let upscaled: Vec<_> = images
+    .par_iter()
+    .map(|img| network.upscale_image(img))
+    .collect::<Result<Vec<_>, _>>()?;
+```
+
+### Custom Thread Pool Configuration
+```rust
+use rayon::ThreadPoolBuilder;
+
+// Configure custom thread pool
+ThreadPoolBuilder::new()
+    .num_threads(4)
+    .thread_name(|i| format!("srgan-worker-{}", i))
+    .build_global()
+    .expect("Failed to build thread pool");
+
+// Now all parallel operations will use this configuration
 ```
 
 ### Running Benchmarks
 ```bash
-# Run parallel processing benchmark
+# Run parallel processing benchmark with defaults
 srgan-rust parallel-benchmark
 
 # Customize benchmark parameters
 srgan-rust parallel-benchmark --batch-sizes 10,50,100 --thread-counts 1,2,4,8
+
+# Benchmark with specific network
+srgan-rust parallel-benchmark --network anime --iterations 3
+
+# Save benchmark results to file
+srgan-rust parallel-benchmark --output benchmark_results.json
 ```
 
 ## Implementation Details
@@ -72,35 +118,52 @@ srgan-rust parallel-benchmark --batch-sizes 10,50,100 --thread-counts 1,2,4,8
 ### ThreadSafeNetwork Structure
 ```rust
 pub struct ThreadSafeNetwork {
-    network: UpscalingNetwork,
+    /// Immutable network weights shared across threads
+    weights: Arc<NetworkWeights>,
+    /// Pool of computation buffers indexed by thread ID
+    buffer_pool: Arc<Mutex<HashMap<ThreadId, ComputeBuffer>>>,
 }
 
 impl ThreadSafeNetwork {
-    pub fn get_network(&self) -> UpscalingNetwork {
-        self.network.clone()  // Deep copy for thread safety
+    /// Process a tensor through the network
+    pub fn process(&self, input: ArrayD<f32>) -> Result<ArrayD<f32>> {
+        // Each thread gets its own computation buffer
+        // No cloning of network weights needed
+    }
+    
+    /// Upscale an image
+    pub fn upscale_image(&self, img: &DynamicImage) -> Result<DynamicImage> {
+        // Convert image to tensor, process, convert back
     }
 }
+
+// Explicitly marked as Send + Sync for thread safety
+unsafe impl Send for ThreadSafeNetwork {}
+unsafe impl Sync for ThreadSafeNetwork {}
 ```
 
 ### Parallel Processing Flow
 1. Load network and wrap in ThreadSafeNetwork
 2. Configure thread pool based on CLI options
 3. Process images using `par_iter()` from rayon
-4. Each thread gets its own network clone
-5. Progress tracking shared via Arc<ProgressBar>
-6. Results collected with atomic counters
+4. Each thread gets its own computation buffer (not network clone)
+5. Network weights are shared immutably across all threads
+6. Progress tracking shared via Arc<ProgressBar>
+7. Results collected with atomic counters
 
 ### Memory Management
-- Each thread maintains its own network copy (~200-300MB)
+- Network weights are shared across all threads (single copy in memory)
+- Each thread maintains only a small computation buffer (~1-2MB)
 - Image data is processed one at a time per thread
-- Total memory usage: `num_threads * (network_size + image_buffer)`
+- Total memory usage: `network_size + (num_threads * (buffer_size + image_buffer))`
+- Significant memory savings compared to cloning entire network per thread
 
-## Key Files Modified
+## Key Files
 
-1. **src/parallel.rs** - New module for thread-safe wrapper
-2. **src/commands/batch.rs** - Updated batch processing logic
-3. **src/cli.rs** - Added thread configuration options
-4. **src/benchmarks/** - New benchmark module for testing
+1. **src/thread_safe_network.rs** - Thread-safe network wrapper implementation
+2. **src/commands/batch.rs** - Batch processing with parallel support
+3. **src/cli.rs** - CLI options for thread configuration
+4. **src/benchmarks/parallel_bench.rs** - Parallel processing benchmarks
 5. **src/commands/parallel_benchmark.rs** - Benchmark command implementation
 
 ## Testing
