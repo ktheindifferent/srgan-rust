@@ -85,6 +85,12 @@ export interface UpscaleRequest {
   image: string;
   /** Model to use (default: "natural"). */
   model?: ModelLabel;
+  /** Waifu2x noise-reduction level 0–3 (default: 1). Only used when model is "waifu2x". */
+  waifu2x_noise_level?: 0 | 1 | 2 | 3;
+  /** Waifu2x scale factor: 1 (denoise-only) or 2 (upscale). Default: 2. Only used when model is "waifu2x". */
+  waifu2x_scale?: 1 | 2;
+  /** Waifu2x content style hint: "anime" (default), "photo", or "artwork". Only used when model is "waifu2x". */
+  waifu2x_style?: "anime" | "photo" | "artwork";
   /** JPEG quality 1–100 (only used when the output is JPEG). */
   jpeg_quality?: number;
   /** Optional URL to POST the result to when the job finishes. */
