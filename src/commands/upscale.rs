@@ -12,7 +12,7 @@ use std::io::Read;
 use std::path::Path;
 use image;
 
-const TILE_SIZE: usize = 256;
+const DEFAULT_TILE_SIZE: usize = 512;
 const TILE_OVERLAP: usize = 32;
 const LARGE_IMAGE_THRESHOLD: usize = 4_000_000; // 4 megapixels
 
@@ -66,6 +66,11 @@ pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 		.and_then(|s| s.parse::<u8>().ok())
 		.unwrap_or(85)
 		.max(1);
+	let tile_size: usize = app_m
+		.value_of("TILE_SIZE")
+		.and_then(|s| s.parse::<usize>().ok())
+		.unwrap_or(DEFAULT_TILE_SIZE)
+		.max(64);
 
 	let mut input_file = File::open(&input_path_buf)?;
 	let input = crate::read(&mut input_file)?;
@@ -79,17 +84,17 @@ pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 	let output = if pixel_count > LARGE_IMAGE_THRESHOLD {
 		let mp = pixel_count as f64 / 1_000_000.0;
 		spinner.set_message(format!(
-			"Large image ({:.1} MP) — tiled processing...",
-			mp
+			"Large image ({:.1} MP) — tiled processing ({}px tiles)...",
+			mp, tile_size
 		));
 		info!(
-			"Image exceeds {}MP threshold ({:.1} MP); using tiled processing ({} tiles {}px overlap)",
+			"Image exceeds {}MP threshold ({:.1} MP); using tiled processing (tile_size={}px, {}px overlap)",
 			LARGE_IMAGE_THRESHOLD / 1_000_000,
 			mp,
-			TILE_SIZE,
+			tile_size,
 			TILE_OVERLAP,
 		);
-		upscale_tiled(input, &network)?
+		upscale_tiled(input, &network, tile_size)?
 	} else {
 		spinner.set_message("Running neural network...");
 		crate::upscale(input, &network)
@@ -186,10 +191,10 @@ fn detect_format(app_m: &ArgMatches, output_path: &Path) -> String {
 /// Upscale a large image by splitting it into overlapping tiles, upscaling each
 /// independently, and feather-blending them back together.
 ///
-/// Tiles: `TILE_SIZE × TILE_SIZE` with `TILE_OVERLAP` pixels of overlap on each
-/// interior edge.  The blend weight for each pixel ramps linearly from 0 at the
-/// overlap boundary to 1 at distance `TILE_OVERLAP` into the tile centre.
-fn upscale_tiled(img: ArrayD<f32>, network: &UpscalingNetwork) -> Result<ArrayD<f32>> {
+/// Tiles are `tile_size × tile_size` pixels with `TILE_OVERLAP` pixels of overlap
+/// on each interior edge.  The blend weight for each pixel ramps linearly from 0
+/// at the overlap boundary to 1 at distance `TILE_OVERLAP` into the tile centre.
+fn upscale_tiled(img: ArrayD<f32>, network: &UpscalingNetwork, tile_size: usize) -> Result<ArrayD<f32>> {
 	let shape = img.shape().to_vec();
 	let in_h = shape[1];
 	let in_w = shape[2];
@@ -205,20 +210,20 @@ fn upscale_tiled(img: ArrayD<f32>, network: &UpscalingNetwork) -> Result<ArrayD<
 	let mut accum = ArrayD::<f32>::zeros(IxDyn(&[out_h, out_w, 3]));
 	let mut wsum = ArrayD::<f32>::zeros(IxDyn(&[out_h, out_w, 1]));
 
-	let step = TILE_SIZE.saturating_sub(2 * TILE_OVERLAP).max(1);
+	let step = tile_size.saturating_sub(2 * TILE_OVERLAP).max(1);
 
 	let img_3d = img.subview(Axis(0), 0); // [H, W, C]
 
 	// Collect tile start positions so the last tile always ends at the image edge
-	let y_starts = tile_starts(in_h, TILE_SIZE, step);
-	let x_starts = tile_starts(in_w, TILE_SIZE, step);
+	let y_starts = tile_starts(in_h, tile_size, step);
+	let x_starts = tile_starts(in_w, tile_size, step);
 
 	for &ys in &y_starts {
-		let ye = (ys + TILE_SIZE).min(in_h);
+		let ye = (ys + tile_size).min(in_h);
 		let th = ye - ys;
 
 		for &xs in &x_starts {
-			let xe = (xs + TILE_SIZE).min(in_w);
+			let xe = (xs + tile_size).min(in_w);
 			let tw = xe - xs;
 
 			// Extract tile → [1, th, tw, 3]

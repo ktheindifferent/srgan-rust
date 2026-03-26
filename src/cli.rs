@@ -15,6 +15,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_gpu_flag_arg())
 		.arg(build_format_arg())
 		.arg(build_quality_arg())
+		.arg(build_tile_size_arg())
 		.subcommand(build_train_subcommand())
 		.subcommand(build_train_prescaled_subcommand())
 		.subcommand(build_batch_subcommand())
@@ -134,6 +135,18 @@ fn build_quality_arg() -> Arg<'static, 'static> {
 		.long("quality")
 		.help("JPEG output quality (1–100, default: 85)")
 		.value_name("QUALITY")
+		.empty_values(false)
+}
+
+fn build_tile_size_arg() -> Arg<'static, 'static> {
+	Arg::with_name("TILE_SIZE")
+		.long("tile-size")
+		.help(
+			"Tile size in pixels for tiled upscaling of large images (default: 512). \
+             Images larger than 4 MP are automatically processed in tiles; this option \
+             also controls the tile size when tiling is triggered.",
+		)
+		.value_name("TILE_SIZE")
 		.empty_values(false)
 }
 

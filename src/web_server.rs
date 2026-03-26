@@ -85,6 +85,11 @@ pub struct UpscaleRequest {
     /// and select the best model automatically.
     #[serde(default = "default_auto_detect")]
     pub auto_detect: bool,
+    /// Tile size in pixels for tiled upscaling (default: 512).
+    /// Images larger than 4 MP are processed in overlapping tiles to avoid
+    /// running out of memory.  Set this to override the default tile size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tile_size: Option<usize>,
     /// Optional webhook to call when the job completes (async jobs only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_config: Option<WebhookConfig>,
@@ -1604,6 +1609,13 @@ function renderJobs(jobs){
             );
         }
 
+        // Determine whether to use tiled processing.
+        const LARGE_IMAGE_THRESHOLD: usize = 4_000_000;
+        const DEFAULT_TILE_SIZE: usize = 512;
+        let pixel_count = (img.width() as usize) * (img.height() as usize);
+        let tile_size = request.tile_size.map(|s| s.max(64)).unwrap_or(DEFAULT_TILE_SIZE);
+        let use_tiling = pixel_count > LARGE_IMAGE_THRESHOLD || request.tile_size.is_some();
+
         // Select the network for the effective label.  For waifu2x labels the
         // built-in anime model is used as a fallback until native waifu2x weights
         // are bundled.  For all other labels we load the appropriate built-in
@@ -1612,14 +1624,30 @@ function renderJobs(jobs){
             || effective_label == "bilinear"
             || effective_label.is_empty()
         {
-            self.network.upscale_image(&img)?
+            if use_tiling {
+                self.network.upscale_image_tiled(&img, tile_size)?
+            } else {
+                self.network.upscale_image(&img)?
+            }
         } else {
             match crate::thread_safe_network::ThreadSafeNetwork::from_label(
                 &effective_label,
                 None,
             ) {
-                Ok(net) => net.upscale_image(&img)?,
-                Err(_) => self.network.upscale_image(&img)?,
+                Ok(net) => {
+                    if use_tiling {
+                        net.upscale_image_tiled(&img, tile_size)?
+                    } else {
+                        net.upscale_image(&img)?
+                    }
+                }
+                Err(_) => {
+                    if use_tiling {
+                        self.network.upscale_image_tiled(&img, tile_size)?
+                    } else {
+                        self.network.upscale_image(&img)?
+                    }
+                }
             }
         };
         let upscaled_size = (upscaled.width(), upscaled.height());

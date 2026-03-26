@@ -242,6 +242,114 @@ impl ThreadSafeNetwork {
         Ok(upscaled_img)
     }
 
+    /// Upscale an image using tiled processing to avoid OOM on large inputs.
+    ///
+    /// The image is split into overlapping `tile_size × tile_size` tiles.  Each tile
+    /// is upscaled independently and the results are feather-blended at the seams so
+    /// there are no visible discontinuities.
+    pub fn upscale_image_tiled(&self, img: &DynamicImage, tile_size: usize) -> Result<DynamicImage> {
+        use ndarray::{Axis, IxDyn};
+        const TILE_OVERLAP: usize = 32;
+
+        let tensor = image_to_data(img); // [H, W, 3]
+        let shape = tensor.shape().to_vec();
+        let in_h = shape[0];
+        let in_w = shape[1];
+
+        let scale = self.weights.factor as usize;
+        let out_h = in_h * scale;
+        let out_w = in_w * scale;
+        let overlap_out = TILE_OVERLAP * scale;
+
+        let mut accum = ArrayD::<f32>::zeros(IxDyn(&[out_h, out_w, 3]));
+        let mut wsum = ArrayD::<f32>::zeros(IxDyn(&[out_h, out_w, 1]));
+
+        let step = tile_size.saturating_sub(2 * TILE_OVERLAP).max(1);
+        let y_starts = Self::tile_starts(in_h, tile_size, step);
+        let x_starts = Self::tile_starts(in_w, tile_size, step);
+
+        for &ys in &y_starts {
+            let ye = (ys + tile_size).min(in_h);
+            let th = ye - ys;
+
+            for &xs in &x_starts {
+                let xe = (xs + tile_size).min(in_w);
+                let tw = xe - xs;
+
+                // Extract tile [th, tw, 3] → [1, th, tw, 3]
+                let tile = tensor.slice(ndarray::s![ys..ye, xs..xe, ..]).to_owned();
+                let tile_4d = tile
+                    .into_shape(IxDyn(&[1, th, tw, 3]))
+                    .map_err(|e| SrganError::ShapeError(format!("tile reshape: {}", e)))?;
+
+                let upscaled = self
+                    .process(tile_4d)
+                    .map_err(|e| SrganError::GraphExecution(e.to_string()))?;
+
+                let ut = upscaled.subview(Axis(0), 0); // [out_th, out_tw, 3]
+                let out_th = ut.shape()[0];
+                let out_tw = ut.shape()[1];
+
+                let oy0 = ys * scale;
+                let ox0 = xs * scale;
+
+                for i in 0..out_th {
+                    for j in 0..out_tw {
+                        let oy = oy0 + i;
+                        let ox = ox0 + j;
+                        if oy >= out_h || ox >= out_w {
+                            continue;
+                        }
+                        let wy = Self::blend_weight(i, out_th, overlap_out);
+                        let wx = Self::blend_weight(j, out_tw, overlap_out);
+                        let w = wy * wx;
+                        for c in 0..3usize {
+                            accum[[oy, ox, c]] += ut[[i, j, c]] * w;
+                        }
+                        wsum[[oy, ox, 0]] += w;
+                    }
+                }
+            }
+        }
+
+        // Normalize accumulator
+        for oy in 0..out_h {
+            for ox in 0..out_w {
+                let w = wsum[[oy, ox, 0]];
+                if w > 0.0 {
+                    for c in 0..3usize {
+                        accum[[oy, ox, c]] /= w;
+                    }
+                }
+            }
+        }
+
+        Ok(data_to_image(accum.view()))
+    }
+
+    fn tile_starts(total: usize, tile_size: usize, step: usize) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut s = 0usize;
+        loop {
+            starts.push(s);
+            if s + tile_size >= total {
+                break;
+            }
+            s += step;
+        }
+        starts
+    }
+
+    fn blend_weight(i: usize, dim: usize, overlap: usize) -> f32 {
+        if overlap == 0 {
+            return 1.0;
+        }
+        let dist_near = i + 1;
+        let dist_far = dim - i;
+        let d = dist_near.min(dist_far).min(overlap);
+        d as f32 / overlap as f32
+    }
+
     /// Get the display name of the network
     pub fn display(&self) -> &str {
         &self.weights.display
