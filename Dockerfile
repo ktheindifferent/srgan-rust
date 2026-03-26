@@ -1,53 +1,43 @@
-# Multi-stage build for optimized image size
-FROM rust:1.75 as builder
+# Stage 1: builder
+FROM rust:1.75-slim AS builder
+WORKDIR /app
 
-# Set working directory
-WORKDIR /usr/src/srgan-rust
-
-# Copy Cargo files first for better layer caching
-COPY Cargo.toml Cargo.lock ./
-
-# Create dummy main.rs to cache dependencies
-RUN mkdir src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# Copy actual source code
-COPY src ./src
-COPY res ./res
-
-# Build with native CPU optimizations
-ENV RUSTFLAGS="-C target-cpu=native -C opt-level=3"
-RUN cargo build --release
-
-# Runtime stage - use smaller base image
-FROM debian:bookworm-slim
-
-# Install runtime dependencies
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    libssl3 \
-    ca-certificates \
+# Install system dependencies for image processing and SSL
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy binary from builder
-COPY --from=builder /usr/src/srgan-rust/target/release/srgan-rust /usr/local/bin/srgan-rust
+# Cache dependencies by building a dummy project first
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs \
+    && cargo build --release \
+    && rm -rf src
 
-# Copy pre-trained models
-COPY --from=builder /usr/src/srgan-rust/res /opt/srgan-rust/res
+# Build the real project
+COPY src ./src
+COPY res ./res
+RUN RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-# Set working directory for user files
-WORKDIR /workspace
+# Stage 2: runtime
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl3 \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd -m -u 1000 srgan && \
-    chown -R srgan:srgan /workspace
+# Copy binary and models
+COPY --from=builder /app/target/release/srgan-rust /usr/local/bin/
+COPY --from=builder /app/res/ /app/models/
 
+# Create data directory and non-root user
+RUN useradd -m -u 1000 srgan \
+    && mkdir -p /app/data \
+    && chown -R srgan:srgan /app
+
+WORKDIR /app
 USER srgan
 
-# Set entrypoint
-ENTRYPOINT ["srgan-rust"]
+EXPOSE 8080
 
-# Default command shows help
-CMD ["--help"]
+CMD ["srgan-rust", "server", "--host", "0.0.0.0", "--port", "8080"]

@@ -33,6 +33,7 @@ pub mod init;
 pub mod logging;
 pub mod metrics_wrapper;
 pub mod model_converter;
+pub mod model_manager;
 pub mod network;
 pub mod parallel;
 pub mod psnr;

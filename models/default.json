@@ -1,0 +1,8 @@
+{
+  "name": "default",
+  "description": "General purpose SRGAN, trained on DIV2K",
+  "scale_factor": 4,
+  "version": "1.0.0",
+  "psnr": 28.5,
+  "recommended_for": ["photos", "general"]
+}

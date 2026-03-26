@@ -1,44 +1,59 @@
-version: '3.8'
-
 services:
-  srgan-rust:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: srgan-rust:latest
-    container_name: srgan-rust
+  srgan-api:
+    build: .
+    ports:
+      - "8080:8080"
     volumes:
-      # Mount current directory as workspace
-      - ./:/workspace
-    working_dir: /workspace
-    # Override entrypoint for interactive use
-    entrypoint: ["/usr/local/bin/srgan-rust"]
-    # Default command - can be overridden
-    command: ["--help"]
-    
-  # Service for batch processing
+      - ./models:/app/models
+      - ./data:/app/data
+    environment:
+      - JWT_SECRET=${JWT_SECRET}
+      - DATABASE_URL=sqlite:///app/data/srgan.db
+      - RUST_LOG=info
+      - SRGAN_MODEL_PATH=/app/models
+      - SRGAN_MAX_WORKERS=${SRGAN_MAX_WORKERS:-4}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "srgan-rust", "--version"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+    depends_on:
+      - srgan-api
+    restart: unless-stopped
+
+  # Batch processing service (run manually: docker compose run srgan-batch)
   srgan-batch:
-    image: srgan-rust:latest
+    build: .
+    profiles:
+      - tools
     volumes:
-      - ./input:/workspace/input:ro
-      - ./output:/workspace/output
-    working_dir: /workspace
-    entrypoint: ["/bin/bash", "-c"]
-    command: |
-      "for file in input/*.{jpg,png,jpeg}; do
-        if [ -f \"$$file\" ]; then
-          filename=$$(basename \"$$file\")
-          echo \"Processing $$filename...\"
-          srgan-rust \"$$file\" \"output/$${filename%.*}_4x.png\"
-        fi
-      done"
-      
-  # Service for training
+      - ./input:/app/input:ro
+      - ./output:/app/output
+    environment:
+      - RUST_LOG=info
+    entrypoint: ["srgan-rust", "batch"]
+    command: ["/app/input", "/app/output"]
+
+  # Training service (run manually: docker compose run srgan-train)
   srgan-train:
-    image: srgan-rust:latest
+    build: .
+    profiles:
+      - tools
     volumes:
-      - ./training_data:/workspace/training_data:ro
-      - ./models:/workspace/models
-    working_dir: /workspace
-    entrypoint: ["/usr/local/bin/srgan-rust"]
-    command: ["train", "-r", "/workspace/training_data", "/workspace/models/custom_model.rsr"]
+      - ./training_data:/app/training_data:ro
+      - ./models:/app/models
+    environment:
+      - RUST_LOG=info
+    entrypoint: ["srgan-rust", "train"]
+    command: ["-r", "/app/training_data", "/app/models/custom_model.rsr"]
