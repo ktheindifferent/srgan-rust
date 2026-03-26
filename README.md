@@ -2,142 +2,65 @@
 
 ![LogoNN](docs/logo_nn.png)![LogoLin](docs/logo_lin.png)![Logo](docs/logo_rs.png)
 
-**Fast, production-ready SRGAN image upscaling in Rust.**
-Drop-in SaaS API, Docker-first deployment, custom model training — all in a single binary.
+**Neural network image upscaling at production scale — written in Rust.**
+
+srgan-rust is a fast, SaaS-ready implementation of [SRGAN](https://arxiv.org/abs/1609.04802) (Super-Resolution Generative Adversarial Networks). Give it a low-resolution image, get back a 4× upscale powered by deep learning — in milliseconds, with zero runtime dependencies.
 
 ---
 
-## What is it?
+## Why srgan-rust?
 
-srgan-rust is a Rust implementation of [SRGAN](https://arxiv.org/abs/1609.04802) (Super-Resolution Generative Adversarial Networks).
-Give it a low-resolution image, get back a 4× upscale powered by deep learning — in milliseconds.
-
-- **Fast**: native Rust, `rayon` parallel processing, optional GPU acceleration
-- **SaaS-ready**: JWT-authenticated REST API, rate limiting, job queue, Prometheus metrics
-- **Trainable**: bring your own dataset, get a domain-specific model (anime, medical, satellite…)
-- **Portable**: single static binary or Docker image, zero runtime dependencies
+| | srgan-rust | Python alternatives |
+|---|---|---|
+| **Inference speed** | ~1.2 s (256→1024, CPU) | 4–8 s |
+| **Memory footprint** | ~180 MB | 800 MB+ |
+| **Deployment** | Single static binary | Python env + CUDA drivers |
+| **API server** | Built-in, production-ready | Separate service required |
+| **Concurrency** | Rayon parallel, lock-free | GIL-limited |
 
 ---
 
-## Quick start (Docker)
+## Feature highlights
+
+- **Three built-in models** — `natural` (photos), `anime` (illustrations), `waifu2x` (noise-reducing, 1×/2×)
+- **Auto-detection** — automatically selects the best model for each image (photo vs. anime classifier built in)
+- **Batch processing** — directory-level processing with checkpoint/resume, parallel workers
+- **Async job queue** — priority queue (Enterprise > Pro > Free), 5-min timeout, 1-hour result retention
+- **Webhooks** — HMAC-SHA256-signed POST callbacks with exponential-backoff retry on job completion
+- **Admin dashboard** — HTML job monitor at `/dashboard`, stats at `/api/v1/admin/stats`
+- **JavaScript SDK** — drop-in `srgan.js` client for browser and Node.js
+- **S3 output** — results written directly to S3 when configured; presigned URLs returned
+- **Prometheus metrics** — `/metrics` endpoint, Grafana dashboard included (`docs/grafana-dashboard.json`)
+- **Subscription tiers** — Free / Pro / Enterprise enforced at the API key layer
+- **Kubernetes-ready** — HPA, PVC, cert-manager Ingress manifests in `k8s/`
+
+---
+
+## Quick start
+
+### Docker (one-liner)
 
 ```bash
-# One-liner: pull, build, and start the API + nginx reverse proxy
-curl -fsSL https://raw.githubusercontent.com/your-org/srgan-rust/master/deploy.sh | bash
+docker run --rm -p 8080:8080 \
+  -e JWT_SECRET=changeme \
+  ghcr.io/your-org/srgan-rust:latest
 ```
 
-Or manually:
+```bash
+curl http://localhost:8080/api/v1/health
+# {"status":"ok","version":"0.2.0"}
+```
+
+### Docker Compose (API + nginx reverse proxy)
 
 ```bash
 git clone https://github.com/your-org/srgan-rust
 cd srgan-rust
-cp .env.example .env          # edit JWT_SECRET and other settings
-docker compose up --build -d  # starts srgan-api on :8080 and nginx on :80/:443
+cp .env.example .env          # set JWT_SECRET and optional vars
+docker compose up --build -d  # srgan-api on :8080, nginx on :80/:443
 ```
 
-Health check:
-
-```bash
-curl http://localhost:8080/api/health
-# {"status":"ok","version":"0.2.0"}
-```
-
----
-
-## API reference
-
-All endpoints are under `/api/v1/`. Authenticate with an `Authorization: Bearer <token>` header.
-
-### Upscale an image
-
-```bash
-curl -X POST http://localhost:8080/api/v1/upscale \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_data": "'$(base64 -i input.jpg)'",
-    "scale_factor": 4,
-    "model": "default",
-    "format": "png"
-  }' | jq -r .image_data | base64 -d > output.png
-```
-
-### List available models
-
-```bash
-curl http://localhost:8080/api/v1/models \
-  -H "Authorization: Bearer $TOKEN"
-```
-
-```json
-[
-  {
-    "name": "default",
-    "description": "General purpose SRGAN, trained on DIV2K",
-    "scale_factor": 4,
-    "version": "1.0.0",
-    "psnr": 28.5,
-    "recommended_for": ["photos", "general"]
-  },
-  {
-    "name": "anime",
-    "description": "Anime/illustration-optimised model trained with L1 loss",
-    "scale_factor": 4,
-    "version": "1.0.0",
-    "psnr": 29.1,
-    "recommended_for": ["anime", "illustrations", "cartoons"]
-  },
-  {
-    "name": "waifu2x",
-    "description": "Waifu2x-style model for anime/photo upscaling with configurable noise reduction (noise_level 0–3, scale 1×/2×)",
-    "scale_factor": 2,
-    "version": "1.0.0",
-    "recommended_for": ["anime", "illustrations", "photos"],
-    "parameters": {
-      "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
-      "waifu2x_scale": "1 or 2 (default 2)"
-    }
-  }
-]
-```
-
-To use waifu2x via the API, pass `"model": "waifu2x"` along with optional `waifu2x_noise_level` (0–3) and `waifu2x_scale` (1 or 2):
-
-```bash
-curl -X POST http://localhost:8080/api/v1/upscale \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_data": "'$(base64 -i input.jpg)'",
-    "model": "waifu2x",
-    "waifu2x_noise_level": 2,
-    "waifu2x_scale": 2,
-    "format": "png"
-  }' | jq -r .image_data | base64 -d > output.png
-```
-
-Or via CLI using the `-p` flag:
-
-```bash
-./srgan-rust -p waifu2x-noise2-scale2 anime.png anime_2x.png
-```
-
-### Async job queue
-
-```bash
-# Submit
-curl -X POST http://localhost:8080/api/v1/upscale/async \
-  -H "Authorization: Bearer $TOKEN" \
-  -F "image=@large_photo.jpg" | jq .job_id
-
-# Poll
-curl http://localhost:8080/api/v1/jobs/<job_id> \
-  -H "Authorization: Bearer $TOKEN"
-```
-
----
-
-## Build from source
+### Binary (from source)
 
 ```bash
 # Requires Rust 1.75+
@@ -145,17 +68,20 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 ./target/release/srgan-rust --help
 ```
 
-**CLI upscaling:**
+### CLI upscaling
 
 ```bash
-# Single image (natural photos)
+# Natural photo (auto-detect)
 ./srgan-rust input.jpg output.png
 
-# Anime-optimised model
-./srgan-rust -p anime anime.png anime_4x.png
+# Force anime model
+./srgan-rust -p anime manga.png manga_4x.png
 
-# Batch directory
-./srgan-rust batch ./input_dir ./output_dir --threads 8
+# Waifu2x with noise reduction level 2, 2× scale
+./srgan-rust -p waifu2x-noise2-scale2 sketch.png sketch_2x.png
+
+# Batch directory, 8 threads
+./srgan-rust batch ./input/ ./output/ --threads 8
 
 # 2× instead of 4×
 ./srgan-rust -f 2 photo.jpg photo_2x.png
@@ -163,103 +89,170 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 
 ---
 
-## Training your own model
+## Model comparison
+
+| Model | Best for | Scale | PSNR | Notes |
+|-------|----------|-------|------|-------|
+| `natural` | Photos, scenery, portraits | 4× | 28.5 dB | Trained on DIV2K dataset |
+| `anime` | Anime, cartoons, illustrations | 4× | 29.1 dB | L1 loss, UCID-anime dataset |
+| `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3; best for scans/screenshots |
+
+When `model` is omitted the server classifies the image and picks `natural` or `anime` automatically.
+
+---
+
+## API reference summary
+
+All endpoints are under `/api/v1/`. Authenticate with `Authorization: Bearer <token>`.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/v1/health` | Health check |
+| `GET` | `/api/v1/models` | List available models |
+| `POST` | `/api/v1/upscale` | Synchronous upscale (base64 in/out) |
+| `POST` | `/api/v1/upscale/async` | Submit async job, returns `job_id` |
+| `GET` | `/api/v1/job/:id` | Poll async job status |
+| `GET` | `/api/v1/job/:id/webhook` | Webhook delivery state |
+| `POST` | `/api/v1/detect` | Classify image as photo/anime |
+| `POST` | `/api/v1/batch` | Batch upscale (sync ≤10, async >10) |
+| `POST` | `/api/v1/batch/start` | Start directory batch job |
+| `GET` | `/api/v1/batch/:id` | Poll batch job status |
+| `GET` | `/api/v1/batch/:id/checkpoint` | Query CLI checkpoint progress |
+| `POST` | `/api/v1/billing/checkout` | Create Stripe checkout session |
+| `GET` | `/api/v1/billing/status` | Get current subscription status |
+| `GET` | `/api/v1/admin/stats` | Admin stats (requires `X-Admin-Key`) |
+| `GET` | `/dashboard` | HTML admin dashboard |
+| `GET` | `/metrics` | Prometheus metrics |
+
+See [docs/API.md](docs/API.md) for full request/response examples.
+
+### Quick example
 
 ```bash
-# 1. Prepare dataset — high-resolution images in one directory
-./srgan-rust generate-config --type training > my_config.toml
-
-# 2. Edit my_config.toml (dataset_path, epochs, patch_size, …)
-
-# 3. Train
-./srgan-rust train --config my_config.toml
-
-# Training logs:
-# Epoch    1  loss: 0.043210  PSNR:  27.30 dB  change: 0.000321  LR: 3.000e-3
-# Epoch    2  loss: 0.039100  PSNR:  28.16 dB  change: 0.000298  LR: 3.000e-3
-# ...
-# [Early stopping] No improvement for 20 epochs. Halting.
+curl -X POST http://localhost:8080/api/v1/upscale \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_data": "'$(base64 -i input.jpg)'",
+    "scale_factor": 4,
+    "model": "anime",
+    "format": "png"
+  }' | jq -r .image_data | base64 -d > output.png
 ```
-
-Training features:
-- **Checkpoints** every 10 epochs (configurable)
-- **Early stopping** with patience=20
-- **LR decay** ×0.5 every 50 epochs
-- **Data augmentation**: random crop, horizontal flip, brightness/contrast jitter
-- **80/20 train/val split** with progress bar
-
-Trained models go in `models/` alongside a sidecar `.json` metadata file.
 
 ---
 
 ## Performance
 
-| Resolution | Model | Time (CPU, 8-core) | Time (GPU) |
-|------------|-------|--------------------|------------|
-| 256×256 → 1024×1024 | default | ~1.2 s | ~0.15 s |
-| 512×512 → 2048×2048 | default | ~4.8 s | ~0.55 s |
-| 1080p → 4K | default | ~18 s | ~2.1 s |
+| Input → Output | Model | CPU (8-core) | GPU (RTX 3080) |
+|----------------|-------|-------------|----------------|
+| 256×256 → 1024×1024 | natural | ~1.2 s | ~0.15 s |
+| 512×512 → 2048×2048 | natural | ~4.8 s | ~0.55 s |
+| 1080p → 4K | natural | ~18 s | ~2.1 s |
 | 256×256 → 1024×1024 | anime | ~1.1 s | ~0.14 s |
 
 Benchmarked on Apple M2 Pro (CPU) and NVIDIA RTX 3080 (GPU).
-Run your own: `./srgan-rust benchmark --input test.jpg --iterations 10`
+
+```bash
+./srgan-rust benchmark --input test.jpg --iterations 10
+```
+
+---
+
+## Training your own model
+
+```bash
+# 1. Generate a training config
+./srgan-rust generate-config --type training > my_config.toml
+
+# 2. Edit my_config.toml — set dataset_path, epochs, patch_size, etc.
+
+# 3. Train
+./srgan-rust train --config my_config.toml
+# Epoch  1  loss: 0.043210  PSNR: 27.30 dB  LR: 3.000e-3
+# Epoch  2  loss: 0.039100  PSNR: 28.16 dB  LR: 3.000e-3
+# [Early stopping] No improvement for 20 epochs. Halting.
+```
+
+- Checkpoints every 10 epochs (configurable)
+- Early stopping with patience=20
+- LR decay ×0.5 every 50 epochs
+- Data augmentation: random crop, horizontal flip, brightness/contrast jitter
+- 80/20 train/val split
 
 ---
 
 ## SaaS tiers
 
-| Feature | Free | Pro | Enterprise |
-|---------|------|-----|------------|
-| Upscales / month | 100 | 10,000 | Unlimited |
-| Max resolution | 512×512 input | 2048×2048 input | Unlimited |
-| Models | Default only | All built-in | Custom models |
+| Feature | Free | Pro ($19/mo) | Enterprise |
+|---------|------|-------------|------------|
+| Images / day | 10 | 1,000 | Unlimited |
+| Max input resolution | 4 MP | 20 MP | Unlimited |
+| Output watermark | Yes | No | No |
+| Models | All built-in | All built-in | + Custom models |
+| Async queue | — | Yes | Yes (priority) |
+| Webhooks | — | Yes | Yes |
 | API rate limit | 5 req/min | 60 req/min | Custom |
-| Async queue | — | ✓ | ✓ |
+| S3 output | — | Yes | Yes |
 | SLA | — | 99.5% | 99.9% |
 | Support | Community | Email | Dedicated |
 
+See [docs/PRICING.md](docs/PRICING.md) for full pricing copy.
+
 ---
 
-## Docker services
+## Deployment
 
-```yaml
-# docker-compose.yml — three services included
-srgan-api     # REST API on :8080
-nginx         # Reverse proxy on :80/:443, rate-limited, gzip, 100 MB upload
-srgan-batch   # Batch processor (--profile tools)
-srgan-train   # Training runner  (--profile tools)
-```
+See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for:
+- Docker Compose production setup
+- systemd service unit
+- nginx reverse proxy with SSL/TLS
+- Kubernetes manifests (`k8s/`)
+- Full environment variable reference
 
-Environment variables (see `.env.example`):
+---
+
+## Environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `JWT_SECRET` | — | **Required.** Signs API tokens. |
-| `RUST_LOG` | `info` | Log level (`error`/`warn`/`info`/`debug`/`trace`) |
+| `ADMIN_KEY` | — | Required for `/api/v1/admin/stats`. |
+| `RUST_LOG` | `info` | Log level: `error`/`warn`/`info`/`debug`/`trace` |
 | `SRGAN_MODEL_PATH` | `/app/models` | Directory scanned for `.rsr`/`.bin` models |
 | `SRGAN_MAX_WORKERS` | `4` | Parallel inference threads |
-| `DATABASE_URL` | `sqlite:///app/data/srgan.db` | Job-queue database |
+| `DATABASE_URL` | `sqlite:///app/data/srgan.db` | Job-queue persistence |
 | `RATE_LIMIT_RPM` | `60` | Max requests per minute per API key |
+| `S3_BUCKET` | — | Output bucket name (enables S3 mode) |
+| `S3_REGION` | `us-east-1` | AWS region |
+| `S3_ACCESS_KEY` | — | AWS access key |
+| `S3_SECRET_KEY` | — | AWS secret key |
 
 ---
 
-## Project layout
+## Project structure
 
 ```
 src/
-  main.rs            CLI entry point
-  lib.rs             Library root
-  commands/          One file per CLI command
+  main.rs                 CLI entry point
+  lib.rs                  Library root
+  commands/               One file per CLI sub-command
   training/
-    data_loader.rs   Dataset scan, augmentation, 80/20 split, progress bar
-    trainer_simple.rs  Training loop (early stopping, LR decay, PSNR logging)
-    checkpoint.rs    Checkpoint save/load
-  model_manager.rs   Scan models/ dir, load sidecar JSON, expose via API
-  web_server_improved.rs  Production REST API with circuit-breaker & retry
-  gpu.rs             GPU acceleration layer
-  profiling.rs       Memory profiler
-models/
-  default.json       Sidecar metadata for the default model
+    data_loader.rs        Dataset scan, augmentation, 80/20 split
+    trainer_simple.rs     Training loop (early stopping, LR decay)
+    checkpoint.rs         Checkpoint save/load
+  api/
+    auth.rs               JWT / API key validation, tier enforcement
+    billing.rs            Subscription tiers, credit tracking
+    upscale.rs            Priority job queue, webhook delivery
+    admin.rs              Admin stats endpoint
+    middleware.rs         Per-tier rate limiter
+  web_server.rs           Production REST API
+  web_server_improved.rs  Circuit-breaker + retry variant
+  gpu.rs                  GPU acceleration layer
+  profiling.rs            Memory profiler
+k8s/                      Kubernetes manifests
+docs/                     API, pricing, deployment guides, Grafana dashboard
 ```
 
 ---
@@ -271,54 +264,7 @@ models/
 3. `cargo clippy -- -D warnings` — no new lints.
 4. Open a pull request with a clear description.
 
-Bug reports and feature requests via [GitHub Issues](https://github.com/your-org/srgan-rust/issues).
-
----
-
-## Kubernetes Deployment
-
-All manifests live in `k8s/`. Apply them in order:
-
-```bash
-# 1. Create namespace
-kubectl create namespace srgan
-
-# 2. Populate secrets (never commit real values — see k8s/secret.yaml for the template)
-kubectl create secret generic srgan-secrets \
-  --from-literal=JWT_SECRET=<jwt-secret> \
-  --from-literal=API_KEY=<api-key> \
-  --from-literal=STRIPE_KEY=<stripe-key> \
-  --from-literal=S3_ACCESS_KEY=<s3-access-key> \
-  --from-literal=S3_SECRET_KEY=<s3-secret-key> \
-  -n srgan
-
-# 3. Apply all manifests
-kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/pvc.yaml
-kubectl apply -f k8s/deployment.yaml
-kubectl apply -f k8s/service.yaml
-kubectl apply -f k8s/hpa.yaml
-kubectl apply -f k8s/ingress.yaml
-
-# 4. Watch rollout
-kubectl rollout status deployment/srgan-api -n srgan
-```
-
-### Manifest overview
-
-| File | Purpose |
-|------|---------|
-| `deployment.yaml` | 3-replica Deployment with liveness/readiness probes, resource limits, pod anti-affinity |
-| `service.yaml` | ClusterIP Service on port 8080 (+ 9090 for Prometheus metrics) |
-| `ingress.yaml` | nginx Ingress with TLS (cert-manager) and rate-limiting annotations |
-| `hpa.yaml` | HorizontalPodAutoscaler — scales 2–10 pods on CPU > 70 % |
-| `pvc.yaml` | 5 Gi ReadOnlyMany PVC for the `/models` directory |
-| `configmap.yaml` | Non-secret runtime config (log level, worker count, upload limits) |
-| `secret.yaml` | Template for JWT_SECRET, STRIPE_KEY, S3 credentials, API key |
-
-### Resource requirements
-
-Each pod is allocated **0.5–2 CPU cores** and **512 Mi – 2 Gi** RAM. For GPU nodes, add a `resources.limits."nvidia.com/gpu": "1"` entry to `deployment.yaml` and schedule onto a GPU node pool.
+Bug reports and feature requests: [GitHub Issues](https://github.com/your-org/srgan-rust/issues)
 
 ---
 
