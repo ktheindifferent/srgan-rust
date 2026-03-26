@@ -673,16 +673,48 @@ fn build_list_gpus_subcommand() -> App<'static, 'static> {
 
 fn build_benchmark_subcommand() -> App<'static, 'static> {
 	SubCommand::with_name("benchmark")
-		.about("Benchmark model performance at 256×256, 512×512 and 1024×1024")
+		.about("Benchmark model performance, or compare quality across models")
+		.long_about(
+			"Performance mode (default): runs synthetic-image timing benchmarks.\n\n\
+			 Quality-comparison mode (when --output-dir is given): upscales a real\n\
+			 input image with each model, saves the outputs, computes PSNR / SSIM\n\
+			 vs the bilinear baseline, and writes benchmark_report.json +\n\
+			 benchmark_report.html (self-contained with comparison sliders).\n\n\
+			 Examples:\n\
+			   srgan-rust benchmark\n\
+			   srgan-rust benchmark --models natural,anime --iterations 5\n\
+			   srgan-rust benchmark --input photo.jpg --models natural,anime,bilinear \\\n\
+			       --output-dir ./bench_out/ --scale 4",
+		)
 		.arg(
 			Arg::with_name("input")
-				.help("Optional real input image (benchmarks use synthetic data by default)")
+				.help("Optional real input image (performance mode only; use --input for quality mode)")
 				.required(false)
 				.index(1),
 		)
 		.arg(
+			Arg::with_name("input-img")
+				.help("Input image for quality-comparison mode (required with --output-dir)")
+				.long("input")
+				.value_name("IMAGE"),
+		)
+		.arg(
+			Arg::with_name("output-dir")
+				.help("Output directory for upscaled images + HTML/JSON report (enables quality mode)")
+				.long("output-dir")
+				.value_name("DIR"),
+		)
+		.arg(
+			Arg::with_name("scale")
+				.help("Upscaling factor for quality-comparison mode (2 or 4, default 4)")
+				.long("scale")
+				.short("s")
+				.possible_values(&["2", "4"])
+				.default_value("4"),
+		)
+		.arg(
 			Arg::with_name("iterations")
-				.help("Number of iterations")
+				.help("Number of iterations (performance mode)")
 				.short("i")
 				.long("iterations")
 				.default_value("10"),
@@ -696,20 +728,20 @@ fn build_benchmark_subcommand() -> App<'static, 'static> {
 		)
 		.arg(
 			Arg::with_name("warmup")
-				.help("Number of warmup iterations")
+				.help("Number of warmup iterations (performance mode)")
 				.short("w")
 				.long("warmup")
 				.default_value("2"),
 		)
 		.arg(
 			Arg::with_name("output")
-				.help("Output results file (JSON format)")
+				.help("Output results file for performance mode (JSON)")
 				.short("o")
 				.long("output"),
 		)
 		.arg(
 			Arg::with_name("compare")
-				.help("Compare with previous results file")
+				.help("Compare with previous performance results file")
 				.short("c")
 				.long("compare"),
 		)
