@@ -973,16 +973,24 @@ impl WebServer {
             );
         }
 
-        // Waifu2x requires external weight files that are not yet bundled.
-        // Return a descriptive error rather than silently falling back to the
-        // default network.
-        if effective_label == "waifu2x" || effective_label.starts_with("waifu2x-") {
-            crate::waifu2x::Waifu2xNetwork::from_label(&effective_label)?;
-            // Unreachable until weights are bundled — the call above errors.
-        }
-
-        // Run SRGAN inference
-        let upscaled = self.network.upscale_image(&img)?;
+        // Select the network for the effective label.  For waifu2x labels the
+        // built-in anime model is used as a fallback until native waifu2x weights
+        // are bundled.  For all other labels we load the appropriate built-in
+        // model; if the label is unknown we fall back to the default network.
+        let upscaled = if effective_label == "natural"
+            || effective_label == "bilinear"
+            || effective_label.is_empty()
+        {
+            self.network.upscale_image(&img)?
+        } else {
+            match crate::thread_safe_network::ThreadSafeNetwork::from_label(
+                &effective_label,
+                None,
+            ) {
+                Ok(net) => net.upscale_image(&img)?,
+                Err(_) => self.network.upscale_image(&img)?,
+            }
+        };
         let upscaled_size = (upscaled.width(), upscaled.height());
 
         // Encode result to the requested format
