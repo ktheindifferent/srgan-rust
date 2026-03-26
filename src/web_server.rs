@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH, Duration};
+use std::time::{SystemTime, UNIX_EPOCH, Duration, Instant};
 use std::thread;
 use std::net::SocketAddr;
 use std::io::{BufRead, BufReader, Write};
@@ -15,6 +15,77 @@ use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, Subscriptio
 use crate::api::middleware::TierRateLimiter;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
 use crate::storage::S3Config;
+
+// ── Request metrics ──────────────────────────────────────────────────────────
+
+/// Per-endpoint metrics accumulator.
+struct EndpointMetrics {
+    request_count: u64,
+    error_count: u64,
+    /// All recorded latencies in microseconds (kept in memory; bounded by job volume).
+    latencies_us: Vec<u64>,
+}
+
+impl EndpointMetrics {
+    fn new() -> Self {
+        Self { request_count: 0, error_count: 0, latencies_us: Vec::new() }
+    }
+
+    fn record(&mut self, latency: Duration, is_error: bool) {
+        self.request_count += 1;
+        if is_error {
+            self.error_count += 1;
+        }
+        self.latencies_us.push(latency.as_micros() as u64);
+    }
+
+    /// Compute a percentile (0–100) over recorded latencies. Returns microseconds.
+    fn percentile(&self, p: f64) -> u64 {
+        if self.latencies_us.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.latencies_us.clone();
+        sorted.sort_unstable();
+        let idx = ((p / 100.0) * (sorted.len() as f64 - 1.0)).round() as usize;
+        sorted[idx.min(sorted.len() - 1)]
+    }
+
+    fn error_rate(&self) -> f64 {
+        if self.request_count == 0 { 0.0 } else { self.error_count as f64 / self.request_count as f64 }
+    }
+}
+
+/// Global request metrics store, protected by a mutex.
+struct RequestMetrics {
+    endpoints: HashMap<String, EndpointMetrics>,
+}
+
+impl RequestMetrics {
+    fn new() -> Self {
+        Self { endpoints: HashMap::new() }
+    }
+
+    fn record(&mut self, endpoint: &str, latency: Duration, is_error: bool) {
+        self.endpoints
+            .entry(endpoint.to_string())
+            .or_insert_with(EndpointMetrics::new)
+            .record(latency, is_error);
+    }
+
+    fn snapshot(&self) -> Vec<serde_json::Value> {
+        self.endpoints.iter().map(|(ep, m)| {
+            serde_json::json!({
+                "endpoint": ep,
+                "request_count": m.request_count,
+                "error_count": m.error_count,
+                "error_rate": format!("{:.4}", m.error_rate()),
+                "p50_ms": m.percentile(50.0) as f64 / 1000.0,
+                "p95_ms": m.percentile(95.0) as f64 / 1000.0,
+                "p99_ms": m.percentile(99.0) as f64 / 1000.0,
+            })
+        }).collect()
+    }
+}
 
 fn format_uptime(secs: u64) -> String {
     let days = secs / 86400;
@@ -303,6 +374,8 @@ pub struct WebServer {
     server_start_time: SystemTime,
     /// Total images successfully processed (task 4)
     images_processed: Arc<AtomicU64>,
+    /// Per-endpoint request metrics (admin dashboard)
+    request_metrics: Arc<Mutex<RequestMetrics>>,
 }
 
 /// Cached result
@@ -373,6 +446,7 @@ impl WebServer {
             s3_config,
             server_start_time: SystemTime::now(),
             images_processed: Arc::new(AtomicU64::new(0)),
+            request_metrics: Arc::new(Mutex::new(RequestMetrics::new())),
         })
     }
     
@@ -394,6 +468,9 @@ impl WebServer {
         info!("  GET  /api/v1/health          - Health check");
         info!("  GET  /api/models             - List available models");
         info!("  POST /api/v1/compare         - Multi-model PSNR/SSIM comparison");
+        info!("  GET  /admin                  - Admin dashboard (HTML)");
+        info!("  GET  /api/admin/stats        - Admin analytics (JSON)");
+        info!("  GET  /api/admin/users        - User listing (JSON)");
         info!("  (Legacy /api/* routes also supported)");
         
         if let Some(ref _api_key) = self.config.api_key {
@@ -495,12 +572,16 @@ impl WebServer {
                 continue;
             }
 
+            // Metrics: start timing
+            let req_start = Instant::now();
+
             // Route request
             let response = match (method, path) {
                 ("GET", "/") => self.handle_root_dashboard(),
                 ("GET", "/admin") => self.handle_admin_panel(),
                 ("GET", "/api/me") => self.handle_api_me(&request),
                 ("GET", "/api/admin/users") => self.handle_admin_users(&request),
+                ("GET", "/api/admin/stats") => self.handle_admin_stats(&request),
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
                 ("GET", "/api/v1/stats") => self.handle_stats(),
@@ -525,7 +606,16 @@ impl WebServer {
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
                 _ => self.handle_not_found(),
             };
-            
+
+            // Metrics: record latency and error status
+            let latency = req_start.elapsed();
+            let is_error = response.starts_with("HTTP/1.1 4") || response.starts_with("HTTP/1.1 5");
+            // Normalise dynamic path segments for grouping
+            let metrics_key = Self::normalise_metrics_path(method, path);
+            if let Ok(mut m) = self.request_metrics.lock() {
+                m.record(&metrics_key, latency, is_error);
+            }
+
             // Send response
             let _ = stream.write_all(response.as_bytes());
         }
@@ -1301,7 +1391,7 @@ function submitJob(){
         )
     }
 
-    /// GET /admin — admin panel SPA (protected by SRGAN_ADMIN_SECRET bearer token)
+    /// GET /admin — admin panel SPA (protected by ADMIN_TOKEN bearer token)
     fn handle_admin_panel(&self) -> String {
         let html = r##"<!DOCTYPE html>
 <html lang="en">
@@ -1361,7 +1451,7 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bord
 <div id="loginView" class="login-wrap">
   <div class="login-box">
     <h2>Admin Login</h2>
-    <input type="password" id="tokInp" placeholder="Admin secret (SRGAN_ADMIN_SECRET)" onkeydown="if(event.key==='Enter')login()">
+    <input type="password" id="tokInp" placeholder="Admin secret (ADMIN_TOKEN)" onkeydown="if(event.key==='Enter')login()">
     <button class="btn btn-p" onclick="login()">Sign In</button>
     <div id="errMsg"></div>
   </div>
@@ -1376,9 +1466,22 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bord
       <div class="card g"><div class="card-val" id="mComp">–</div><div class="card-lbl">Completed</div></div>
       <div class="card"><div class="card-val" id="mTotal">–</div><div class="card-lbl">Total Jobs</div></div>
       <div class="card y"><div class="card-val" id="mUsers">–</div><div class="card-lbl">Users</div></div>
+      <div class="card"><div class="card-val" id="mAvgMs">–</div><div class="card-lbl">Avg Process ms</div></div>
+      <div class="card"><div class="card-val" id="mPending">–</div><div class="card-lbl">Pending</div></div>
+      <div class="card" style="border-color:var(--red)"><div class="card-val" style="color:var(--red)" id="mFailed">–</div><div class="card-lbl">Failed</div></div>
     </div>
+    <div class="sec-ttl">Credit Usage by Tier</div>
+    <div class="cards" id="tierCards">
+      <div class="card"><div class="card-val" id="cFree">–</div><div class="card-lbl">Free consumed</div></div>
+      <div class="card"><div class="card-val" id="cPro">–</div><div class="card-lbl">Pro consumed</div></div>
+      <div class="card"><div class="card-val" id="cEnt">–</div><div class="card-lbl">Enterprise consumed</div></div>
+    </div>
+    <div class="sec-ttl">Top Users by Job Count</div>
+    <div class="tbl-wrap" id="topUsersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Users</div>
     <div class="tbl-wrap" id="usersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    <div class="sec-ttl">Endpoint Metrics</div>
+    <div class="tbl-wrap" id="metricsTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Recent Jobs</div>
     <div class="tbl-wrap" id="jobsTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
   </div>
@@ -1421,11 +1524,13 @@ function refresh(){
   Promise.all([
     fetch('/api/admin/users',{headers:h}).then(function(r){return r.ok?r.json():null;}),
     fetch('/api/v1/stats',{headers:h}).then(function(r){return r.ok?r.json():null;}),
-    fetch('/api/v1/jobs',{headers:h}).then(function(r){return r.ok?r.json():null;})
+    fetch('/api/v1/jobs',{headers:h}).then(function(r){return r.ok?r.json():null;}),
+    fetch('/api/admin/stats',{headers:h}).then(function(r){return r.ok?r.json():null;})
   ]).then(function(res){
     if(res[0])renderUsers(res[0].users||[]);
     if(res[1])renderMetrics(res[1]);
     if(res[2])renderJobs(res[2].jobs||[]);
+    if(res[3])renderAdminStats(res[3]);
   }).catch(function(){});
 }
 
@@ -1447,14 +1552,15 @@ function renderMetrics(s){
 function renderUsers(users){
   set('mUsers',users.length);
   if(!users.length){document.getElementById('usersTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No users yet</div>';return;}
-  var html='<table><thead><tr><th>API Key</th><th>Tier</th><th>Credits Left</th><th>Issued Today</th><th>Consumed Today</th></tr></thead><tbody>';
+  var html='<table><thead><tr><th>API Key</th><th>Tier</th><th>Credits Left</th><th>Total Jobs</th><th>Last Active</th></tr></thead><tbody>';
   users.forEach(function(u){
+    var la=u.last_active?new Date(u.last_active*1000).toLocaleString():'–';
     html+='<tr>'
       +'<td><code>'+u.user_id.slice(0,24)+(u.user_id.length>24?'…':'')+'</code></td>'
       +'<td><span class="badge tier-'+u.tier+'">'+u.tier+'</span></td>'
       +'<td>'+u.credits_remaining+'</td>'
-      +'<td>'+u.credits_issued_today+'</td>'
-      +'<td>'+u.credits_consumed_today+'</td>'
+      +'<td>'+(u.total_jobs||u.credits_consumed_today||0)+'</td>'
+      +'<td>'+la+'</td>'
       +'</tr>';
   });
   html+='</tbody></table>';
@@ -1486,6 +1592,49 @@ function renderJobs(jobs){
   });
   html+='</tbody></table>';
   document.getElementById('jobsTbl').innerHTML=html;
+}
+
+function renderAdminStats(s){
+  set('mAvgMs',s.avg_processing_time_ms!=null?s.avg_processing_time_ms.toFixed(1):'–');
+  set('mPending',s.jobs_by_status?s.jobs_by_status.pending:'–');
+  set('mFailed',s.jobs_by_status?s.jobs_by_status.failed:'–');
+  var c=s.credit_usage_by_tier||{};
+  set('cFree',c.free?c.free.consumed:'0');
+  set('cPro',c.pro?c.pro.consumed:'0');
+  set('cEnt',c.enterprise?c.enterprise.consumed:'0');
+  renderTopUsers(s.top_users||[]);
+  renderEndpointMetrics(s.endpoint_metrics||[]);
+}
+
+function renderTopUsers(users){
+  if(!users.length){document.getElementById('topUsersTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No data</div>';return;}
+  var html='<table><thead><tr><th>User</th><th>Tier</th><th>Jobs</th></tr></thead><tbody>';
+  users.forEach(function(u){
+    html+='<tr><td><code>'+u.user_id.slice(0,24)+(u.user_id.length>24?'…':'')+'</code></td>'
+      +'<td><span class="badge tier-'+u.tier+'">'+u.tier+'</span></td>'
+      +'<td>'+u.job_count+'</td></tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('topUsersTbl').innerHTML=html;
+}
+
+function renderEndpointMetrics(metrics){
+  if(!metrics.length){document.getElementById('metricsTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No requests yet</div>';return;}
+  var html='<table><thead><tr><th>Endpoint</th><th>Requests</th><th>Errors</th><th>Error Rate</th><th>p50 ms</th><th>p95 ms</th><th>p99 ms</th></tr></thead><tbody>';
+  metrics.sort(function(a,b){return b.request_count-a.request_count;});
+  metrics.forEach(function(m){
+    html+='<tr>'
+      +'<td><code>'+m.endpoint+'</code></td>'
+      +'<td>'+m.request_count+'</td>'
+      +'<td>'+m.error_count+'</td>'
+      +'<td>'+(parseFloat(m.error_rate)*100).toFixed(1)+'%</td>'
+      +'<td>'+m.p50_ms.toFixed(1)+'</td>'
+      +'<td>'+m.p95_ms.toFixed(1)+'</td>'
+      +'<td>'+m.p99_ms.toFixed(1)+'</td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('metricsTbl').innerHTML=html;
 }
 </script>
 </body>
@@ -1524,7 +1673,7 @@ function renderJobs(jobs){
 
     /// Returns true when the request carries a valid admin bearer token.
     fn verify_admin_token(&self, request: &str) -> bool {
-        let secret = std::env::var("SRGAN_ADMIN_SECRET")
+        let secret = std::env::var("ADMIN_TOKEN")
             .unwrap_or_else(|_| "srgan-admin".to_string());
         if let Some(auth) = self.extract_header(request, "authorization") {
             if let Some(token) = auth.trim().strip_prefix("Bearer ") {
@@ -1534,7 +1683,7 @@ function renderJobs(jobs){
         false
     }
 
-    /// GET /api/admin/users — list all users (requires admin bearer token)
+    /// GET /api/admin/users — list all users with tier, credits, total jobs, last active
     fn handle_admin_users(&self, request: &str) -> String {
         if !self.verify_admin_token(request) {
             return format!(
@@ -1543,8 +1692,8 @@ function renderJobs(jobs){
             );
         }
 
-        let users = if let Ok(db) = self.billing_db.lock() {
-            db.all_users_snapshot()
+        let users: Vec<serde_json::Value> = if let Ok(db) = self.billing_db.lock() {
+            db.all_users_extended()
         } else {
             vec![]
         };
@@ -1554,6 +1703,111 @@ function renderJobs(jobs){
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
             response
         )
+    }
+
+    /// GET /api/admin/stats — admin analytics (requires ADMIN_TOKEN bearer)
+    fn handle_admin_stats(&self, request: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{}",
+                serde_json::json!({"error": "Unauthorized"})
+            );
+        }
+
+        let uptime_secs = SystemTime::now()
+            .duration_since(self.server_start_time)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        // Jobs by status
+        let (pending, processing, completed, failed, total_processing_us, completed_count) =
+            if let Ok(jobs) = self.jobs.lock() {
+                let mut pe = 0u64; let mut pr = 0u64; let mut co = 0u64; let mut fa = 0u64;
+                let mut total_us: u64 = 0;
+                let mut cnt: u64 = 0;
+                for job in jobs.values() {
+                    match &job.status {
+                        JobStatus::Pending    => pe += 1,
+                        JobStatus::Processing => pr += 1,
+                        JobStatus::Completed  => {
+                            co += 1;
+                            let dur = job.updated_at.saturating_sub(job.created_at);
+                            total_us += dur * 1_000_000;
+                            cnt += 1;
+                        }
+                        JobStatus::Failed(_)  => fa += 1,
+                    }
+                }
+                (pe, pr, co, fa, total_us, cnt)
+            } else {
+                (0, 0, 0, 0, 0, 0)
+            };
+
+        let avg_processing_ms = if completed_count > 0 {
+            (total_processing_us / completed_count) as f64 / 1000.0
+        } else {
+            0.0
+        };
+
+        // Credit usage by tier and top users
+        let (credit_by_tier, top_users) = if let Ok(db) = self.billing_db.lock() {
+            (db.credits_by_tier(), db.top_users_by_jobs(10))
+        } else {
+            (serde_json::json!({}), vec![])
+        };
+
+        // Request metrics
+        let endpoint_metrics = if let Ok(m) = self.request_metrics.lock() {
+            m.snapshot()
+        } else {
+            vec![]
+        };
+
+        let total_jobs = pending + processing + completed + failed;
+
+        let response = serde_json::json!({
+            "uptime_secs": uptime_secs,
+            "total_jobs": total_jobs,
+            "jobs_by_status": {
+                "pending": pending,
+                "processing": processing,
+                "completed": completed,
+                "failed": failed,
+            },
+            "avg_processing_time_ms": avg_processing_ms,
+            "credit_usage_by_tier": credit_by_tier,
+            "top_users": top_users,
+            "endpoint_metrics": endpoint_metrics,
+        });
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+            response
+        )
+    }
+
+    /// Normalise a request path for metrics grouping (collapse IDs to `{id}`).
+    fn normalise_metrics_path(method: &str, path: &str) -> String {
+        let normalised = if path.starts_with("/api/v1/job/") || path.starts_with("/api/job/") {
+            if path.ends_with("/stream") {
+                format!("{} /api/v1/job/{{id}}/stream", method)
+            } else if path.ends_with("/webhook") {
+                format!("{} /api/v1/job/{{id}}/webhook", method)
+            } else {
+                format!("{} /api/v1/job/{{id}}", method)
+            }
+        } else if path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/") {
+            if path.ends_with("/checkpoint") {
+                format!("{} /api/v1/batch/{{id}}/checkpoint", method)
+            } else {
+                format!("{} /api/v1/batch/{{id}}", method)
+            }
+        } else if path.starts_with("/api/v1/result/") || path.starts_with("/api/result/") {
+            format!("{} /api/v1/result/{{id}}", method)
+        } else {
+            format!("{} {}", method, path)
+        };
+        normalised
     }
 
     /// Handle not found

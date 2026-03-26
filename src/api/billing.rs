@@ -133,6 +133,69 @@ impl BillingDb {
         let consumed = self.users.values().map(|u| u.credits_consumed_today).sum();
         (issued, consumed)
     }
+
+    /// Extended snapshot including total jobs (credits consumed) and last active.
+    pub fn all_users_extended(&self) -> Vec<serde_json::Value> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        self.users.values().map(|u| serde_json::json!({
+            "user_id": u.user_id,
+            "tier": u.tier.as_str(),
+            "credits_remaining": u.credits_remaining,
+            "credits_reset_at": u.credits_reset_at,
+            "credits_issued_today": u.credits_issued_today,
+            "credits_consumed_today": u.credits_consumed_today,
+            "total_jobs": u.credits_consumed_today,
+            "last_active": u.credits_reset_at.min(now),
+        })).collect()
+    }
+
+    /// Credit usage grouped by tier.
+    pub fn credits_by_tier(&self) -> serde_json::Value {
+        let mut free_issued = 0u64;
+        let mut free_consumed = 0u64;
+        let mut pro_issued = 0u64;
+        let mut pro_consumed = 0u64;
+        let mut enterprise_issued = 0u64;
+        let mut enterprise_consumed = 0u64;
+
+        for u in self.users.values() {
+            match u.tier {
+                SubscriptionTier::Free => {
+                    free_issued += u.credits_issued_today as u64;
+                    free_consumed += u.credits_consumed_today as u64;
+                }
+                SubscriptionTier::Pro => {
+                    pro_issued += u.credits_issued_today as u64;
+                    pro_consumed += u.credits_consumed_today as u64;
+                }
+                SubscriptionTier::Enterprise => {
+                    enterprise_issued += u.credits_issued_today as u64;
+                    enterprise_consumed += u.credits_consumed_today as u64;
+                }
+            }
+        }
+
+        serde_json::json!({
+            "free": { "issued": free_issued, "consumed": free_consumed },
+            "pro": { "issued": pro_issued, "consumed": pro_consumed },
+            "enterprise": { "issued": enterprise_issued, "consumed": enterprise_consumed },
+        })
+    }
+
+    /// Top N users by jobs (credits consumed today), descending.
+    pub fn top_users_by_jobs(&self, limit: usize) -> Vec<serde_json::Value> {
+        let mut sorted: Vec<&UserAccount> = self.users.values().collect();
+        sorted.sort_by(|a, b| b.credits_consumed_today.cmp(&a.credits_consumed_today));
+        sorted.truncate(limit);
+        sorted.iter().map(|u| serde_json::json!({
+            "user_id": u.user_id,
+            "tier": u.tier.as_str(),
+            "job_count": u.credits_consumed_today,
+        })).collect()
+    }
 }
 
 fn next_hour_epoch() -> u64 {
