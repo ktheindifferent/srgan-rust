@@ -16,6 +16,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_format_arg())
 		.arg(build_quality_arg())
 		.arg(build_tile_size_arg())
+		.arg(build_progressive_arg())
 		.subcommand(build_train_subcommand())
 		.subcommand(build_train_prescaled_subcommand())
 		.subcommand(build_batch_subcommand())
@@ -148,6 +149,20 @@ fn build_tile_size_arg() -> Arg<'static, 'static> {
 		)
 		.value_name("TILE_SIZE")
 		.empty_values(false)
+}
+
+fn build_progressive_arg() -> Arg<'static, 'static> {
+	Arg::with_name("PROGRESSIVE")
+		.long("progressive")
+		.help(
+			"Enable progressive multi-stage upscaling for very low-resolution sources \
+             (under 128px on either dimension). Instead of a single 4× pass the image \
+             is first pre-upscaled 2× with a high-quality Lanczos filter, processed by \
+             the neural network (producing an 8× intermediate), then downscaled back to \
+             the standard 4× output size. This two-stage approach often yields sharper \
+             results on tiny thumbnails and pixel-art sources.",
+		)
+		.takes_value(false)
 }
 
 fn build_train_subcommand() -> App<'static, 'static> {

@@ -15,6 +15,8 @@ use image;
 const DEFAULT_TILE_SIZE: usize = 512;
 const TILE_OVERLAP: usize = 32;
 const LARGE_IMAGE_THRESHOLD: usize = 4_000_000; // 4 megapixels
+/// Images with either dimension below this trigger progressive upscaling when the flag is set.
+const PROGRESSIVE_THRESHOLD: usize = 128;
 
 pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 	let factor = parse_factor(app_m);
@@ -72,21 +74,52 @@ pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 		.unwrap_or(DEFAULT_TILE_SIZE)
 		.max(64);
 
+	let progressive = app_m.is_present("PROGRESSIVE");
+
 	let mut input_file = File::open(&input_path_buf)?;
 	let input = crate::read(&mut input_file)?;
 
-	// Choose tiled vs direct upscaling based on image size
-	let pixel_count = {
+	// Determine image dimensions: tensor is [1, H, W, C]
+	let (in_h, in_w) = {
 		let s = input.shape();
-		s[1] * s[2] // H * W (tensor is [1, H, W, C])
+		(s[1], s[2])
+	};
+	// Progressive mode: pre-upscale 2× with Lanczos when the source is tiny.
+	// The neural net then upscales the 2× intermediate by 4×, giving 8× total.
+	// We downscale the result back to 4× so the output size matches the normal pipeline.
+	let use_progressive = progressive && (in_h < PROGRESSIVE_THRESHOLD || in_w < PROGRESSIVE_THRESHOLD);
+	if use_progressive {
+		info!(
+			"Progressive upscaling enabled: source is {}×{} (under {}px threshold). \
+             Pipeline: Lanczos 2× → neural net 4× → Lanczos ½× = net 4× output.",
+			in_w, in_h, PROGRESSIVE_THRESHOLD,
+		);
+		spinner.set_message("Progressive stage 1/3: Lanczos 2× pre-upscale...");
+	}
+
+	// --- Stage 1: optional bilinear 2× pre-upscale ---
+	let (input, stage1_h, stage1_w) = if use_progressive {
+		let pre = bilinear_resize_tensor(input, in_h * 2, in_w * 2)?;
+		let h = in_h * 2;
+		let w = in_w * 2;
+		(pre, h, w)
+	} else {
+		(input, in_h, in_w)
 	};
 
-	let output = if pixel_count > LARGE_IMAGE_THRESHOLD {
-		let mp = pixel_count as f64 / 1_000_000.0;
-		spinner.set_message(format!(
-			"Large image ({:.1} MP) — tiled processing ({}px tiles)...",
-			mp, tile_size
-		));
+	// --- Stage 2: neural network upscaling ---
+	let net_pixel_count = stage1_h * stage1_w;
+	let nn_output = if net_pixel_count > LARGE_IMAGE_THRESHOLD {
+		let mp = net_pixel_count as f64 / 1_000_000.0;
+		let msg = if use_progressive {
+			format!(
+				"Progressive stage 2/3: large intermediate ({:.1} MP) — tiled neural net ({}px tiles)...",
+				mp, tile_size
+			)
+		} else {
+			format!("Large image ({:.1} MP) — tiled processing ({}px tiles)...", mp, tile_size)
+		};
+		spinner.set_message(msg);
 		info!(
 			"Image exceeds {}MP threshold ({:.1} MP); using tiled processing (tile_size={}px, {}px overlap)",
 			LARGE_IMAGE_THRESHOLD / 1_000_000,
@@ -96,18 +129,37 @@ pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 		);
 		upscale_tiled(input, &network, tile_size)?
 	} else {
-		spinner.set_message("Running neural network...");
+		if use_progressive {
+			spinner.set_message("Progressive stage 2/3: neural net 4× on pre-upscaled image...");
+		} else {
+			spinner.set_message("Running neural network...");
+		}
 		crate::upscale(input, &network)
 			.map_err(|e| SrganError::GraphExecution(e.to_string()))?
+	};
+
+	// --- Stage 3: optional Lanczos ½× downscale back to 4× target ---
+	let output = if use_progressive {
+		spinner.set_message("Progressive stage 3/3: Lanczos ½× downscale to 4× target...");
+		let target_h = in_h * 4;
+		let target_w = in_w * 4;
+		info!(
+			"Progressive downscale: {}×{} → {}×{} (4× of original {}×{})",
+			in_w * 8, in_h * 8, target_w, target_h, in_w, in_h
+		);
+		bilinear_resize_tensor(nn_output, target_h, target_w)?
+	} else {
+		nn_output
 	};
 
 	spinner.set_message("Writing output file...");
 	let mut output_file = File::create(&output_path_buf)?;
 	crate::save_with_format(output, &mut output_file, &format, quality)?;
 
+	let mode_label = if use_progressive { "progressive 2×→4×→2×" } else { "direct 4×" };
 	spinner.finish_with_message(format!(
-		"✓ Complete [device: {}, format: {}, quality: {}]",
-		device_label, format, quality
+		"✓ Complete [device: {}, mode: {}, format: {}, quality: {}]",
+		device_label, mode_label, format, quality
 	));
 	info!("Output saved to: {}", output_path_buf.display());
 	Ok(())
@@ -309,4 +361,27 @@ fn tile_starts(total: usize, tile_size: usize, step: usize) -> Vec<usize> {
 		s += step;
 	}
 	starts
+}
+
+// ---------------------------------------------------------------------------
+// Bilinear resize helper (used by the progressive pipeline)
+// ---------------------------------------------------------------------------
+
+/// Resize a `[1, H, W, 3]` tensor to `[1, new_h, new_w, 3]` using a high-quality
+/// Lanczos filter via the `image` crate.  Used for the 2× pre-upscale and ½×
+/// post-downscale steps of the progressive pipeline.
+fn bilinear_resize_tensor(
+	tensor: ArrayD<f32>,
+	new_h: usize,
+	new_w: usize,
+) -> Result<ArrayD<f32>> {
+	// tensor: [1, H, W, 3]
+	let img_view = tensor.subview(Axis(0), 0); // [H, W, 3]
+	let dyn_img = crate::data_to_image(img_view);
+	let resized = dyn_img.resize_exact(new_w as u32, new_h as u32, image::FilterType::Lanczos3);
+	let resized_data = crate::image_to_data(&resized); // [new_h, new_w, 3]
+	let shape = resized_data.shape().to_vec();
+	resized_data
+		.into_shape(IxDyn(&[1, shape[0], shape[1], shape[2]]))
+		.map_err(|e| SrganError::ShapeError(format!("resize reshape: {}", e)))
 }
