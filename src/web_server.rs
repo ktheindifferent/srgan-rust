@@ -65,6 +65,10 @@ fn default_auto_detect() -> bool {
     true
 }
 
+fn default_true() -> bool {
+    true
+}
+
 /// API request for image upscaling
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpscaleRequest {
@@ -224,6 +228,63 @@ pub struct JobInfo {
     pub webhook_delivery: Option<WebhookDeliveryState>,
 }
 
+/// Request for POST /api/v1/compare
+#[derive(Debug, Deserialize)]
+pub struct CompareRequest {
+    /// Base64-encoded input image used as the high-resolution reference.
+    /// Each model will receive a downscaled (degraded) version of this image
+    /// and its output is evaluated against the original.
+    pub image_data: String,
+    /// Model labels to compare (1–8 entries), e.g. `["natural","anime","bilinear"]`.
+    pub models: Vec<String>,
+    /// Output image format: `"png"` (default) or `"jpeg"`.
+    pub format: Option<String>,
+    /// Tile size in pixels for tiled upscaling of large images (default: 512).
+    pub tile_size: Option<usize>,
+    /// Include base64-encoded output images in the response (default: true).
+    #[serde(default = "default_true")]
+    pub include_images: bool,
+}
+
+/// Per-model result returned by /api/v1/compare
+#[derive(Debug, Serialize)]
+pub struct ModelCompareResult {
+    /// Model label that was evaluated.
+    pub model: String,
+    pub success: bool,
+    /// Peak Signal-to-Noise Ratio in dB vs. the HR reference (higher is better).
+    pub psnr_db: Option<f64>,
+    /// Structural Similarity Index vs. the HR reference, range [0, 1] (higher is better).
+    pub ssim: Option<f64>,
+    /// Base64-encoded upscaled output image (absent when `include_images` is false).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_data: Option<String>,
+    pub processing_time_ms: u64,
+    /// Width × height of the upscaled output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upscaled_size: Option<(u32, u32)>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Response from POST /api/v1/compare
+#[derive(Debug, Serialize)]
+pub struct CompareResponse {
+    pub success: bool,
+    /// Dimensions of the original (HR reference) input image.
+    pub original_size: (u32, u32),
+    /// Dimensions of the degraded (LR) image fed to each model.
+    pub degraded_size: (u32, u32),
+    pub results: Vec<ModelCompareResult>,
+    /// Model with the highest PSNR (None if all models failed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_psnr_model: Option<String>,
+    /// Model with the highest SSIM (None if all models failed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub best_ssim_model: Option<String>,
+    pub total_processing_time_ms: u64,
+}
+
 /// Web API server
 pub struct WebServer {
     config: ServerConfig,
@@ -332,6 +393,7 @@ impl WebServer {
         info!("  GET  /api/v1/job/{{id}}       - Check single-image job status");
         info!("  GET  /api/v1/health          - Health check");
         info!("  GET  /api/models             - List available models");
+        info!("  POST /api/v1/compare         - Multi-model PSNR/SSIM comparison");
         info!("  (Legacy /api/* routes also supported)");
         
         if let Some(ref _api_key) = self.config.api_key {
@@ -452,6 +514,7 @@ impl WebServer {
                 ("POST", "/api/v1/billing/checkout") => self.handle_billing_checkout(&request),
                 ("POST", "/api/v1/billing/webhook") => self.handle_billing_webhook(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
+                ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
                 _ if method == "GET"
                     && (path.starts_with("/api/v1/job/") || path.starts_with("/api/job/"))
@@ -3104,6 +3167,250 @@ setInterval(refreshAll, 5000);
 </html>"#;
 
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-cache\r\n\r\n{}", html)
+    }
+
+    /// POST /api/v1/compare — upscale one image with multiple models simultaneously
+    /// and return side-by-side PSNR / SSIM quality metrics plus output images.
+    ///
+    /// The input image is treated as the high-resolution reference.  It is
+    /// downscaled by the native model upscale factor (usually 4×) to produce a
+    /// degraded LR image, which is then upscaled by each requested model.  Each
+    /// output is compared against the original HR image to yield PSNR and SSIM.
+    fn handle_compare(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+
+        let req: CompareRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        if req.models.is_empty() {
+            return self.error_response(400, "models list must not be empty");
+        }
+        if req.models.len() > 8 {
+            return self.error_response(400, "models list must not exceed 8 entries");
+        }
+
+        // Decode and load input image
+        let image_bytes = match general_purpose::STANDARD.decode(&req.image_data) {
+            Ok(d) => d,
+            Err(e) => return self.error_response(400, &format!("Invalid base64: {}", e)),
+        };
+        let hr_img = match image::load_from_memory(&image_bytes) {
+            Ok(img) => img,
+            Err(e) => return self.error_response(400, &format!("Invalid image: {}", e)),
+        };
+
+        let original_size = (hr_img.width(), hr_img.height());
+        let total_start = SystemTime::now();
+
+        // Downscale HR → LR using the network's native upscale factor
+        let upscale_factor = self.network.factor().max(1);
+        let lr_w = (original_size.0 / upscale_factor).max(1);
+        let lr_h = (original_size.1 / upscale_factor).max(1);
+        let lr_img = hr_img.resize_exact(lr_w, lr_h, image::imageops::FilterType::Lanczos3);
+        let degraded_size = (lr_img.width(), lr_img.height());
+
+        let format = req.format.as_deref().unwrap_or("png");
+        let img_format = match format {
+            "jpeg" | "jpg" => ImageFormat::JPEG,
+            _ => ImageFormat::PNG,
+        };
+        let tile_size = req.tile_size.map(|s| s.max(64)).unwrap_or(512);
+        let use_tiling = (lr_w as usize * lr_h as usize) > 4_000_000 || req.tile_size.is_some();
+
+        let mut results: Vec<ModelCompareResult> = Vec::with_capacity(req.models.len());
+
+        for model_label in &req.models {
+            let model_start = SystemTime::now();
+
+            let upscale_result: std::result::Result<image::DynamicImage, SrganError> = (|| {
+                if model_label == "natural" || model_label.is_empty() {
+                    if use_tiling {
+                        self.network.upscale_image_tiled(&lr_img, tile_size)
+                    } else {
+                        self.network.upscale_image(&lr_img)
+                    }
+                } else {
+                    let net_result = crate::thread_safe_network::ThreadSafeNetwork::from_label(
+                        model_label,
+                        None,
+                    );
+                    let net = net_result.unwrap_or_else(|_| {
+                        // Shadow-load the default network as fallback
+                        crate::thread_safe_network::ThreadSafeNetwork::load_builtin_natural()
+                            .expect("built-in natural model must always load")
+                    });
+                    if use_tiling {
+                        net.upscale_image_tiled(&lr_img, tile_size)
+                    } else {
+                        net.upscale_image(&lr_img)
+                    }
+                }
+            })();
+
+            let processing_time_ms = model_start
+                .elapsed()
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+
+            match upscale_result {
+                Ok(upscaled) => {
+                    let upscaled_size = (upscaled.width(), upscaled.height());
+
+                    // Compute quality metrics against the HR reference
+                    let (psnr, ssim) = Self::compute_metrics(&hr_img, &upscaled);
+
+                    // Encode to the requested output format
+                    let image_data = if req.include_images {
+                        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+                        match upscaled.write_to(&mut cursor, img_format) {
+                            Ok(()) => Some(general_purpose::STANDARD.encode(cursor.into_inner())),
+                            Err(_) => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    results.push(ModelCompareResult {
+                        model: model_label.clone(),
+                        success: true,
+                        psnr_db: Some(psnr),
+                        ssim: Some(ssim),
+                        image_data,
+                        processing_time_ms,
+                        upscaled_size: Some(upscaled_size),
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    results.push(ModelCompareResult {
+                        model: model_label.clone(),
+                        success: false,
+                        psnr_db: None,
+                        ssim: None,
+                        image_data: None,
+                        processing_time_ms,
+                        upscaled_size: None,
+                        error: Some(format!("{}", e)),
+                    });
+                }
+            }
+        }
+
+        // Identify the top-performing model by each metric
+        let best_psnr_model = results
+            .iter()
+            .filter(|r| r.psnr_db.is_some())
+            .max_by(|a, b| {
+                a.psnr_db
+                    .unwrap()
+                    .partial_cmp(&b.psnr_db.unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|r| r.model.clone());
+
+        let best_ssim_model = results
+            .iter()
+            .filter(|r| r.ssim.is_some())
+            .max_by(|a, b| {
+                a.ssim
+                    .unwrap()
+                    .partial_cmp(&b.ssim.unwrap())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|r| r.model.clone());
+
+        let total_processing_time_ms = total_start
+            .elapsed()
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let response = CompareResponse {
+            success: true,
+            original_size,
+            degraded_size,
+            results,
+            best_psnr_model,
+            best_ssim_model,
+            total_processing_time_ms,
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            serde_json::to_string(&response)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        )
+    }
+
+    /// Compute PSNR (dB) and a global SSIM between two images.
+    ///
+    /// Both images are compared in RGB colour space with pixel values in [0, 255].
+    /// If the images differ in size the reference is resized to match the upscaled
+    /// output so that every pixel has a direct counterpart.
+    ///
+    /// Returns `(psnr_db, ssim)` where SSIM is in [0, 1].
+    fn compute_metrics(
+        reference: &image::DynamicImage,
+        upscaled: &image::DynamicImage,
+    ) -> (f64, f64) {
+        let (w, h) = (upscaled.width(), upscaled.height());
+
+        // Resize reference to match the upscaled output dimensions
+        let ref_resized = if reference.width() != w || reference.height() != h {
+            reference.resize_exact(w, h, image::imageops::FilterType::Lanczos3)
+        } else {
+            reference.clone()
+        };
+
+        let ref_rgb = ref_resized.to_rgb();
+        let up_rgb = upscaled.to_rgb();
+
+        let n = (w as usize * h as usize * 3) as f64;
+        let mut mse_acc = 0.0f64;
+        let mut sum_r = 0.0f64;
+        let mut sum_u = 0.0f64;
+        let mut sum_r2 = 0.0f64;
+        let mut sum_u2 = 0.0f64;
+        let mut sum_ru = 0.0f64;
+
+        for (rp, up) in ref_rgb.pixels().zip(up_rgb.pixels()) {
+            for c in 0..3usize {
+                let rv = rp[c] as f64;
+                let uv = up[c] as f64;
+                let d = rv - uv;
+                mse_acc += d * d;
+                sum_r += rv;
+                sum_u += uv;
+                sum_r2 += rv * rv;
+                sum_u2 += uv * uv;
+                sum_ru += rv * uv;
+            }
+        }
+
+        // PSNR — clamped to 100 dB for identical images to avoid +∞
+        let mse = mse_acc / n;
+        let psnr = if mse < 1e-10 {
+            100.0
+        } else {
+            10.0 * (255.0f64 * 255.0 / mse).log10()
+        };
+
+        // Global SSIM using full-image statistics (simplified, no sliding window)
+        let mu_r = sum_r / n;
+        let mu_u = sum_u / n;
+        let sigma_r2 = (sum_r2 / n) - mu_r * mu_r;
+        let sigma_u2 = (sum_u2 / n) - mu_u * mu_u;
+        let sigma_ru = (sum_ru / n) - mu_r * mu_u;
+
+        // SSIM stability constants (L = 255)
+        let c1 = (0.01 * 255.0f64).powi(2); // 6.5025
+        let c2 = (0.03 * 255.0f64).powi(2); // 58.5225
+
+        let ssim = ((2.0 * mu_r * mu_u + c1) * (2.0 * sigma_ru + c2))
+            / ((mu_r * mu_r + mu_u * mu_u + c1) * (sigma_r2 + sigma_u2 + c2));
+
+        (psnr, ssim.clamp(0.0, 1.0))
     }
 
     /// GET /api/v1/job/:id/stream — Server-Sent Events endpoint.
