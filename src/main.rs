@@ -24,6 +24,7 @@ fn main() {
 		("parallel-benchmark", Some(sub_m)) => commands::run_parallel_benchmark(sub_m),
 		("generate-config", Some(sub_m)) => commands::generate_config(sub_m),
 		("server", Some(sub_m)) => commands::start_server(sub_m),
+		("download-model", Some(sub_m)) => commands::download_model(sub_m),
 		("profile-memory", Some(sub_m)) => {
 			match sub_m.value_of("input") {
 				Some(input) => {

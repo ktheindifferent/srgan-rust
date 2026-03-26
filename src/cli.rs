@@ -26,6 +26,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_profile_memory_subcommand())
 		.subcommand(build_analyze_memory_subcommand())
 		.subcommand(build_server_subcommand())
+		.subcommand(build_download_model_subcommand())
 		.get_matches()
 }
 
@@ -461,11 +462,11 @@ fn build_list_gpus_subcommand() -> App<'static, 'static> {
 
 fn build_benchmark_subcommand() -> App<'static, 'static> {
 	SubCommand::with_name("benchmark")
-		.about("Benchmark model performance")
+		.about("Benchmark model performance at 256×256, 512×512 and 1024×1024")
 		.arg(
 			Arg::with_name("input")
-				.help("Input image or directory")
-				.required(true)
+				.help("Optional real input image (benchmarks use synthetic data by default)")
+				.required(false)
 				.index(1),
 		)
 		.arg(
@@ -628,6 +629,33 @@ fn build_analyze_memory_subcommand() -> App<'static, 'static> {
 				.short("i")
 				.long("interval")
 				.default_value("100"),
+		)
+}
+
+fn build_download_model_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("download-model")
+		.about("Extract a built-in SRGAN model to disk (or list available models)")
+		.arg(
+			Arg::with_name("name")
+				.help("Model name to extract: natural (default), anime")
+				.short("n")
+				.long("name")
+				.value_name("NAME")
+				.default_value("natural"),
+		)
+		.arg(
+			Arg::with_name("dir")
+				.help("Directory to save the model (default: ~/.srgan-rust/models/)")
+				.short("d")
+				.long("dir")
+				.value_name("DIR"),
+		)
+		.arg(
+			Arg::with_name("list")
+				.help("List available built-in models and exit")
+				.short("l")
+				.long("list")
+				.takes_value(false),
 		)
 }
 

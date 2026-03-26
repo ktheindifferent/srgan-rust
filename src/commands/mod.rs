@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod batch_improved;
 pub mod benchmark;
+pub mod download_model;
 pub mod convert_model;
 pub mod parallel_benchmark;
 pub mod downscale;
@@ -19,6 +20,7 @@ pub mod video;
 pub use self::batch::batch_upscale;
 pub use self::batch_improved::batch_upscale_enhanced;
 pub use self::benchmark::benchmark;
+pub use self::download_model::download_model;
 pub use self::convert_model::{convert_model, list_formats};
 pub use self::parallel_benchmark::run_parallel_benchmark;
 pub use self::downscale::downscale;
