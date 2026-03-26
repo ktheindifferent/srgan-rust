@@ -605,7 +605,7 @@ impl WebServer {
             // Strip query string from path for routing
             let path = parts[1].split('?').next().unwrap_or(parts[1]);
             
-            // SSE stream endpoint: takes ownership of `stream` and writes events
+            // SSE stream endpoints: take ownership of `stream` and write events
             // directly, bypassing the normal single-string response path.
             if method == "GET"
                 && (path.starts_with("/api/v1/job/") || path.starts_with("/api/job/"))
@@ -613,6 +613,12 @@ impl WebServer {
             {
                 let path_owned = path.to_string();
                 self.handle_job_stream(stream, &path_owned);
+                continue;
+            }
+
+            // Dashboard SSE stream — pushes live queue stats every second.
+            if method == "GET" && (path == "/api/v1/dashboard/stream" || path == "/api/dashboard/stream") {
+                self.handle_dashboard_stream(stream);
                 continue;
             }
 
@@ -1185,7 +1191,7 @@ impl WebServer {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SRGAN-Rust</title>
+<title>SRGAN-Rust — Live Dashboard</title>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--accent:#00d4ff;
@@ -4468,6 +4474,118 @@ setInterval(refreshAll, 5000);
     ///
     /// The progress is simulated over ~2 seconds (10 × 200 ms) so clients can
     /// exercise the SSE path without waiting for real job completion.
+    /// GET /api/v1/dashboard/stream — SSE endpoint that pushes live queue stats,
+    /// worker utilization, and per-job progress updates every second.
+    fn handle_dashboard_stream(&self, mut stream: std::net::TcpStream) {
+        let headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Cache-Control: no-cache\r\n",
+            "Connection: keep-alive\r\n",
+            "Access-Control-Allow-Origin: *\r\n",
+            "\r\n",
+        );
+        if stream.write_all(headers.as_bytes()).is_err() {
+            return;
+        }
+
+        let write_sse = |stream: &mut std::net::TcpStream,
+                         event: &str,
+                         data: &serde_json::Value|
+         -> bool {
+            let msg = format!("event: {}\ndata: {}\n\n", event, data);
+            stream.write_all(msg.as_bytes()).is_ok()
+                && stream.flush().is_ok()
+        };
+
+        // Keep pushing until the client disconnects.
+        loop {
+            // ── Queue stats ──────────────────────────────────────────────
+            let (pending, processing, completed, failed) =
+                if let Ok(jobs) = self.jobs.lock() {
+                    let mut pe = 0u64;
+                    let mut pr = 0u64;
+                    let mut co = 0u64;
+                    let mut fa = 0u64;
+                    for job in jobs.values() {
+                        match &job.status {
+                            JobStatus::Pending => pe += 1,
+                            JobStatus::Processing => pr += 1,
+                            JobStatus::Completed => co += 1,
+                            JobStatus::Failed(_) => fa += 1,
+                        }
+                    }
+                    (pe, pr, co, fa)
+                } else {
+                    (0, 0, 0, 0)
+                };
+
+            let total = pending + processing + completed + failed;
+            let images_processed = self.images_processed.load(Ordering::Relaxed);
+
+            // Worker utilization: ratio of processing jobs to total active
+            // (pending + processing).  If no active jobs, utilization is 0 %.
+            let active = pending + processing;
+            let worker_utilization = if active > 0 {
+                (processing as f64 / active as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let uptime_secs = SystemTime::now()
+                .duration_since(self.server_start_time)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+
+            let stats = serde_json::json!({
+                "pending": pending,
+                "processing": processing,
+                "completed": completed,
+                "failed": failed,
+                "total": total,
+                "images_processed": images_processed,
+                "worker_utilization_pct": (worker_utilization * 100.0).round() / 100.0,
+                "uptime_secs": uptime_secs,
+            });
+
+            if !write_sse(&mut stream, "stats", &stats) {
+                return;
+            }
+
+            // ── Per-job progress snapshot ────────────────────────────────
+            // Emit an array of currently active (pending + processing) jobs
+            // so the dashboard can show individual progress rows.
+            let job_updates: Vec<serde_json::Value> =
+                if let Ok(jobs) = self.jobs.lock() {
+                    jobs.values()
+                        .filter(|j| {
+                            matches!(j.status, JobStatus::Pending | JobStatus::Processing)
+                        })
+                        .map(|j| {
+                            serde_json::json!({
+                                "id": j.id,
+                                "status": match &j.status {
+                                    JobStatus::Pending => "pending",
+                                    JobStatus::Processing => "processing",
+                                    _ => "unknown",
+                                },
+                                "model": j.model,
+                                "created_at": j.created_at,
+                            })
+                        })
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+            if !write_sse(&mut stream, "jobs", &serde_json::json!(job_updates)) {
+                return;
+            }
+
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+
     fn handle_job_stream(&self, mut stream: std::net::TcpStream, path: &str) {
         // Extract job_id: strip prefix + "/stream" suffix.
         let inner = path
