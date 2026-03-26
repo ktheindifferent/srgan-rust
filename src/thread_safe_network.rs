@@ -170,7 +170,15 @@ impl ThreadSafeNetwork {
                 // The anime model was trained on the same class of content
                 // (anime/illustration) and provides equivalent upscaling quality.
                 // TODO: when native waifu2x weights are bundled, load them here.
-                Self::load_builtin_anime()
+                let data = crate::L1_SRGB_ANIME_PARAMS;
+                let desc = crate::network_from_bytes(data)
+                    .map_err(|e| SrganError::Network(e))?;
+                let display = format!(
+                    "waifu2x ({}) — backed by built-in anime model; \
+                     TODO: load native waifu2x weights",
+                    label
+                );
+                Self::new_with_display(desc, &display)
             },
             _ => Err(SrganError::Network(format!("Unsupported network type: {}", label))),
         }

@@ -169,6 +169,46 @@ curl -X POST http://localhost:8080/api/v1/upscale \
   }' | jq -r .image_data | base64 -d > output.png
 ```
 
+### Waifu2x API example
+
+Use `model: "waifu2x"` with the optional `waifu2x_noise_level` (0–3) and
+`waifu2x_scale` (1 or 2) parameters.  Omitting either uses the defaults
+(noise_level=1, scale=2).
+
+```bash
+# Noise level 2, 2× upscale — good for scanned manga or screenshots
+curl -X POST http://localhost:8080/api/v1/upscale \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_data": "'$(base64 -i sketch.png)'",
+    "model": "waifu2x",
+    "waifu2x_noise_level": 2,
+    "waifu2x_scale": 2,
+    "format": "png"
+  }' | jq -r .image_data | base64 -d > sketch_2x.png
+
+# Denoise only (scale=1) with aggressive noise reduction (level 3)
+curl -X POST http://localhost:8080/api/v1/upscale \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_data": "'$(base64 -i noisy.png)'",
+    "model": "waifu2x",
+    "waifu2x_noise_level": 3,
+    "waifu2x_scale": 1,
+    "format": "png"
+  }' | jq -r .image_data | base64 -d > denoised.png
+```
+
+You can also pass the full variant label directly via `model`:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/upscale \
+  -H "Content-Type: application/json" \
+  -d '{"image_data": "'$(base64 -i art.png)'", "model": "waifu2x-noise1-scale2"}'
+```
+
 ---
 
 ## Performance
