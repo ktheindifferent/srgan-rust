@@ -1856,36 +1856,6 @@ function renderEndpointMetrics(metrics){
 
     // ── Organization endpoints ────────────────────────────────────────────────
 
-    /// POST /api/orgs — create a new organization.
-    fn handle_create_org(&self, request: &str) -> String {
-        let api_key = self
-            .extract_header(request, "x-api-key")
-            .unwrap_or_default();
-        if api_key.is_empty() {
-            return self.error_response(401, "Missing X-Api-Key header");
-        }
-
-        let body = self.extract_body(request);
-        let req: crate::api::org::CreateOrgRequest = match serde_json::from_str(&body) {
-            Ok(r) => r,
-            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
-        };
-
-        match self.org_db.lock() {
-            Ok(mut db) => match db.create_org(req.name, api_key) {
-                Ok(org) => {
-                    let json = serde_json::to_string(&org).unwrap_or_default();
-                    format!(
-                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
-                        json
-                    )
-                }
-                Err(e) => self.error_response(400, &e),
-            },
-            Err(_) => self.error_response(500, "Internal error"),
-        }
-    }
-
     /// GET /api/orgs/:id — get org details. Requires membership.
     fn handle_get_org(&self, request: &str, path: &str) -> String {
         let api_key = self
@@ -4057,6 +4027,43 @@ setInterval(refreshAll, 5000);
                 }
             }
         });
+    }
+
+    // ── Multi-tenant org handlers ────────────────────────────────────────────
+
+    /// POST /api/orgs — create a new organization.
+    ///
+    /// Body: `{ "name": "Acme Corp" }`
+    /// Requires a valid API key (the caller becomes the org owner).
+    fn handle_create_org(&self, request: &str) -> String {
+        let api_key = match self.extract_header(request, "x-api-key") {
+            Some(k) if !k.is_empty() => k,
+            _ => return self.error_response(401, "Missing x-api-key header"),
+        };
+
+        let body = self.extract_body(request);
+        let req: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => return self.error_response(400, "Invalid JSON body"),
+        };
+
+        let name = match req.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => return self.error_response(400, "Missing required field: name"),
+        };
+
+        let mut db = match self.org_db.lock() {
+            Ok(g) => g,
+            Err(_) => return self.error_response(500, "Internal lock error"),
+        };
+
+        match db.create_org(name, api_key) {
+            Ok(org) => {
+                let body = serde_json::to_string(&org).unwrap_or_default();
+                format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{}", body)
+            }
+            Err(e) => self.error_response(400, &e),
+        }
     }
 
 }
