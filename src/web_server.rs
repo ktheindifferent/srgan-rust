@@ -173,11 +173,12 @@ impl WebServer {
         
         info!("Starting web server at http://{}", addr);
         info!("API endpoints:");
-        info!("  POST /api/upscale       - Synchronous image upscaling");
-        info!("  POST /api/upscale/async - Asynchronous image upscaling");
-        info!("  GET  /api/job/{{id}}      - Check job status");
-        info!("  GET  /api/health        - Health check");
-        info!("  GET  /api/models        - List available models");
+        info!("  POST /api/v1/upscale       - Synchronous image upscaling");
+        info!("  POST /api/v1/upscale/async - Asynchronous image upscaling");
+        info!("  GET  /api/v1/job/{{id}}      - Check job status");
+        info!("  GET  /api/v1/health        - Health check (model_loaded, status)");
+        info!("  GET  /api/models           - List available models");
+        info!("  (Legacy /api/* routes also supported)");
         
         if let Some(ref _api_key) = self.config.api_key {
             info!("API key authentication enabled");
@@ -237,12 +238,12 @@ impl WebServer {
             
             // Route request
             let response = match (method, path) {
-                ("GET", "/api/health") => self.handle_health_check(),
+                ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") => self.handle_list_models(),
-                ("POST", "/api/upscale") => self.handle_upscale_sync(&request),
-                ("POST", "/api/upscale/async") => self.handle_upscale_async(&request),
-                _ if method == "GET" && path.starts_with("/api/job/") => self.handle_job_status(path),
-                _ if method == "GET" && path.starts_with("/api/result/") => self.handle_job_result(path),
+                ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
+                ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
+                _ if method == "GET" && (path.starts_with("/api/job/") || path.starts_with("/api/v1/job/")) => self.handle_job_status(path),
+                _ if method == "GET" && (path.starts_with("/api/result/") || path.starts_with("/api/v1/result/")) => self.handle_job_result(path),
                 _ => self.handle_not_found(),
             };
             
@@ -256,7 +257,10 @@ impl WebServer {
     /// Handle health check
     fn handle_health_check(&self) -> String {
         let response = serde_json::json!({
-            "status": "healthy",
+            "status": "ok",
+            "model_loaded": true,
+            "model": self.network.display(),
+            "model_factor": self.network.factor(),
             "version": "0.2.0",
             "uptime": SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -496,6 +500,15 @@ impl WebServer {
     ) -> std::result::Result<UpscaleResponse, SrganError> {
         let start_time = SystemTime::now();
         let original_size = (img.width(), img.height());
+        let network_factor = self.network.factor();
+        let requested_factor = request.scale_factor.unwrap_or(network_factor);
+
+        if requested_factor != network_factor {
+            warn!(
+                "scale_factor={} requested but model supports {}x; using native factor",
+                requested_factor, network_factor
+            );
+        }
 
         // Run SRGAN inference
         let upscaled = self.network.upscale_image(&img)?;
@@ -525,7 +538,11 @@ impl WebServer {
                 upscaled_size,
                 processing_time_ms: processing_time,
                 format: format.into(),
-                model_used: request.model.unwrap_or_else(|| "natural".into()),
+                model_used: format!(
+                    "srgan_{}_{}x",
+                    request.model.as_deref().unwrap_or("natural"),
+                    network_factor
+                ),
             },
         })
     }

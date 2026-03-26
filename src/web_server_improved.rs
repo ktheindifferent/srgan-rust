@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration, Instant};
 use std::thread;
 use std::net::SocketAddr;
 use std::io::Write;
+use base64::{Engine as _, engine::general_purpose};
 use image::{ImageFormat, GenericImage};
 use serde::{Serialize, Deserialize};
 use dashmap::DashMap;
@@ -65,7 +66,7 @@ impl Default for EnhancedServerConfig {
 }
 
 /// Enhanced API request for image upscaling
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct EnhancedUpscaleRequest {
     pub image_data: String,  // Base64 encoded image
     pub scale_factor: Option<u32>,
@@ -100,7 +101,7 @@ pub struct EnhancedUpscaleResponse {
     pub retry_info: Option<RetryInfo>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ErrorDetails {
     pub code: String,
     pub message: String,
@@ -117,7 +118,7 @@ pub struct RetryInfo {
 }
 
 /// Enhanced response metadata with performance metrics
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ResponseMetadata {
     pub original_size: (u32, u32),
     pub upscaled_size: (u32, u32),
@@ -320,7 +321,7 @@ impl EnhancedWebServer {
         }
         
         // Decode and validate input
-        let image_data = match base64::decode(&request.image_data) {
+        let image_data = match general_purpose::STANDARD.decode(&request.image_data) {
             Ok(data) => data,
             Err(e) => {
                 operation_logger.log_error(&e);
@@ -337,7 +338,7 @@ impl EnhancedWebServer {
         let cache_key = self.generate_cache_key(&request);
         if self.config.cache_enabled {
             if let Some(cached) = self.get_cached_result(&cache_key).await {
-                metrics::increment_counter!("srgan_cache_hits", 1);
+                metrics::increment_counter!("srgan_cache_hits");
                 return cached;
             }
         }
@@ -361,7 +362,7 @@ impl EnhancedWebServer {
                 
                 EnhancedUpscaleResponse {
                     success: true,
-                    image_data: Some(base64::encode(&upscaled_data)),
+                    image_data: Some(general_purpose::STANDARD.encode(&upscaled_data)),
                     error: None,
                     metadata,
                     retry_info: None,
@@ -390,34 +391,45 @@ impl EnhancedWebServer {
         
         let original_size = (img.width(), img.height());
         let start_time = Instant::now();
-        
+        let network_factor = self.network.factor();
+        let requested_factor = request.scale_factor.unwrap_or(network_factor);
+
+        // Validate scale_factor against model capability
+        if requested_factor != network_factor {
+            warn!(
+                "Requested scale_factor={} but loaded model supports {}x; proceeding with native factor",
+                requested_factor, network_factor
+            );
+        }
+
         // Process with network
         let upscaled = self.performance_tracker.track("upscale_inference", || {
             self.network.upscale_image(&img)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
         })?;
-        
+
         let upscaled_size = (upscaled.width(), upscaled.height());
-        
+
         // Encode result
         let format = request.format.as_deref().unwrap_or("png");
         let mut output = Vec::new();
         let image_format = match format {
-            "png" => ImageFormat::Png,
-            "jpeg" | "jpg" => ImageFormat::Jpeg,
-            _ => ImageFormat::Png,
+            "png" => ImageFormat::PNG,
+            "jpeg" | "jpg" => ImageFormat::JPEG,
+            _ => ImageFormat::PNG,
         };
-        
+
         upscaled.write_to(&mut output, image_format)
             .map_err(|e| SrganError::Image(e))?;
-        
+
+        let model_label = request.model.as_deref().unwrap_or("natural");
         let metadata = ResponseMetadata {
             original_size,
             upscaled_size,
             processing_time_ms: start_time.elapsed().as_millis() as u64,
             queue_time_ms: 0,
             format: format.to_string(),
-            model_used: "enhanced_srgan".to_string(),
+            model_used: format!("srgan_{}_{}x", model_label, network_factor),
             cache_hit: false,
             degraded_mode: false,
         };
@@ -435,7 +447,7 @@ impl EnhancedWebServer {
         
         if let Some(limit) = self.config.rate_limit {
             if entry.len() >= limit {
-                metrics::increment_counter!("srgan_rate_limit_exceeded", 1);
+                metrics::increment_counter!("srgan_rate_limit_exceeded");
                 return false;
             }
         }
@@ -473,7 +485,7 @@ impl EnhancedWebServer {
                 
                 return Some(EnhancedUpscaleResponse {
                     success: true,
-                    image_data: Some(base64::encode(&cached.data)),
+                    image_data: Some(general_purpose::STANDARD.encode(&cached.data)),
                     error: None,
                     metadata,
                     retry_info: None,
@@ -665,13 +677,13 @@ impl EnhancedWebServer {
     pub async fn get_health_status(&self) -> HealthStatus {
         let requests = self.request_counter.load(std::sync::atomic::Ordering::Relaxed);
         let errors = self.error_counter.load(std::sync::atomic::Ordering::Relaxed);
-        
+
         let error_rate = if requests > 0 {
             (errors as f64) / (requests as f64)
         } else {
             0.0
         };
-        
+
         let status = if error_rate > 0.5 {
             ServiceStatus::Unhealthy
         } else if error_rate > 0.1 {
@@ -679,23 +691,38 @@ impl EnhancedWebServer {
         } else {
             ServiceStatus::Healthy
         };
-        
+
         HealthStatus {
             status,
             uptime_seconds: self.start_time.elapsed().as_secs(),
             requests_processed: requests,
             error_rate,
-            average_response_time_ms: 0, // Would calculate from metrics
-            circuit_breaker_status: "closed".to_string(), // Would check actual status
-            active_connections: 0, // Would track actual connections
-            memory_usage_mb: 0, // Would calculate from system metrics
+            average_response_time_ms: 0,
+            circuit_breaker_status: "closed".to_string(),
+            active_connections: 0,
+            memory_usage_mb: 0,
         }
     }
-}
 
-// Add uuid and base64 to dependencies
-use uuid;
-use base64;
+    /// Serialize health to the /api/v1/health JSON shape
+    pub async fn health_json(&self) -> serde_json::Value {
+        let hs = self.get_health_status().await;
+        let status_str = match hs.status {
+            ServiceStatus::Healthy => "ok",
+            ServiceStatus::Degraded => "degraded",
+            ServiceStatus::Unhealthy => "unhealthy",
+        };
+        serde_json::json!({
+            "status": status_str,
+            "model_loaded": true,
+            "model": self.network.display(),
+            "model_factor": self.network.factor(),
+            "uptime_seconds": hs.uptime_seconds,
+            "requests_processed": hs.requests_processed,
+            "error_rate": hs.error_rate,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
