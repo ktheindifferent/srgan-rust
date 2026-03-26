@@ -78,8 +78,48 @@ curl http://localhost:8080/api/v1/models \
     "version": "1.0.0",
     "psnr": 28.5,
     "recommended_for": ["photos", "general"]
+  },
+  {
+    "name": "anime",
+    "description": "Anime/illustration-optimised model trained with L1 loss",
+    "scale_factor": 4,
+    "version": "1.0.0",
+    "psnr": 29.1,
+    "recommended_for": ["anime", "illustrations", "cartoons"]
+  },
+  {
+    "name": "waifu2x",
+    "description": "Waifu2x-style model for anime/photo upscaling with configurable noise reduction (noise_level 0–3, scale 1×/2×)",
+    "scale_factor": 2,
+    "version": "1.0.0",
+    "recommended_for": ["anime", "illustrations", "photos"],
+    "parameters": {
+      "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
+      "waifu2x_scale": "1 or 2 (default 2)"
+    }
   }
 ]
+```
+
+To use waifu2x via the API, pass `"model": "waifu2x"` along with optional `waifu2x_noise_level` (0–3) and `waifu2x_scale` (1 or 2):
+
+```bash
+curl -X POST http://localhost:8080/api/v1/upscale \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_data": "'$(base64 -i input.jpg)'",
+    "model": "waifu2x",
+    "waifu2x_noise_level": 2,
+    "waifu2x_scale": 2,
+    "format": "png"
+  }' | jq -r .image_data | base64 -d > output.png
+```
+
+Or via CLI using the `-p` flag:
+
+```bash
+./srgan-rust -p waifu2x-noise2-scale2 anime.png anime_2x.png
 ```
 
 ### Async job queue
