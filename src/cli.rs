@@ -25,6 +25,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_generate_config_subcommand())
 		.subcommand(build_profile_memory_subcommand())
 		.subcommand(build_analyze_memory_subcommand())
+		.subcommand(build_server_subcommand())
 		.get_matches()
 }
 
@@ -627,5 +628,70 @@ fn build_analyze_memory_subcommand() -> App<'static, 'static> {
 				.short("i")
 				.long("interval")
 				.default_value("100"),
+		)
+}
+
+fn build_server_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("server")
+		.about("Start the SRGAN web API server")
+		.arg(
+			Arg::with_name("host")
+				.help("Host address to bind to")
+				.long("host")
+				.default_value("127.0.0.1"),
+		)
+		.arg(
+			Arg::with_name("port")
+				.help("Port to listen on")
+				.short("p")
+				.long("port")
+				.default_value("8080"),
+		)
+		.arg(
+			Arg::with_name("model")
+				.help("Path to a custom model file (.rsr)")
+				.short("m")
+				.long("model"),
+		)
+		.arg(
+			Arg::with_name("api-key")
+				.help("API key for request authentication")
+				.long("api-key"),
+		)
+		.arg(
+			Arg::with_name("rate-limit")
+				.help("Max requests per minute")
+				.long("rate-limit")
+				.default_value("60"),
+		)
+		.arg(
+			Arg::with_name("max-size")
+				.help("Maximum upload size (e.g. 50MB, 1GB)")
+				.long("max-size")
+				.default_value("50MB"),
+		)
+		.arg(
+			Arg::with_name("no-cache")
+				.help("Disable response caching")
+				.long("no-cache")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("cache-ttl")
+				.help("Cache TTL in seconds")
+				.long("cache-ttl")
+				.default_value("3600"),
+		)
+		.arg(
+			Arg::with_name("no-cors")
+				.help("Disable CORS headers")
+				.long("no-cors")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("no-logging")
+				.help("Disable request logging")
+				.long("no-logging")
+				.takes_value(false),
 		)
 }

@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
 use std::net::SocketAddr;
 use std::io::Write;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{ImageFormat, GenericImage};
 use log::{info, warn};
 use crate::error::SrganError;
@@ -43,7 +44,7 @@ impl Default for ServerConfig {
 }
 
 /// API request for image upscaling
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UpscaleRequest {
     pub image_data: String,  // Base64 encoded image
     pub scale_factor: Option<u32>,
@@ -88,6 +89,7 @@ pub struct JobInfo {
     pub created_at: u64,
     pub updated_at: u64,
     pub result_url: Option<String>,
+    pub result_data: Option<String>,  // base64-encoded result image
     pub error: Option<String>,
 }
 
@@ -239,7 +241,8 @@ impl WebServer {
                 ("GET", "/api/models") => self.handle_list_models(),
                 ("POST", "/api/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") => self.handle_upscale_async(&request),
-                _ if path.starts_with("/api/job/") => self.handle_job_status(path),
+                _ if method == "GET" && path.starts_with("/api/job/") => self.handle_job_status(path),
+                _ if method == "GET" && path.starts_with("/api/result/") => self.handle_job_result(path),
                 _ => self.handle_not_found(),
             };
             
@@ -282,25 +285,39 @@ impl WebServer {
     
     /// Handle synchronous upscale
     fn handle_upscale_sync(&self, request: &str) -> String {
-        // Parse JSON body (simplified)
         let body = self.extract_body(request);
-        
+
         match serde_json::from_str::<UpscaleRequest>(&body) {
             Ok(req) => {
-                // Check rate limit
                 if !self.check_rate_limit("client") {
                     return self.error_response(429, "Rate limit exceeded");
                 }
-                
-                // Process image
-                match self.process_image(req) {
-                    Ok(response) => {
-                        format!(
-                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
-                            serde_json::to_string(&response)
-                                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
-                        )
-                    }
+
+                // Decode base64 up-front so we can check dimensions
+                let image_data = match STANDARD.decode(&req.image_data) {
+                    Ok(d) => d,
+                    Err(e) => return self.error_response(400, &format!("Invalid base64: {}", e)),
+                };
+
+                // Load image to inspect size
+                let img = match image::load_from_memory(&image_data) {
+                    Ok(img) => img,
+                    Err(e) => return self.error_response(400, &format!("Invalid image: {}", e)),
+                };
+
+                // Images > 2MP are queued as async jobs to avoid blocking
+                let pixel_count = img.width() as u64 * img.height() as u64;
+                if pixel_count > 2_000_000 {
+                    return self.queue_async_job_from_data(req, image_data);
+                }
+
+                // Process synchronously
+                match self.process_image_decoded(req, img) {
+                    Ok(response) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                        serde_json::to_string(&response)
+                            .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+                    ),
                     Err(e) => self.error_response(500, &format!("{}", e)),
                 }
             }
@@ -330,6 +347,7 @@ impl WebServer {
                         .map(|d| d.as_secs())
                         .unwrap_or(0),
                     result_url: None,
+                    result_data: None,
                     error: None,
                 };
                 
@@ -357,25 +375,35 @@ impl WebServer {
                         }
                     }
                     
-                    // Process image with thread-safe network
-                    let result = (|| -> Result<(), SrganError> {
-                        let image_data = base64::decode(&req_clone.image_data)
+                    // Process image with thread-safe network, return base64-encoded result
+                    let result: std::result::Result<String, SrganError> = (|| {
+                        let image_data = STANDARD.decode(&req_clone.image_data)
                             .map_err(|e| SrganError::InvalidInput(format!("Invalid base64: {}", e)))?;
                         let img = image::load_from_memory(&image_data)
                             .map_err(|e| SrganError::Image(e))?;
-                        
-                        // Concurrent processing without mutex!
-                        let _upscaled = network.upscale_image(&img)?;
-                        Ok(())
+
+                        let upscaled = network.upscale_image(&img)?;
+
+                        let format = req_clone.format.as_deref().unwrap_or("png");
+                        let img_format = match format {
+                            "jpeg" | "jpg" => ImageFormat::JPEG,
+                            _ => ImageFormat::PNG,
+                        };
+                        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+                        upscaled.write_to(&mut cursor, img_format)
+                            .map_err(|e| SrganError::Image(e))?;
+
+                        Ok(STANDARD.encode(cursor.into_inner()))
                     })();
-                    
+
                     // Update job with result
                     if let Ok(mut jobs_guard) = jobs.lock() {
                         if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
                             match result {
-                                Ok(_) => {
+                                Ok(encoded) => {
                                     job.status = JobStatus::Completed;
                                     job.result_url = Some(format!("/api/result/{}", job_id_clone));
+                                    job.result_data = Some(encoded);
                                 }
                                 Err(e) => {
                                     job.status = JobStatus::Failed(e.to_string());
@@ -460,43 +488,34 @@ impl WebServer {
         }
     }
     
-    /// Process image upscaling
-    fn process_image(&self, request: UpscaleRequest) -> Result<UpscaleResponse, SrganError> {
+    /// Process image upscaling from a pre-decoded DynamicImage
+    fn process_image_decoded(
+        &self,
+        request: UpscaleRequest,
+        img: image::DynamicImage,
+    ) -> std::result::Result<UpscaleResponse, SrganError> {
         let start_time = SystemTime::now();
-        
-        // Decode base64 image
-        let image_data = base64::decode(&request.image_data)
-            .map_err(|e| SrganError::InvalidInput(format!("Invalid base64: {}", e)))?;
-        
-        // Load image
-        let img = image::load_from_memory(&image_data)
-            .map_err(|e| SrganError::Image(e))?;
-        
         let original_size = (img.width(), img.height());
-        
-        // Upscale - no mutex lock needed!
+
+        // Run SRGAN inference
         let upscaled = self.network.upscale_image(&img)?;
         let upscaled_size = (upscaled.width(), upscaled.height());
-        
-        // Encode result
+
+        // Encode result to the requested format
         let format = request.format.as_deref().unwrap_or("png");
-        let mut output = Vec::new();
         let img_format = match format {
             "jpeg" | "jpg" => ImageFormat::JPEG,
-            "png" => ImageFormat::PNG,
-            "webp" => ImageFormat::WEBP,
             _ => ImageFormat::PNG,
         };
-        
-        upscaled.write_to(&mut output, img_format)
+        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+        upscaled.write_to(&mut cursor, img_format)
             .map_err(|e| SrganError::Image(e))?;
-        
-        let encoded = base64::encode(&output);
-        
+        let encoded = STANDARD.encode(cursor.into_inner());
+
         let processing_time = start_time.elapsed()
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        
+
         Ok(UpscaleResponse {
             success: true,
             image_data: Some(encoded),
@@ -509,6 +528,50 @@ impl WebServer {
                 model_used: request.model.unwrap_or_else(|| "natural".into()),
             },
         })
+    }
+
+    /// Queue a large image as a background async job and return 202 with job_id
+    fn queue_async_job_from_data(&self, req: UpscaleRequest, _image_data: Vec<u8>) -> String {
+        // Delegate to the regular async handler by reconstructing the request body
+        // (image_data is already embedded in req.image_data as base64)
+        let body = match serde_json::to_string(&req) {
+            Ok(b) => b,
+            Err(e) => return self.error_response(500, &format!("Serialization error: {}", e)),
+        };
+        // Wrap in a minimal HTTP request fragment so handle_upscale_async can extract it
+        let synthetic_request = format!("\r\n\r\n{}", body);
+        self.handle_upscale_async(&synthetic_request)
+    }
+
+    /// Return the stored result data for a completed job
+    fn handle_job_result(&self, path: &str) -> String {
+        let job_id = path.trim_start_matches("/api/result/");
+
+        if let Ok(jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get(job_id) {
+                match &job.result_data {
+                    Some(data) => {
+                        let response = serde_json::json!({
+                            "success": true,
+                            "job_id": job_id,
+                            "image_data": data,
+                        });
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                            response
+                        )
+                    }
+                    None => {
+                        // Job exists but result not yet available
+                        self.error_response(404, "Result not yet available")
+                    }
+                }
+            } else {
+                self.error_response(404, "Job not found")
+            }
+        } else {
+            self.error_response(500, "Failed to acquire job lock")
+        }
     }
     
     /// Check rate limit
@@ -555,21 +618,6 @@ impl WebServer {
                 }
             }
         });
-    }
-}
-
-/// Base64 encoding/decoding utilities
-mod base64 {
-    pub fn encode(data: &[u8]) -> String {
-        // Simplified base64 encoding
-        // In production, use base64 crate
-        format!("base64:{}", data.len())
-    }
-    
-    pub fn decode(_data: &str) -> Result<Vec<u8>, String> {
-        // Simplified base64 decoding
-        // In production, use base64 crate
-        Ok(vec![0; 100])
     }
 }
 

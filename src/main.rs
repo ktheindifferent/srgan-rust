@@ -2,11 +2,11 @@ extern crate srgan_rust;
 #[macro_use]
 extern crate log;
 
-use srgan_rust::{cli, commands, logging};
+use srgan_rust::{cli, commands};
 
 fn main() {
 	// Initialize simple logger for CLI output
-	logging::init_simple_logger();
+	env_logger::init();
 	
 	let app_m = cli::build_cli();
 
@@ -23,6 +23,7 @@ fn main() {
 		("benchmark", Some(sub_m)) => commands::benchmark(sub_m),
 		("parallel-benchmark", Some(sub_m)) => commands::run_parallel_benchmark(sub_m),
 		("generate-config", Some(sub_m)) => commands::generate_config(sub_m),
+		("server", Some(sub_m)) => commands::start_server(sub_m),
 		("profile-memory", Some(sub_m)) => {
 			match sub_m.value_of("input") {
 				Some(input) => {
