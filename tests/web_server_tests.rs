@@ -78,7 +78,13 @@ fn test_job_info_creation() {
         created_at: 1000,
         updated_at: 1000,
         result_url: None,
+        result_data: None,
         error: None,
+        model: None,
+        input_size: None,
+        output_size: None,
+        webhook_delivery: None,
+        org_id: None,
     };
     
     assert_eq!(job.id, "job_123");
@@ -97,7 +103,13 @@ fn test_job_info_with_result() {
         created_at: 1000,
         updated_at: 2000,
         result_url: Some("/api/result/job_456".to_string()),
+        result_data: None,
         error: None,
+        model: None,
+        input_size: None,
+        output_size: None,
+        webhook_delivery: None,
+        org_id: None,
     };
     
     assert_eq!(job.id, "job_456");
@@ -116,7 +128,13 @@ fn test_job_info_with_error() {
         created_at: 1000,
         updated_at: 1500,
         result_url: None,
+        result_data: None,
         error: Some("Processing error".to_string()),
+        model: None,
+        input_size: None,
+        output_size: None,
+        webhook_delivery: None,
+        org_id: None,
     };
     
     assert_eq!(job.id, "job_789");

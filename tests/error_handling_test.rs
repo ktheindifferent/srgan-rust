@@ -20,7 +20,7 @@ fn test_web_server_no_panic_on_invalid_input() {
     
     // This should return an error, not panic
     let result = WebServer::new(config);
-    assert_result_err(result, "creating server with invalid host");
+    assert!(result.is_err(), "Expected error when creating server with invalid host");
 }
 
 #[test]
@@ -72,7 +72,7 @@ fn test_gpu_context_no_panic() {
     // Test creating context with unavailable backend
     let result = GpuContext::new(GpuBackend::Cuda);
     // Should return error, not panic (CUDA is not available in test environment)
-    assert_result_err(result, "creating GPU context with unavailable backend");
+    assert!(result.is_err(), "Expected error when creating GPU context with unavailable backend");
 }
 
 #[test]

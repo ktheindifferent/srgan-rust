@@ -833,17 +833,17 @@ mod tests {
         let mut parser = PyTorchParser::new();
         
         // ESRGAN
-        parser.state_dict.insert("conv_first.weight".into(), Value::Nil);
-        parser.state_dict.insert("trunk_conv.weight".into(), Value::Nil);
-        parser.state_dict.insert("RRDB.0.conv1.weight".into(), Value::Nil);
+        parser.state_dict.insert("conv_first.weight".into(), Value::None);
+        parser.state_dict.insert("trunk_conv.weight".into(), Value::None);
+        parser.state_dict.insert("RRDB.0.conv1.weight".into(), Value::None);
         
         let hints = parser.detect_architecture_hints();
         assert!(hints.contains(&"ESRGAN".to_string()));
         
         // SRGAN
         parser.state_dict.clear();
-        parser.state_dict.insert("generator.initial.0.weight".into(), Value::Nil);
-        parser.state_dict.insert("discriminator.conv1.weight".into(), Value::Nil);
+        parser.state_dict.insert("generator.initial.0.weight".into(), Value::None);
+        parser.state_dict.insert("discriminator.conv1.weight".into(), Value::None);
         
         let hints = parser.detect_architecture_hints();
         assert!(hints.contains(&"GAN".to_string()));

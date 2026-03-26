@@ -101,6 +101,18 @@ pub struct PreprocessedImage {
     pub original_height: u32,
 }
 
+impl std::fmt::Debug for PreprocessedImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PreprocessedImage")
+            .field("output_format", &self.output_format)
+            .field("padded_width", &self.padded_width)
+            .field("padded_height", &self.padded_height)
+            .field("original_width", &self.original_width)
+            .field("original_height", &self.original_height)
+            .finish()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Public entry-point
 // ---------------------------------------------------------------------------

@@ -234,7 +234,7 @@ fn test_leak_detection_with_multiple_allocations() {
     reset_telemetry();
     
     let initial_leaks = check_memory_leaks();
-    let initial_count = initial_leaks.len();
+    let initial_count = initial_leaks.total_leaked_count;
     
     {
         let _v1 = vec![1u8; 512];
@@ -242,13 +242,13 @@ fn test_leak_detection_with_multiple_allocations() {
         let _v3 = vec![3u8; 2048];
         
         let during_leaks = check_memory_leaks();
-        assert!(during_leaks.len() >= initial_count + 3);
+        assert!(during_leaks.total_leaked_count >= initial_count + 3);
     }
     
     thread::sleep(Duration::from_millis(10));
     
     let final_leaks = check_memory_leaks();
-    assert_eq!(final_leaks.len(), initial_count);
+    assert_eq!(final_leaks.total_leaked_count, initial_count);
 }
 
 #[test]

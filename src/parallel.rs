@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn test_thread_safe_network_clone_isolation() {
         // Create a mock network for testing
-        let network = UpscalingNetwork::default();
+        let network = UpscalingNetwork::load_builtin_natural().expect("Failed to load builtin network");
         let thread_safe = ThreadSafeNetwork::new(network);
         
         // Get multiple clones and verify they're independent
@@ -219,7 +219,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_network_access() {
-        let network = UpscalingNetwork::default();
+        let network = UpscalingNetwork::load_builtin_natural().expect("Failed to load builtin network");
         let thread_safe = Arc::new(ThreadSafeNetwork::new(network));
         let counter = Arc::new(AtomicUsize::new(0));
         let mut handles = vec![];
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn test_parallel_batch_processing() {
-        let network = UpscalingNetwork::default();
+        let network = UpscalingNetwork::load_builtin_natural().expect("Failed to load builtin network");
         let thread_safe = ThreadSafeNetwork::new(network);
         
         // Create test data

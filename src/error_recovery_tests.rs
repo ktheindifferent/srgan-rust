@@ -160,7 +160,7 @@ mod error_recovery_tests {
         let rate_limit = EnhancedError::RateLimit {
             message: "Too many requests".to_string(),
             retry_after: Duration::from_secs(60),
-            backtrace: backtrace::Backtrace::new(),
+            bt: String::new(),
         };
         assert!(rate_limit.is_retryable());
         assert_eq!(rate_limit.retry_after(), Some(Duration::from_secs(60)));

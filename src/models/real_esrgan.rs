@@ -107,6 +107,7 @@ impl std::fmt::Display for RealEsrganVariant {
 /// encoding the Real-ESRGAN variant configuration.  The `inner` network is
 /// currently one of the built-in stub models; swap it for dedicated
 /// Real-ESRGAN weights once the conversion pipeline is ready.
+#[derive(Debug)]
 pub struct RealEsrganModel {
     /// Which Real-ESRGAN variant this instance represents.
     variant: RealEsrganVariant,

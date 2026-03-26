@@ -3,12 +3,12 @@ use srgan_rust::model_converter::ModelConverter;
 use std::fs::File;
 use std::io::Write;
 use tempfile::NamedTempFile;
-use serde_pickle::{SerOptions, Value, HashableValue};
-use std::collections::HashMap;
+use serde_pickle::{value_to_vec, SerOptions, Value, HashableValue};
+use std::collections::BTreeMap;
 
 /// Create a PyTorch model of specified size for benchmarking
 fn create_benchmark_model(num_layers: usize, params_per_layer: usize) -> Value {
-    let mut state_dict = HashMap::new();
+    let mut state_dict = BTreeMap::new();
     
     for i in 0..num_layers {
         let layer_name = format!("layer_{}.weight", i);
@@ -35,7 +35,7 @@ fn create_benchmark_file(num_layers: usize, params_per_layer: usize) -> NamedTem
     let mut file = NamedTempFile::new().expect("Failed to create temp file");
     
     let ser_options = SerOptions::new();
-    let bytes = serde_pickle::to_vec(&state_dict, ser_options)
+    let bytes = value_to_vec(&state_dict, ser_options)
         .expect("Failed to serialize");
     
     file.write_all(&bytes).expect("Failed to write");
@@ -58,7 +58,7 @@ fn create_zip_benchmark_file(num_layers: usize, params_per_layer: usize) -> Name
         let mut zip = ZipWriter::new(Cursor::new(&mut buffer));
         
         let ser_options = SerOptions::new();
-        let pkl_bytes = serde_pickle::to_vec(&state_dict, ser_options)
+        let pkl_bytes = value_to_vec(&state_dict, ser_options)
             .expect("Failed to serialize");
         
         zip.start_file("data.pkl", FileOptions::default())
@@ -128,7 +128,7 @@ fn bench_dtype_parsing(c: &mut Criterion) {
     
     // Float32 model
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         let float32_bytes: Vec<u8> = (0..10000)
             .flat_map(|i| {
                 let val = (i as f32) * 0.001;
@@ -143,7 +143,7 @@ fn bench_dtype_parsing(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");
@@ -158,7 +158,7 @@ fn bench_dtype_parsing(c: &mut Criterion) {
     
     // Float16 model
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         let float16_bytes: Vec<u8> = (0..10000)
             .flat_map(|_| vec![0x3C, 0x00]) // 1.0 in float16
             .collect();
@@ -170,7 +170,7 @@ fn bench_dtype_parsing(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");
@@ -185,7 +185,7 @@ fn bench_dtype_parsing(c: &mut Criterion) {
     
     // Int8 quantized model
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         let int8_bytes: Vec<u8> = (0..10000)
             .map(|i| (i % 256) as u8)
             .collect();
@@ -197,7 +197,7 @@ fn bench_dtype_parsing(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");
@@ -241,7 +241,7 @@ fn bench_architecture_detection(c: &mut Criterion) {
     
     // SRGAN model
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         for i in 0..16 {
             let key = format!("generator.residual_blocks.{}.conv1.weight", i);
             state_dict.insert(
@@ -256,7 +256,7 @@ fn bench_architecture_detection(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");
@@ -271,7 +271,7 @@ fn bench_architecture_detection(c: &mut Criterion) {
     
     // ESRGAN model
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         state_dict.insert(
             HashableValue::String("conv_first.weight".into()),
             Value::List(vec![Value::F64(0.1); 64 * 3 * 3 * 3])
@@ -292,7 +292,7 @@ fn bench_architecture_detection(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");
@@ -314,7 +314,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
     
     // Many small tensors
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         for i in 0..1000 {
             let key = format!("param_{}", i);
             state_dict.insert(
@@ -325,7 +325,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");
@@ -340,7 +340,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
     
     // Few large tensors
     {
-        let mut state_dict = HashMap::new();
+        let mut state_dict = BTreeMap::new();
         for i in 0..10 {
             let key = format!("param_{}", i);
             state_dict.insert(
@@ -351,7 +351,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
         
         let mut file = NamedTempFile::new().expect("Failed to create temp file");
         let ser_options = SerOptions::new();
-        let bytes = serde_pickle::to_vec(&Value::Dict(state_dict), ser_options)
+        let bytes = value_to_vec(&Value::Dict(state_dict), ser_options)
             .expect("Failed to serialize");
         file.write_all(&bytes).expect("Failed to write");
         file.flush().expect("Failed to flush");

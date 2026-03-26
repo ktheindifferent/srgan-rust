@@ -108,9 +108,8 @@ fn test_error_chaining() {
 #[test]
 fn test_custom_error_variants() {
     // Test all error variants for proper construction and display
-    let errors = vec![
+    let errors: Vec<SrganError> = vec![
         SrganError::Io(io::Error::new(io::ErrorKind::Other, "io error")),
-        SrganError::Image("image error".to_string()),
         SrganError::InvalidInput("invalid input".to_string()),
         SrganError::InvalidParameter("invalid param".to_string()),
         SrganError::FileNotFound(PathBuf::from("/missing")),
@@ -118,9 +117,9 @@ fn test_custom_error_variants() {
         SrganError::GraphExecution("graph error".to_string()),
         SrganError::Training("training error".to_string()),
         SrganError::Parse("parse error".to_string()),
-        SrganError::Conversion("conversion error".to_string()),
+        SrganError::Serialization("conversion error".to_string()),
         SrganError::Network("network error".to_string()),
-        SrganError::Other("other error".to_string()),
+        SrganError::MissingFolder("other error".to_string()),
     ];
     
     for error in errors {
@@ -137,10 +136,10 @@ fn test_custom_error_variants() {
 #[test]
 fn test_error_conversion_from_string() {
     let string_err = String::from("string error");
-    let srgan_err: SrganError = SrganError::Other(string_err);
+    let srgan_err: SrganError = SrganError::MissingFolder(string_err);
     
     match srgan_err {
-        SrganError::Other(msg) => assert_eq!(msg, "string error"),
+        SrganError::MissingFolder(msg) => assert_eq!(msg, "string error"),
         _ => panic!("Expected Other error variant"),
     }
 }
@@ -158,14 +157,14 @@ fn test_result_map_operations() {
     
     // Test map_err
     fn get_error() -> Result<i32> {
-        Err(SrganError::Other("original".to_string()))
+        Err(SrganError::MissingFolder("original".to_string()))
     }
     
-    let result = get_error().map_err(|_| SrganError::Other("mapped".to_string()));
+    let result = get_error().map_err(|_| SrganError::MissingFolder("mapped".to_string()));
     let err = assert_err(result, "mapped error");
     
     match err {
-        SrganError::Other(msg) => assert_eq!(msg, "mapped"),
+        SrganError::MissingFolder(msg) => assert_eq!(msg, "mapped"),
         _ => panic!("Expected mapped error"),
     }
 }
@@ -177,7 +176,7 @@ fn test_result_and_or_operations() {
     }
     
     fn failure() -> Result<i32> {
-        Err(SrganError::Other("failed".to_string()))
+        Err(SrganError::MissingFolder("failed".to_string()))
     }
     
     // Test and_then with success
@@ -190,12 +189,12 @@ fn test_result_and_or_operations() {
     assert_result_err(result, "and_then with failure");
     
     // Test or_else with success
-    let result = success().or_else(|_| Ok(0));
+    let result: Result<i32> = success().or_else(|_| Ok(0));
     let value = assert_ok(result, "or_else with success");
     assert_eq!(value, 42);
-    
+
     // Test or_else with failure
-    let result = failure().or_else(|_| Ok(0));
+    let result: Result<i32> = failure().or_else(|_| Ok(0));
     let value = assert_ok(result, "or_else with failure recovery");
     assert_eq!(value, 0);
 }
