@@ -121,6 +121,7 @@ pub fn apply_output_scale(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::GenericImage;
 
     #[test]
     fn default_config_is_valid() {

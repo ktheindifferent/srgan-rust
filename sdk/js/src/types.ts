@@ -1,5 +1,27 @@
-/** Model types supported by the SRGAN-Rust API. */
-export type ModelLabel = "natural" | "anime" | "bilinear";
+/**
+ * Model types supported by the SRGAN-Rust API.
+ *
+ * - `"natural"` — General-purpose SRGAN model for photographic content (×4).
+ * - `"anime"` — SRGAN model trained on anime/illustration datasets (×4).
+ * - `"waifu2x"` — Waifu2x-compatible anime/illustration upscaler with
+ *   configurable noise reduction (levels 0–3) and scale (×1 denoise-only or
+ *   ×2 upscale). Uses a VGG-style CNN architecture optimised for line art,
+ *   flat colour regions, and JPEG artifact removal common in anime imagery.
+ *   Pass `waifu2x_noise_level` and `waifu2x_scale` in the request for
+ *   fine-grained control, or use bare `"waifu2x"` for defaults (noise=1, ×2).
+ * - `"real-esrgan"` — Real-ESRGAN model for photorealistic content (×4).
+ * - `"real-esrgan-anime"` — Real-ESRGAN variant tuned for anime (×4).
+ * - `"real-esrgan-x2"` — Real-ESRGAN at ×2 scale.
+ * - `"bilinear"` — Fast bilinear interpolation (no neural network).
+ */
+export type ModelLabel =
+  | "natural"
+  | "anime"
+  | "waifu2x"
+  | "real-esrgan"
+  | "real-esrgan-anime"
+  | "real-esrgan-x2"
+  | "bilinear";
 
 // ---------------------------------------------------------------------------
 // SSE streaming types
