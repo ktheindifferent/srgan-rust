@@ -94,8 +94,7 @@ impl Waifu2xVariant {
             _ => "upscale ×2",
         };
         format!(
-            "waifu2x — {} + {} (backed by built-in anime model; \
-             TODO: load native waifu2x weights)",
+            "waifu2x-compat — {} + {} (Lanczos3 + unsharp mask)",
             noise_desc, scale_desc
         )
     }

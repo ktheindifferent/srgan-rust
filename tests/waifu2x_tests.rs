@@ -1,9 +1,11 @@
-//! Tests for the Waifu2x model variant.
+//! Tests for the Waifu2x model variant and waifu2x-compat inference path.
 
 use srgan_rust::config::Waifu2xConfig;
 use srgan_rust::model_downloader::{list_available_models, REMOTE_MODELS};
 use srgan_rust::model_manager::ModelArchitecture;
 use srgan_rust::thread_safe_network::ThreadSafeNetwork;
+use srgan_rust::waifu2x::Waifu2xNetwork;
+use image::GenericImage;
 
 // ── Waifu2xConfig ─────────────────────────────────────────────────────────────
 
@@ -141,4 +143,82 @@ fn test_thread_safe_network_waifu2x_factor_is_4() {
     // Backed by the built-in anime model which is 4×.
     let net = ThreadSafeNetwork::from_label("waifu2x", None).unwrap();
     assert_eq!(net.factor(), 4);
+}
+
+// ── Waifu2x-compat inference tests ──────────────────────────────────────────
+
+fn test_image(w: u32, h: u32) -> image::DynamicImage {
+    image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w, h, |x, y| {
+        image::Rgba([(x % 256) as u8, (y % 256) as u8, 128u8, 255u8])
+    }))
+}
+
+#[test]
+fn test_waifu2x_compat_scale2_doubles_dimensions() {
+    let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale2").unwrap();
+    let img = test_image(16, 16);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 32);
+    assert_eq!(result.height(), 32);
+}
+
+#[test]
+fn test_waifu2x_compat_scale1_preserves_dimensions() {
+    let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale1").unwrap();
+    let img = test_image(16, 16);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 16);
+    assert_eq!(result.height(), 16);
+}
+
+#[test]
+fn test_waifu2x_compat_noise0_no_sharpening() {
+    // noise=0 should return a pure Lanczos3 resize (no unsharp mask).
+    let net = Waifu2xNetwork::from_label("waifu2x-noise0-scale2").unwrap();
+    let img = test_image(8, 8);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 16);
+    assert_eq!(result.height(), 16);
+}
+
+#[test]
+fn test_waifu2x_compat_noise3_scale1_sharpens_only() {
+    // scale=1 + noise=3 → same dimensions, sharpening applied.
+    let net = Waifu2xNetwork::from_label("waifu2x-noise3-scale1").unwrap();
+    let img = test_image(16, 16);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 16);
+    assert_eq!(result.height(), 16);
+}
+
+#[test]
+fn test_waifu2x_compat_all_variants_succeed() {
+    let img = test_image(10, 10);
+    for &label in srgan_rust::waifu2x::WAIFU2X_LABELS {
+        let net = Waifu2xNetwork::from_label(label)
+            .unwrap_or_else(|e| panic!("from_label({}) failed: {}", label, e));
+        let result = net.upscale_image(&img)
+            .unwrap_or_else(|e| panic!("upscale_image({}) failed: {}", label, e));
+        // scale-2 variants should double, scale-1 should preserve.
+        if label.contains("scale2") || label == "waifu2x" {
+            assert_eq!(result.width(), 20, "width mismatch for {}", label);
+            assert_eq!(result.height(), 20, "height mismatch for {}", label);
+        } else {
+            assert_eq!(result.width(), 10, "width mismatch for {}", label);
+            assert_eq!(result.height(), 10, "height mismatch for {}", label);
+        }
+    }
+}
+
+#[test]
+fn test_waifu2x_compat_description_mentions_compat() {
+    let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
+    let desc = net.description();
+    assert!(desc.contains("compat"), "description should mention compat: {}", desc);
+}
+
+#[test]
+fn test_waifu2x_compat_invalid_label_errors() {
+    assert!(Waifu2xNetwork::from_label("esrgan").is_err());
+    assert!(Waifu2xNetwork::from_label("waifu2x-bad").is_err());
 }

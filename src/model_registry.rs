@@ -125,7 +125,7 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             display_name: "Waifu2x".to_string(),
             model_type: ModelType::Waifu2x,
             scale_factors: vec![1, 2],
-            description: "Waifu2x-style model for anime/illustration upscaling (built-in)"
+            description: "Waifu2x-compat: Lanczos3 resize + unsharp-mask noise reduction (built-in software fallback)"
                 .to_string(),
             weight_path: String::new(),
             builtin: true,

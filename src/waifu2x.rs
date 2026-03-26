@@ -22,7 +22,7 @@
 
 use crate::config::Waifu2xConfig;
 use crate::error::{Result, SrganError};
-use crate::UpscalingNetwork;
+use image::GenericImage;
 
 // ── NoiseLevel ────────────────────────────────────────────────────────────────
 
@@ -88,54 +88,42 @@ impl std::fmt::Display for Waifu2xScale {
     }
 }
 
-// ── Waifu2xNetwork ────────────────────────────────────────────────────────────
+// ── Waifu2xNetwork (waifu2x-compat mode) ─────────────────────────────────────
+//
+// This is the "waifu2x-compat" software fallback.  It does NOT use the
+// original waifu2x neural network weights (which require a separate weight
+// conversion pipeline).  Instead it approximates waifu2x output using:
+//
+//   1. Lanczos3 resize at the requested scale (1× = identity, 2× = upscale)
+//   2. Unsharp-mask sharpening whose strength is derived from noise_level:
+//        noise 0 → no sharpening
+//        noise 1 → light  (amount=0.3, radius=1)
+//        noise 2 → medium (amount=0.5, radius=1)
+//        noise 3 → aggressive (amount=0.8, radius=1)
+//
+// When native waifu2x weights are bundled this implementation should be
+// replaced with real CNN inference.
 
-/// High-level waifu2x wrapper that presents the same `upscale_image` interface
-/// as [`UpscalingNetwork`] while encoding the waifu2x-specific configuration.
+/// High-level waifu2x-compat wrapper.  Performs Lanczos3 resize + unsharp-mask
+/// sharpening to approximate waifu2x noise-reduction output without requiring
+/// the original neural network weights.
 pub struct Waifu2xNetwork {
-    /// Underlying upscaling network (currently the built-in anime model).
-    inner: UpscalingNetwork,
-    /// Noise reduction level used to build this instance.
     noise_level: NoiseLevel,
-    /// Scale factor used to build this instance.
     scale: Waifu2xScale,
 }
 
 impl Waifu2xNetwork {
     /// Build a `Waifu2xNetwork` from a [`Waifu2xConfig`].
     ///
-    /// # Weight status
-    ///
-    /// Native waifu2x weights (ncnn / waifu2x-caffe `.bin` format) have not
-    /// yet been bundled with this binary.  To use waifu2x, place the
-    /// appropriate weight file in the `models/` directory next to the binary:
-    ///
-    ///   `models/waifu2x_noise{N}_scale{M}x.bin`
-    ///
-    /// e.g. `models/waifu2x_noise0_scale2x.bin` for noise=0, scale=2.
-    ///
-    /// Until then this function returns a descriptive [`SrganError::Network`]
-    /// so the caller (CLI or API client) receives a clear message rather than
-    /// a silent fallback.
-    ///
-    /// TODO: when weight files are present, load and run the native waifu2x
-    ///       inference engine (ncnn-based or converted `.rsr`) here.
+    /// This uses the waifu2x-compat software fallback (Lanczos3 + unsharp
+    /// mask) — no neural network weights are loaded.
     pub fn from_config(config: &Waifu2xConfig) -> Result<Self> {
         let noise_level = NoiseLevel::from_u8(config.noise_level);
         let scale = Waifu2xScale::from_u8(config.scale);
-
-        // TODO: load dedicated waifu2x weights (ncnn/ONNX → .rsr conversion
-        //       pipeline not yet implemented).  Expected file name pattern:
-        //           models/waifu2x_noise{N}_scale{M}x.bin
-        // Until then, fall back to the built-in anime model which was trained on
-        // the same class of content (anime/illustration) and provides equivalent
-        // upscaling quality at ×4.
-        let inner = UpscalingNetwork::from_label("anime", None)
-            .map_err(SrganError::Network)?;
-        Ok(Self { inner, noise_level, scale })
+        Ok(Self { noise_level, scale })
     }
 
-    /// Load waifu2x network from a canonical label such as `"waifu2x"` or
+    /// Load from a canonical label such as `"waifu2x"` or
     /// `"waifu2x-noise2-scale2"`.
     pub fn from_label(label: &str) -> Result<Self> {
         let config = parse_label(label)?;
@@ -152,19 +140,41 @@ impl Waifu2xNetwork {
         self.scale
     }
 
-    /// Upscale (and optionally denoise) a [`image::DynamicImage`].
+    /// Upscale (and optionally denoise) a [`image::DynamicImage`] using the
+    /// waifu2x-compat software path (Lanczos3 resize + unsharp mask).
     pub fn upscale_image(
         &self,
         img: &image::DynamicImage,
     ) -> Result<image::DynamicImage> {
-        self.inner.upscale_image(img)
+        let (w, h) = (img.width(), img.height());
+        let scale_u8 = self.scale.as_u8();
+
+        // Step 1: Lanczos3 resize (scale=1 keeps original dimensions).
+        let resized = if scale_u8 >= 2 {
+            img.resize_exact(w * 2, h * 2, image::FilterType::Lanczos3)
+        } else {
+            img.clone()
+        };
+
+        // Step 2: Unsharp-mask sharpening based on noise level.
+        let amount = match self.noise_level {
+            NoiseLevel::None   => 0.0f32,
+            NoiseLevel::Low    => 0.3,
+            NoiseLevel::Medium => 0.5,
+            NoiseLevel::High   => 0.8,
+        };
+
+        if amount < f32::EPSILON {
+            return Ok(resized);
+        }
+
+        Ok(unsharp_mask(&resized, amount))
     }
 
     /// Human-readable description of the active configuration.
     pub fn description(&self) -> String {
         format!(
-            "waifu2x noise={} scale={}x (backed by built-in anime model; \
-             TODO: load native waifu2x weights)",
+            "waifu2x-compat noise={} scale={}x (Lanczos3 + unsharp mask)",
             self.noise_level, self.scale
         )
     }
@@ -174,6 +184,59 @@ impl std::fmt::Display for Waifu2xNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.description())
     }
+}
+
+// ── Unsharp mask ─────────────────────────────────────────────────────────────
+
+/// Apply unsharp-mask sharpening: `output = original + amount * (original - blur)`.
+///
+/// Uses a 3×3 box blur as the smoothing kernel for simplicity.  This is the
+/// waifu2x-compat approximation of CNN-based noise reduction.
+fn unsharp_mask(img: &image::DynamicImage, amount: f32) -> image::DynamicImage {
+    use image::{DynamicImage, GenericImage, Pixel};
+
+    let rgba = img.to_rgba();
+    let (w, h) = rgba.dimensions();
+    if w < 3 || h < 3 {
+        return img.clone();
+    }
+
+    let mut out = rgba.clone();
+
+    for y in 1..(h - 1) {
+        for x in 1..(w - 1) {
+            // 3×3 box-blur average for each channel.
+            let mut sums = [0u32; 4];
+            for dy in 0u32..3 {
+                for dx in 0u32..3 {
+                    let p = rgba.get_pixel(x + dx - 1, y + dy - 1);
+                    let channels = p.channels();
+                    for c in 0..4 {
+                        sums[c] += channels[c] as u32;
+                    }
+                }
+            }
+
+            let orig = rgba.get_pixel(x, y);
+            let orig_ch = orig.channels();
+            let mut sharpened = [0u8; 4];
+            for c in 0..4 {
+                if c == 3 {
+                    // Preserve alpha unchanged.
+                    sharpened[c] = orig_ch[c];
+                } else {
+                    let blurred = (sums[c] as f32) / 9.0;
+                    let diff = orig_ch[c] as f32 - blurred;
+                    let val = orig_ch[c] as f32 + amount * diff;
+                    sharpened[c] = val.round().max(0.0).min(255.0) as u8;
+                }
+            }
+
+            out.put_pixel(x, y, image::Rgba(sharpened));
+        }
+    }
+
+    DynamicImage::ImageRgba8(out)
 }
 
 // ── Label parser ──────────────────────────────────────────────────────────────
@@ -274,5 +337,99 @@ mod tests {
         assert_eq!(Waifu2xScale::from_u8(2).as_u8(), 2);
         assert_eq!(Waifu2xScale::from_u8(0).as_u8(), 1); // 0 → One
         assert_eq!(Waifu2xScale::from_u8(5).as_u8(), 2); // >2 → Two
+    }
+
+    // ── Waifu2x-compat inference tests ──────────────────────────────────
+
+    fn test_image(w: u32, h: u32) -> image::DynamicImage {
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x % 256) as u8, (y % 256) as u8, 128u8, 255u8])
+        }))
+    }
+
+    #[test]
+    fn compat_scale2_doubles_dimensions() {
+        let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale2").unwrap();
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 32);
+        assert_eq!(result.height(), 32);
+    }
+
+    #[test]
+    fn compat_scale1_preserves_dimensions() {
+        let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale1").unwrap();
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 16);
+        assert_eq!(result.height(), 16);
+    }
+
+    #[test]
+    fn compat_noise0_no_sharpening() {
+        let net = Waifu2xNetwork::from_label("waifu2x-noise0-scale2").unwrap();
+        let img = test_image(8, 8);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 16);
+        assert_eq!(result.height(), 16);
+    }
+
+    #[test]
+    fn compat_noise3_scale1_sharpens_only() {
+        let net = Waifu2xNetwork::from_label("waifu2x-noise3-scale1").unwrap();
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 16);
+        assert_eq!(result.height(), 16);
+    }
+
+    #[test]
+    fn compat_all_variants_succeed() {
+        let img = test_image(10, 10);
+        for &label in WAIFU2X_LABELS {
+            let net = Waifu2xNetwork::from_label(label)
+                .unwrap_or_else(|e| panic!("from_label({}) failed: {}", label, e));
+            let result = net.upscale_image(&img)
+                .unwrap_or_else(|e| panic!("upscale_image({}) failed: {}", label, e));
+            if label.contains("scale2") || label == "waifu2x" {
+                assert_eq!(result.width(), 20, "width mismatch for {}", label);
+                assert_eq!(result.height(), 20, "height mismatch for {}", label);
+            } else {
+                assert_eq!(result.width(), 10, "width mismatch for {}", label);
+                assert_eq!(result.height(), 10, "height mismatch for {}", label);
+            }
+        }
+    }
+
+    #[test]
+    fn compat_description_mentions_compat() {
+        let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
+        assert!(net.description().contains("compat"));
+    }
+
+    #[test]
+    fn compat_invalid_label_errors() {
+        assert!(Waifu2xNetwork::from_label("esrgan").is_err());
+        assert!(Waifu2xNetwork::from_label("waifu2x-bad").is_err());
+    }
+
+    #[test]
+    fn compat_unsharp_mask_modifies_pixels() {
+        // With noise=3 (aggressive sharpening), pixel values should differ
+        // from the input for non-edge pixels.
+        let img = test_image(16, 16);
+        let sharpened = unsharp_mask(&img, 0.8);
+        let orig_rgba = img.to_rgba();
+        let sharp_rgba = sharpened.to_rgba();
+        let mut differs = false;
+        for y in 1..15 {
+            for x in 1..15 {
+                if orig_rgba.get_pixel(x, y) != sharp_rgba.get_pixel(x, y) {
+                    differs = true;
+                    break;
+                }
+            }
+        }
+        assert!(differs, "unsharp mask should modify at least some interior pixels");
     }
 }

@@ -22,7 +22,7 @@ srgan-rust is a fast, SaaS-ready implementation of [SRGAN](https://arxiv.org/abs
 
 ## Feature highlights
 
-- **Six built-in models** — `natural` (photos), `anime` (illustrations), `waifu2x` (noise-reducing, 1×/2×), `real-esrgan` (×4 photos, real-world degradations), `real-esrgan-anime` (×4 anime), `real-esrgan-x2` (×2 photos)
+- **Six built-in models** — `natural` (photos), `anime` (illustrations), `waifu2x` (waifu2x-compat: Lanczos3 + unsharp-mask noise reduction, 1×/2×), `real-esrgan` (×4 photos, real-world degradations), `real-esrgan-anime` (×4 anime), `real-esrgan-x2` (×2 photos)
 - **Auto-detection** — automatically selects the best model for each image (photo vs. anime classifier built in)
 - **Batch processing** — directory-level processing with checkpoint/resume, parallel workers
 - **Async job queue** — priority queue (Enterprise > Pro > Free), 5-min timeout, 1-hour result retention

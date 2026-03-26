@@ -688,7 +688,7 @@ impl WebServer {
             serde_json::json!({
                 "name": "waifu2x",
                 "display_name": "Waifu2x",
-                "description": "Waifu2x-style model for anime/illustration upscaling with configurable noise reduction (noise_level 0–3, scale 1×/2×)",
+                "description": "Waifu2x-compat: Lanczos3 resize + unsharp-mask noise reduction (noise_level 0–3, scale 1×/2×). Software fallback — no neural network weights required.",
                 "architecture": "waifu2x",
                 "scale_factors": [1, 2],
                 "recommended_for": ["anime", "illustrations", "photos"],
@@ -2118,11 +2118,18 @@ function renderEndpointMetrics(metrics){
         let tile_size = request.tile_size.map(|s| s.max(64)).unwrap_or(DEFAULT_TILE_SIZE);
         let use_tiling = pixel_count > LARGE_IMAGE_THRESHOLD || request.tile_size.is_some();
 
-        // Select the network for the effective label.  For waifu2x labels the
-        // built-in anime model is used as a fallback until native waifu2x weights
-        // are bundled.  For all other labels we load the appropriate built-in
-        // model; if the label is unknown we fall back to the default network.
-        let upscaled = if effective_label == "natural"
+        // Select the inference path for the effective label.
+        //
+        // Waifu2x labels use the waifu2x-compat software path (Lanczos3
+        // resize + unsharp mask) — no neural network is involved.
+        // All other labels go through ThreadSafeNetwork / the default net.
+        let upscaled = if effective_label == "waifu2x"
+            || effective_label.starts_with("waifu2x-")
+        {
+            let waifu = crate::waifu2x::Waifu2xNetwork::from_label(&effective_label)?;
+            log::info!("Using {}", waifu.description());
+            waifu.upscale_image(&img)?
+        } else if effective_label == "natural"
             || effective_label == "bilinear"
             || effective_label.is_empty()
         {

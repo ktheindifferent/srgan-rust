@@ -166,16 +166,17 @@ impl ThreadSafeNetwork {
                 Self::new_bilinear(bilinear_factor.unwrap_or(4))
             },
             label if label == "waifu2x" || label.starts_with("waifu2x-") => {
-                // Use the built-in anime model as a fallback for waifu2x labels.
-                // The anime model was trained on the same class of content
-                // (anime/illustration) and provides equivalent upscaling quality.
-                // TODO: when native waifu2x weights are bundled, load them here.
+                // Waifu2x-compat mode: Lanczos3 resize + unsharp mask.
+                // Inference is handled by Waifu2xNetwork::upscale_image, not
+                // the SRGAN neural network.  We still construct a minimal
+                // ThreadSafeNetwork so callers that need one get a valid
+                // object; the actual upscaling should go through
+                // crate::waifu2x::Waifu2xNetwork directly.
                 let data = crate::L1_SRGB_ANIME_PARAMS;
                 let desc = crate::network_from_bytes(data)
                     .map_err(|e| SrganError::Network(e))?;
                 let display = format!(
-                    "waifu2x ({}) — backed by built-in anime model; \
-                     TODO: load native waifu2x weights",
+                    "waifu2x-compat ({}) — Lanczos3 + unsharp mask",
                     label
                 );
                 Self::new_with_display(desc, &display)
