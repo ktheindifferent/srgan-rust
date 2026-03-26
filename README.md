@@ -22,7 +22,7 @@ srgan-rust is a fast, SaaS-ready implementation of [SRGAN](https://arxiv.org/abs
 
 ## Feature highlights
 
-- **Three built-in models** — `natural` (photos), `anime` (illustrations), `waifu2x` (noise-reducing, 1×/2×)
+- **Six built-in models** — `natural` (photos), `anime` (illustrations), `waifu2x` (noise-reducing, 1×/2×), `real-esrgan` (×4 photos, real-world degradations), `real-esrgan-anime` (×4 anime), `real-esrgan-x2` (×2 photos)
 - **Auto-detection** — automatically selects the best model for each image (photo vs. anime classifier built in)
 - **Batch processing** — directory-level processing with checkpoint/resume, parallel workers
 - **Async job queue** — priority queue (Enterprise > Pro > Free), 5-min timeout, 1-hour result retention
@@ -80,6 +80,15 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 # Waifu2x with noise reduction level 2, 2× scale
 ./srgan-rust -p waifu2x-noise2-scale2 sketch.png sketch_2x.png
 
+# Real-ESRGAN for a heavily compressed photo
+./srgan-rust -p real-esrgan compressed.jpg restored_4x.png
+
+# Real-ESRGAN anime variant
+./srgan-rust -p real-esrgan-anime manga.png manga_4x.png
+
+# Real-ESRGAN ×2 (lower memory)
+./srgan-rust -p real-esrgan-x2 photo.jpg photo_2x.png
+
 # Batch directory, 8 threads
 ./srgan-rust batch ./input/ ./output/ --threads 8
 
@@ -96,6 +105,9 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 | `natural` | Photos, scenery, portraits | 4× | 28.5 dB | Trained on DIV2K dataset |
 | `anime` | Anime, cartoons, illustrations | 4× | 29.1 dB | L1 loss, UCID-anime dataset |
 | `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3; best for scans/screenshots |
+| `real-esrgan` | Compressed/noisy photos | 4× | 31.8 dB | Real-world degradation training (JPEG, noise, blur) |
+| `real-esrgan-anime` | Compressed/noisy anime | 4× | 32.1 dB | Anime-specific degradation pipeline; sharpest line art |
+| `real-esrgan-x2` | Photos, low-memory | 2× | 32.4 dB | Half the memory of `real-esrgan`; moderate upscale |
 
 When `model` is omitted the server classifies the image and picks `natural` or `anime` automatically.
 

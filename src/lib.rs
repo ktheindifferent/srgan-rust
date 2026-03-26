@@ -54,6 +54,7 @@ pub mod training;
 pub mod utils;
 pub mod validation;
 pub mod video;
+pub mod models;
 pub mod waifu2x;
 pub mod web_server;
 pub mod web_server_improved;
@@ -386,7 +387,45 @@ impl UpscalingNetwork {
 					display,
 				})
 			},
-			_ => Err(format!("Unsupported network type. Could not parse: {}", label)),
+			// Real-ESRGAN: three variants, currently backed by built-in proxy models.
+		// TODO: replace with dedicated Real-ESRGAN weights once ONNX → .rsr
+		//       conversion is available.
+		label if label == "real-esrgan" || label == "real-esrgan-x2" => {
+			let desc = network_from_bytes(L1_SRGB_NATURAL_PARAMS)?;
+			let display = format!(
+				"{} (backed by built-in natural model — TODO: real Real-ESRGAN weights)",
+				label
+			);
+			Ok(UpscalingNetwork {
+				graph: inference_sr_net(
+					desc.factor as usize,
+					desc.width,
+					desc.log_depth,
+					desc.global_node_factor as usize,
+				)
+				.map_err(|e| format!("{}", e))?,
+				parameters: desc.parameters,
+				display,
+			})
+		},
+		"real-esrgan-anime" => {
+			let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
+			let display =
+				"real-esrgan-anime (backed by built-in anime model — TODO: real Real-ESRGAN-Anime weights)"
+					.to_string();
+			Ok(UpscalingNetwork {
+				graph: inference_sr_net(
+					desc.factor as usize,
+					desc.width,
+					desc.log_depth,
+					desc.global_node_factor as usize,
+				)
+				.map_err(|e| format!("{}", e))?,
+				parameters: desc.parameters,
+				display,
+			})
+		},
+		_ => Err(format!("Unsupported network type. Could not parse: {}", label)),
 		}
 	}
 

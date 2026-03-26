@@ -469,6 +469,27 @@ impl WebServer {
                     "variants": crate::waifu2x::WAIFU2X_LABELS
                 },
                 {
+                    "name": "real-esrgan",
+                    "description": "Real-ESRGAN ×4 for general photos — trained on synthetic real-world degradations (JPEG artifacts, Gaussian noise, blur). Best for compressed or noisy source images.",
+                    "architecture": "real-esrgan",
+                    "scale_factor": 4,
+                    "recommended_for": ["photos", "compressed", "noisy", "real-world"]
+                },
+                {
+                    "name": "real-esrgan-anime",
+                    "description": "Real-ESRGAN ×4 optimised for anime and illustration content — uses the anime-specific degradation pipeline for sharper line art.",
+                    "architecture": "real-esrgan",
+                    "scale_factor": 4,
+                    "recommended_for": ["anime", "illustrations", "cartoons", "line-art"]
+                },
+                {
+                    "name": "real-esrgan-x2",
+                    "description": "Real-ESRGAN ×2 for general photos — lower memory usage than the ×4 variant; ideal when only a moderate resolution boost is needed.",
+                    "architecture": "real-esrgan",
+                    "scale_factor": 2,
+                    "recommended_for": ["photos", "general", "low-memory"]
+                },
+                {
                     "name": "bilinear",
                     "description": "Bilinear interpolation (no neural network)",
                     "architecture": "bilinear",
@@ -2082,6 +2103,15 @@ const MODELS = [
   { name:'waifu2x',   arch:'Waifu2x',  scale:'&#215;2 / &#215;4',
     desc:'Waifu2x-style model with configurable noise reduction (noise_level 0&ndash;3, scale 1&times; or 2&times;).',
     tags:['anime','illustrations','denoising'] },
+  { name:'real-esrgan',       arch:'Real-ESRGAN', scale:'&#215;4',
+    desc:'Real-ESRGAN ×4 for general photos — handles JPEG artifacts, Gaussian noise, blur, and other real-world degradations.',
+    tags:['photos','compressed','noisy','real-world'] },
+  { name:'real-esrgan-anime', arch:'Real-ESRGAN', scale:'&#215;4',
+    desc:'Real-ESRGAN ×4 optimised for anime and illustration content — sharper line art via the anime degradation pipeline.',
+    tags:['anime','illustrations','line-art'] },
+  { name:'real-esrgan-x2',    arch:'Real-ESRGAN', scale:'&#215;2',
+    desc:'Real-ESRGAN ×2 for general photos — lower memory than the ×4 variant; ideal for moderate resolution boosts.',
+    tags:['photos','general','low-memory'] },
   { name:'bilinear',  arch:'Bilinear', scale:'&#215;4',
     desc:'Classical bilinear interpolation. No neural network &mdash; fast preview or fallback.',
     tags:['general','quick-preview'] },

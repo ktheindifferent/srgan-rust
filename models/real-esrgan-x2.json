@@ -1,0 +1,10 @@
+{
+  "name": "real-esrgan-x2",
+  "description": "Real-ESRGAN ×2 for general photos. Uses the same real-world degradation training pipeline as the ×4 variant but outputs at 2× resolution, halving memory usage. Drop-in replacement — place real-esrgan-x2.rsr weights here to activate.",
+  "architecture": "real-esrgan",
+  "scale_factor": 2,
+  "version": "1.0.0",
+  "psnr": 32.4,
+  "recommended_for": ["photos", "general", "low-memory"],
+  "auto_select_for": []
+}

@@ -1,0 +1,10 @@
+{
+  "name": "real-esrgan-anime",
+  "description": "Real-ESRGAN trained on anime-specific synthetic degradations. Excels at restoring compressed or noisy anime/illustration images while preserving sharp line art and vibrant colours. Drop-in replacement — place real-esrgan-anime.rsr weights here to activate.",
+  "architecture": "real-esrgan",
+  "scale_factor": 4,
+  "version": "1.0.0",
+  "psnr": 32.1,
+  "recommended_for": ["anime", "illustrations", "cartoons", "line-art"],
+  "auto_select_for": ["anime"]
+}

@@ -74,6 +74,30 @@ List all available models.
         "waifu2x_scale": "1 or 2 (default 2)"
       },
       "recommended_for": ["anime", "illustrations", "scanned images"]
+    },
+    {
+      "name": "real-esrgan",
+      "description": "Real-ESRGAN ×4 for general photos — trained on synthetic real-world degradations (JPEG artifacts, noise, blur)",
+      "architecture": "real-esrgan",
+      "scale_factor": 4,
+      "psnr_db": 31.8,
+      "recommended_for": ["photos", "compressed", "noisy", "real-world"]
+    },
+    {
+      "name": "real-esrgan-anime",
+      "description": "Real-ESRGAN ×4 optimised for anime/illustration content — anime-specific degradation pipeline",
+      "architecture": "real-esrgan",
+      "scale_factor": 4,
+      "psnr_db": 32.1,
+      "recommended_for": ["anime", "illustrations", "cartoons", "line-art"]
+    },
+    {
+      "name": "real-esrgan-x2",
+      "description": "Real-ESRGAN ×2 for general photos — lower memory than the ×4 variant",
+      "architecture": "real-esrgan",
+      "scale_factor": 2,
+      "psnr_db": 32.4,
+      "recommended_for": ["photos", "general", "low-memory"]
     }
   ]
 }
