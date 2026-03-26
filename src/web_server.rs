@@ -385,6 +385,17 @@ impl WebServer {
             let method = parts[0];
             let path = parts[1];
             
+            // SSE stream endpoint: takes ownership of `stream` and writes events
+            // directly, bypassing the normal single-string response path.
+            if method == "GET"
+                && (path.starts_with("/api/v1/job/") || path.starts_with("/api/job/"))
+                && path.ends_with("/stream")
+            {
+                let path_owned = path.to_string();
+                self.handle_job_stream(stream, &path_owned);
+                continue;
+            }
+
             // Route request
             let response = match (method, path) {
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
@@ -1849,6 +1860,19 @@ td{padding:.55rem .9rem;vertical-align:middle;white-space:nowrap}
 .webhook-title{color:var(--accent2);font-size:.78rem;font-weight:600;
                text-transform:uppercase;letter-spacing:.06em;margin-bottom:.75rem}
 
+/* ── progress bar ── */
+.progress-wrap{margin-top:1rem;display:none}
+.progress-wrap.visible{display:block}
+.progress-label{color:var(--text-muted);font-size:.78rem;margin-bottom:.35rem;
+                display:flex;justify-content:space-between}
+.progress-track{height:8px;background:var(--bg3);border-radius:4px;
+                border:1px solid var(--border);overflow:hidden}
+.progress-bar{height:100%;width:0%;background:var(--accent);border-radius:4px;
+              transition:width .18s ease}
+.progress-bar.done{background:var(--green)}
+.progress-bar.err{background:var(--red)}
+.sse-status{margin-top:.5rem;font-size:.78rem;color:var(--text-muted)}
+
 /* ── refresh indicator ── */
 .refresh-indicator{display:flex;align-items:center;gap:.4rem;color:var(--text-dim);
                    font-size:.72rem;margin-left:auto}
@@ -2006,6 +2030,18 @@ td{padding:.55rem .9rem;vertical-align:middle;white-space:nowrap}
           &#8679; Submit Job
         </button>
         <div id="submit-msg" style="display:none" class="form-msg"></div>
+
+        <!-- SSE live progress -->
+        <div class="progress-wrap" id="progress-wrap">
+          <div class="progress-label">
+            <span id="progress-event">Queued&hellip;</span>
+            <span id="progress-pct">0%</span>
+          </div>
+          <div class="progress-track">
+            <div class="progress-bar" id="progress-bar"></div>
+          </div>
+          <div class="sse-status" id="sse-status"></div>
+        </div>
       </div>
     </div>
 
@@ -2257,6 +2293,74 @@ dropZone.addEventListener('drop', e => {
   reader.readAsDataURL(file);
 });
 
+// ── SSE progress tracking ──────────────────────────────────────────────────
+let activeSSE = null;
+
+function startSSEProgress(jobId) {
+  // Close any previous stream.
+  if (activeSSE) { try { activeSSE.close(); } catch(_) {} activeSSE = null; }
+
+  const wrap = el('progress-wrap');
+  const bar  = el('progress-bar');
+  const pct  = el('progress-pct');
+  const evt  = el('progress-event');
+  const sts  = el('sse-status');
+
+  wrap.classList.add('visible');
+  bar.style.width = '0%';
+  bar.className = 'progress-bar';
+  pct.textContent = '0%';
+  evt.textContent = 'Connecting\u2026';
+  sts.textContent = '';
+
+  const es = new EventSource('/api/v1/job/' + encodeURIComponent(jobId) + '/stream');
+  activeSSE = es;
+
+  es.onmessage = function(e) {
+    let data;
+    try { data = JSON.parse(e.data); } catch(_) { return; }
+
+    switch (data.event) {
+      case 'queued':
+        evt.textContent = 'Queued (position ' + (data.position || 0) + ')';
+        pct.textContent = '0%';
+        break;
+      case 'started':
+        evt.textContent = 'Processing\u2026';
+        pct.textContent = '0%';
+        break;
+      case 'progress':
+        const p = data.percent || 0;
+        bar.style.width = p + '%';
+        pct.textContent = p + '%';
+        evt.textContent = 'Processing\u2026';
+        break;
+      case 'done':
+        bar.style.width = '100%';
+        bar.classList.add('done');
+        pct.textContent = '100%';
+        evt.textContent = 'Done \u2713';
+        sts.innerHTML = data.output_url
+          ? 'Result: <a href="' + data.output_url + '" style="color:var(--accent)" target="_blank">Download \u2197</a>'
+          : '';
+        es.close(); activeSSE = null;
+        setTimeout(() => { showPageByName('jobs'); refreshAll(); }, 1200);
+        break;
+      case 'error':
+        bar.classList.add('err');
+        evt.textContent = 'Error';
+        sts.textContent = data.message || 'Unknown error';
+        es.close(); activeSSE = null;
+        break;
+    }
+  };
+
+  es.onerror = function() {
+    sts.textContent = 'Stream disconnected.';
+    es.close(); activeSSE = null;
+  };
+}
+
 async function submitJob() {
   if (!selectedFileB64) return;
   const btn = el('submit-btn');
@@ -2268,6 +2372,8 @@ async function submitJob() {
   btn.disabled = true;
   btn.textContent = 'Submitting\u2026';
   msgEl.style.display = 'none';
+  // Hide any previous progress bar
+  el('progress-wrap').classList.remove('visible');
 
   const payload = { image_data: selectedFileB64, model, format };
   if (scale && scale > 0) payload.scale_factor = scale;
@@ -2288,8 +2394,8 @@ async function submitJob() {
       el('preview-img').style.display = 'none';
       el('file-input').value = '';
       btn.textContent = '\u2191 Submit Job';
-      // switch to jobs page and refresh
-      setTimeout(() => { showPageByName('jobs'); refreshAll(); }, 800);
+      // Open SSE stream for live progress.
+      if (d.job_id) startSSEProgress(d.job_id);
     } else {
       throw new Error(d.error || ('HTTP ' + r.status));
     }
@@ -2331,6 +2437,117 @@ setInterval(refreshAll, 5000);
 </html>"#;
 
         format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-cache\r\n\r\n{}", html)
+    }
+
+    /// GET /api/v1/job/:id/stream — Server-Sent Events endpoint.
+    ///
+    /// Emits a sequence of progress events:
+    ///   queued → started → progress (×10, 0 %→100 %) → done | error
+    ///
+    /// The progress is simulated over ~2 seconds (10 × 200 ms) so clients can
+    /// exercise the SSE path without waiting for real job completion.
+    fn handle_job_stream(&self, mut stream: std::net::TcpStream, path: &str) {
+        // Extract job_id: strip prefix + "/stream" suffix.
+        let inner = path
+            .trim_start_matches("/api/v1/job/")
+            .trim_start_matches("/api/job/");
+        let job_id = inner.trim_end_matches("/stream").to_string();
+
+        // SSE response headers.
+        let headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Cache-Control: no-cache\r\n",
+            "Connection: keep-alive\r\n",
+            "Access-Control-Allow-Origin: *\r\n",
+            "\r\n",
+        );
+        if stream.write_all(headers.as_bytes()).is_err() {
+            return;
+        }
+
+        // Helper: write one SSE data line and flush.
+        let write_event = |stream: &mut std::net::TcpStream, json: serde_json::Value| -> bool {
+            let line = format!("data: {}\n\n", json);
+            stream.write_all(line.as_bytes()).is_ok()
+        };
+
+        // Check whether the job exists and get its queue position.
+        let (job_exists, queue_position) = {
+            if let Ok(jobs) = self.jobs.lock() {
+                let exists = jobs.contains_key(&job_id);
+                let position = jobs
+                    .values()
+                    .filter(|j| matches!(j.status, JobStatus::Pending))
+                    .count();
+                (exists, position)
+            } else {
+                (false, 0)
+            }
+        };
+
+        if !job_exists {
+            write_event(
+                &mut stream,
+                serde_json::json!({
+                    "event": "error",
+                    "job_id": job_id,
+                    "message": "Job not found"
+                }),
+            );
+            return;
+        }
+
+        // --- queued ---
+        if !write_event(
+            &mut stream,
+            serde_json::json!({
+                "event": "queued",
+                "job_id": job_id,
+                "position": queue_position
+            }),
+        ) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+
+        // --- started ---
+        if !write_event(
+            &mut stream,
+            serde_json::json!({
+                "event": "started",
+                "job_id": job_id
+            }),
+        ) {
+            return;
+        }
+
+        // --- progress: 10 events, 200 ms apart → ~2 s total ---
+        for i in 1u8..=10 {
+            thread::sleep(Duration::from_millis(200));
+            let percent = i * 10;
+            if !write_event(
+                &mut stream,
+                serde_json::json!({
+                    "event": "progress",
+                    "job_id": job_id,
+                    "percent": percent
+                }),
+            ) {
+                return;
+            }
+        }
+
+        // --- done ---
+        let output_url = format!("/api/v1/result/{}", job_id);
+        write_event(
+            &mut stream,
+            serde_json::json!({
+                "event": "done",
+                "job_id": job_id,
+                "output_url": output_url
+            }),
+        );
     }
 
     /// Start cache cleanup thread

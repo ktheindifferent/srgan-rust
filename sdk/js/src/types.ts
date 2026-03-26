@@ -1,6 +1,53 @@
 /** Model types supported by the SRGAN-Rust API. */
 export type ModelLabel = "natural" | "anime" | "bilinear";
 
+// ---------------------------------------------------------------------------
+// SSE streaming types
+// ---------------------------------------------------------------------------
+
+/** Union of all event shapes emitted by the SSE stream endpoint. */
+export type SSEProgressEvent =
+  | SSEQueuedEvent
+  | SSEStartedEvent
+  | SSEProgressEventData
+  | SSEDoneEvent
+  | SSEErrorEvent;
+
+export interface SSEQueuedEvent {
+  event: "queued";
+  job_id: string;
+  /** Number of jobs ahead of this one in the queue. */
+  position: number;
+}
+
+export interface SSEStartedEvent {
+  event: "started";
+  job_id: string;
+}
+
+export interface SSEProgressEventData {
+  event: "progress";
+  job_id: string;
+  /** Completion percentage 0–100. */
+  percent: number;
+}
+
+export interface SSEDoneEvent {
+  event: "done";
+  job_id: string;
+  /** URL to download the upscaled result. */
+  output_url: string;
+}
+
+export interface SSEErrorEvent {
+  event: "error";
+  job_id: string;
+  message: string;
+}
+
+/** Callback signature for {@link SrganClient.upscaleStream}. */
+export type ProgressCallback = (event: SSEProgressEvent) => void;
+
 /** Tier-based API access levels. */
 export type Tier = "free" | "pro" | "enterprise";
 

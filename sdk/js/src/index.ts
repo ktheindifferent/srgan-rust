@@ -23,11 +23,13 @@ import {
   HealthResponse,
   JobStatusResponse,
   ModelInfo,
+  ProgressCallback,
   SrganAuthError,
   SrganClientConfig,
   SrganError,
   SrganRateLimitError,
   SrganValidationError,
+  SSEProgressEvent,
   UpscaleRequest,
   UpscaleResponse,
   ModelLabel,
@@ -111,6 +113,79 @@ export class SrganClient {
   ): Promise<AsyncJobResponse> {
     const body: UpscaleRequest = { image: toBase64(image), ...opts };
     return this.request<AsyncJobResponse>("POST", "/api/v1/upscale/async", body);
+  }
+
+  /**
+   * Submit an upscale job and stream live progress events via Server-Sent Events.
+   *
+   * Calls `onProgress` for every SSE event (`queued`, `started`, `progress`,
+   * `done`, `error`) and resolves with the final {@link UpscaleResponse} when
+   * the job completes.
+   *
+   * In Node.js ≥18 the global `fetch` + `ReadableStream` API is used.  For
+   * older Node.js runtimes install the `eventsource` package and pass its
+   * `EventSource` constructor via `opts.eventSourceCtor`.
+   *
+   * @example
+   * ```typescript
+   * const result = await client.upscaleStream(imageBytes, { model: "anime" }, (ev) => {
+   *   if (ev.event === "progress") console.log(`${ev.percent}%`);
+   * });
+   * ```
+   */
+  async upscaleStream(
+    image: Buffer | Uint8Array | string,
+    opts: Omit<UpscaleRequest, "image"> & {
+      /** Override the EventSource constructor (useful in Node.js < 18). */
+      eventSourceCtor?: typeof EventSource;
+    } = {},
+    onProgress: ProgressCallback = () => {},
+  ): Promise<UpscaleResponse> {
+    const { eventSourceCtor: ESCtor, ...upscaleOpts } = opts;
+
+    // Step 1: queue the async job.
+    const job = await this.upscaleAsync(image, upscaleOpts);
+    const jobId = job.job_id;
+
+    // Step 2: attach to the SSE stream.
+    const streamUrl = `${this.baseUrl}/api/v1/job/${encodeURIComponent(jobId)}/stream`;
+
+    await new Promise<void>((resolve, reject) => {
+      const ES: typeof EventSource =
+        ESCtor ??
+        (typeof EventSource !== "undefined"
+          ? EventSource
+          : (() => { throw new SrganError("EventSource is not available in this environment. Pass opts.eventSourceCtor."); })());
+
+      const es = new ES(streamUrl);
+
+      es.onmessage = (e: MessageEvent) => {
+        let data: SSEProgressEvent;
+        try {
+          data = JSON.parse(e.data as string) as SSEProgressEvent;
+        } catch {
+          return;
+        }
+
+        onProgress(data);
+
+        if (data.event === "done") {
+          es.close();
+          resolve();
+        } else if (data.event === "error") {
+          es.close();
+          reject(new SrganError(`Job ${jobId} failed: ${data.message}`));
+        }
+      };
+
+      es.onerror = () => {
+        es.close();
+        reject(new SrganError(`SSE stream for job ${jobId} closed unexpectedly`));
+      };
+    });
+
+    // Step 3: fetch the final result.
+    return this.waitForJob(jobId, 500, 30_000);
   }
 
   // ── Batch processing ──────────────────────────────────────────────────────

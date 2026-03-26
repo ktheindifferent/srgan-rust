@@ -680,6 +680,84 @@ const result = await job.poll()  // polls until complete
 
 ---
 
+---
+
+## GET /api/v1/job/:id/stream
+
+Stream live progress for an async job via **Server-Sent Events (SSE)**.
+
+**Headers (response)**
+
+```
+Content-Type: text/event-stream
+Cache-Control: no-cache
+```
+
+**Event shapes**
+
+All events are delivered as `data: <json>\n\n` lines.
+
+| `event` field | When emitted | Extra fields |
+|---|---|---|
+| `queued` | Job accepted, waiting in queue | `position` (int) |
+| `started` | Worker picked up the job | — |
+| `progress` | Periodic progress update | `percent` (0–100) |
+| `done` | Job finished successfully | `output_url` (string) |
+| `error` | Job failed or not found | `message` (string) |
+
+**Example stream**
+
+```
+data: {"event":"queued","job_id":"abc123","position":2}
+
+data: {"event":"started","job_id":"abc123"}
+
+data: {"event":"progress","job_id":"abc123","percent":10}
+
+data: {"event":"progress","job_id":"abc123","percent":50}
+
+data: {"event":"progress","job_id":"abc123","percent":100}
+
+data: {"event":"done","job_id":"abc123","output_url":"/api/v1/result/abc123"}
+```
+
+**Browser (JavaScript)**
+
+```javascript
+const es = new EventSource(`/api/v1/job/${jobId}/stream`);
+es.onmessage = (e) => {
+  const ev = JSON.parse(e.data);
+  if (ev.event === 'progress') console.log(`${ev.percent}%`);
+  if (ev.event === 'done')     { console.log('Done:', ev.output_url); es.close(); }
+  if (ev.event === 'error')    { console.error(ev.message); es.close(); }
+};
+```
+
+**curl**
+
+```bash
+curl -N http://localhost:8080/api/v1/job/abc123/stream
+```
+
+**SDK (`upscaleStream`)**
+
+```typescript
+import { SrganClient } from "@srgan-rust/sdk";
+
+const client = new SrganClient({ apiKey: "srgan_live_..." });
+
+const result = await client.upscaleStream(
+  imageBuffer,
+  { model: "anime" },
+  (ev) => {
+    if (ev.event === "progress") process.stdout.write(`\r${ev.percent}%`);
+  },
+);
+// result is UpscaleResponse with the final upscaled image
+```
+
+---
+
 ## Rate limits
 
 | Tier | Limit |
