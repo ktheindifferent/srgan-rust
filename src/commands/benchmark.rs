@@ -34,12 +34,14 @@ pub struct BenchmarkResult {
     pub images_per_sec: f64,
     /// Estimated peak memory in MiB.
     pub memory_usage_mb: f64,
+    /// Input data throughput in MB/sec.
+    pub mb_per_sec: f64,
 }
 
 impl BenchmarkResult {
     pub fn to_csv_row(&self) -> String {
         format!(
-            "{},{},{}x{},{}x{},{},{:.3},{:.3},{:.3},{:.3},{:.2},{:.2},{:.1}",
+            "{},{},{}x{},{}x{},{},{:.3},{:.3},{:.3},{:.3},{:.2},{:.2},{:.1},{:.2}",
             self.model_name,
             self.factor,
             self.input_size.0, self.input_size.1,
@@ -52,11 +54,12 @@ impl BenchmarkResult {
             self.throughput_mpx_per_sec,
             self.images_per_sec,
             self.memory_usage_mb,
+            self.mb_per_sec,
         )
     }
 
     pub fn csv_header() -> &'static str {
-        "Model,Factor,In_W,In_H,Out_W,Out_H,Iters,Total_s,Avg_ms,Min_ms,Max_ms,Throughput_MPx/s,Img/s,Mem_MB"
+        "Model,Factor,In_W,In_H,Out_W,Out_H,Iters,Total_s,Avg_ms,Min_ms,Max_ms,Throughput_MPx/s,Img/s,Mem_MB,MB/s"
     }
 }
 
@@ -172,6 +175,8 @@ fn run_single_benchmark(
     let throughput_mpx     = output_pixels / avg_time.as_secs_f64() / 1_000_000.0;
     let images_per_sec     = 1.0 / avg_time.as_secs_f64();
     let memory_mb          = estimate_memory(width, height, factor, model_name);
+    let input_bytes        = (width * height * 3 * 4) as f64; // f32 RGB
+    let mb_per_sec         = (input_bytes / (1024.0 * 1024.0)) / avg_time.as_secs_f64();
 
     Ok(BenchmarkResult {
         model_name: model_name.to_string(),
@@ -187,6 +192,7 @@ fn run_single_benchmark(
         throughput_mpx_per_sec: throughput_mpx,
         images_per_sec,
         memory_usage_mb: memory_mb,
+        mb_per_sec,
     })
 }
 
@@ -232,26 +238,27 @@ fn estimate_memory(width: usize, height: usize, factor: usize, model_name: &str)
 
 fn print_table(results: &[BenchmarkResult]) {
     println!();
-    println!("╔══════════════╦══════════════╦══════════════╦══════════════╦══════════════╦══════════════╗");
-    println!("║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║",
-             "Model", "Resolution", "Avg (ms)", "Img/s", "Throughput", "Mem (MB)");
-    println!("║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║",
-             "", "", "", "", "MPx/s", "");
-    println!("╠══════════════╬══════════════╬══════════════╬══════════════╬══════════════╬══════════════╣");
+    println!("╔══════════════╦══════════════╦══════════════╦══════════════╦══════════════╦══════════════╦══════════════╗");
+    println!("║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║",
+             "Model", "Resolution", "Avg (ms)", "Img/s", "Throughput", "Mem (MB)", "MB/s");
+    println!("║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║ {:12} ║",
+             "", "", "", "", "MPx/s", "", "");
+    println!("╠══════════════╬══════════════╬══════════════╬══════════════╬══════════════╬══════════════╬══════════════╣");
 
     for r in results {
         println!(
-            "║ {:12} ║ {:>5}×{:<5} ║ {:12.1} ║ {:12.2} ║ {:12.2} ║ {:12.1} ║",
+            "║ {:12} ║ {:>5}×{:<5} ║ {:12.1} ║ {:12.2} ║ {:12.2} ║ {:12.1} ║ {:12.2} ║",
             r.model_name,
             r.input_size.0, r.input_size.1,
             r.avg_time.as_secs_f64() * 1000.0,
             r.images_per_sec,
             r.throughput_mpx_per_sec,
             r.memory_usage_mb,
+            r.mb_per_sec,
         );
     }
 
-    println!("╚══════════════╩══════════════╩══════════════╩══════════════╩══════════════╩══════════════╝");
+    println!("╚══════════════╩══════════════╩══════════════╩══════════════╩══════════════╩══════════════╩══════════════╝");
 
     // Summary: fastest at each resolution
     println!();
@@ -284,6 +291,7 @@ fn save_json(results: &[BenchmarkResult], path: &str) -> Result<()> {
             "images_per_sec": r.images_per_sec,
             "throughput_mpx_per_sec": r.throughput_mpx_per_sec,
             "memory_mb": r.memory_usage_mb,
+            "mb_per_sec": r.mb_per_sec,
         })
     }).collect();
 

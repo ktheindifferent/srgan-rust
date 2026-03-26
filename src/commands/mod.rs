@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod batch_improved;
 pub mod benchmark;
+pub mod models;
 pub mod download_model;
 pub mod convert_model;
 pub mod parallel_benchmark;
@@ -17,6 +18,7 @@ pub mod upscale;
 pub mod upscale_gpu;
 pub mod video;
 
+pub use self::models::models_command;
 pub use self::batch::batch_upscale;
 pub use self::batch_improved::batch_upscale_enhanced;
 pub use self::benchmark::benchmark;

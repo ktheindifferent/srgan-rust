@@ -30,6 +30,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_analyze_memory_subcommand())
 		.subcommand(build_server_subcommand())
 		.subcommand(build_download_model_subcommand())
+		.subcommand(build_models_subcommand())
 		.get_matches()
 }
 
@@ -683,6 +684,32 @@ fn build_download_model_subcommand() -> App<'static, 'static> {
 				.short("l")
 				.long("list")
 				.takes_value(false),
+		)
+}
+
+fn build_models_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("models")
+		.about("Manage pre-trained SRGAN models")
+		.subcommand(
+			SubCommand::with_name("list")
+				.about("List all available models"),
+		)
+		.subcommand(
+			SubCommand::with_name("download")
+				.about("Download a pre-trained model")
+				.arg(
+					Arg::with_name("name")
+						.help("Model name: natural, anime, face, 2x")
+						.required(true)
+						.index(1),
+				)
+				.arg(
+					Arg::with_name("dir")
+						.help("Directory to save the model (default: ~/.srgan/models/)")
+						.short("d")
+						.long("dir")
+						.value_name("DIR"),
+				),
 		)
 }
 
