@@ -1,6 +1,7 @@
 //! Quality comparison between an original image and its upscaled counterpart.
 //!
-//! Usage: `srgan-rust compare <input> <upscaled> [--output comparison.jpg]`
+//! Usage: `srgan-rust compare <original> <upscaled> [--output comparison.jpg] [--format json|text]`
+//!        `srgan-rust compare --original <path> --upscaled <path> [--format json|text]`
 //!
 //! Computes PSNR, SSIM, file-size ratio, and a pixel-difference histogram.
 //! Saves a side-by-side centre-crop comparison image and prints a recommendation.
@@ -15,35 +16,28 @@ use std::path::Path;
 // ── Public entry point ────────────────────────────────────────────────────────
 
 pub fn compare(app_m: &ArgMatches) -> Result<()> {
+    // Accept either named flags or positional args
     let input_path = app_m
-        .value_of("INPUT")
-        .ok_or_else(|| SrganError::InvalidParameter("No INPUT file given".to_string()))?;
+        .value_of("original")
+        .or_else(|| app_m.value_of("INPUT"))
+        .ok_or_else(|| SrganError::InvalidParameter(
+            "No original image given. Use --original <path> or pass it as the first positional argument.".to_string()
+        ))?;
     let upscaled_path = app_m
-        .value_of("UPSCALED")
-        .ok_or_else(|| SrganError::InvalidParameter("No UPSCALED file given".to_string()))?;
+        .value_of("upscaled")
+        .or_else(|| app_m.value_of("UPSCALED_POS"))
+        .ok_or_else(|| SrganError::InvalidParameter(
+            "No upscaled image given. Use --upscaled <path> or pass it as the second positional argument.".to_string()
+        ))?;
     let output_path = app_m.value_of("OUTPUT").unwrap_or("comparison.jpg");
+    let format = app_m.value_of("format").unwrap_or("text");
 
     let input_img = image::open(Path::new(input_path))?;
     let upscaled_img = image::open(Path::new(upscaled_path))?;
 
     let (in_w, in_h) = input_img.dimensions();
     let (up_w, up_h) = upscaled_img.dimensions();
-
-    println!("Input:    {} ({}x{})", input_path, in_w, in_h);
-    println!("Upscaled: {} ({}x{})", upscaled_path, up_w, up_h);
-    if in_w > 0 {
-        println!("Scale:    {:.2}x", up_w as f32 / in_w as f32);
-    }
-
-    // ── File size ratio ───────────────────────────────────────────────────────
-    if let Some(r) = compute_size_ratio(input_path, upscaled_path) {
-        println!(
-            "File size ratio: {:.2}x ({} -> {})",
-            r.ratio,
-            human_bytes(r.input_bytes),
-            human_bytes(r.output_bytes)
-        );
-    }
+    let scale = if in_w > 0 { up_w as f32 / in_w as f32 } else { 0.0 };
 
     // ── PSNR / SSIM ──────────────────────────────────────────────────────────
     let input_data = image_to_data(&input_img);
@@ -56,26 +50,174 @@ pub fn compare(app_m: &ArgMatches) -> Result<()> {
     let srgb_psnr = psnr_constants::LOG10_MULTIPLIER * (err / pix).log10();
     let luma_psnr = psnr_constants::LOG10_MULTIPLIER * (y_err / pix).log10();
 
-    println!("\nQuality metrics (overlapping region):");
-    println!("  sRGB PSNR: {:.2} dB", srgb_psnr);
-    println!("  Luma PSNR: {:.2} dB", luma_psnr);
-    println!("  SSIM:      {:.4}", ssim);
+    // ── File size ratio ───────────────────────────────────────────────────────
+    let size_ratio = compute_size_ratio(input_path, upscaled_path);
 
     // ── Pixel-difference histogram ────────────────────────────────────────────
     let histogram = compute_diff_histogram(&input_img, &upscaled_img);
-    print_diff_histogram(&histogram);
-
-    // ── Side-by-side comparison image ─────────────────────────────────────────
-    match save_comparison(&input_img, &upscaled_img, output_path, 256) {
-        Ok(_) => println!("\nComparison image saved to: {}", output_path),
-        Err(e) => eprintln!("Warning: could not save comparison image: {}", e),
-    }
 
     // ── Recommendation ────────────────────────────────────────────────────────
     let recommendation = make_recommendation(srgb_psnr, ssim, &histogram);
-    println!("\nRecommendation: {}", recommendation);
+    let quality_label = quality_label(srgb_psnr, ssim);
+
+    match format {
+        "json" => {
+            print_json_report(
+                input_path, upscaled_path, in_w, in_h, up_w, up_h, scale,
+                srgb_psnr, luma_psnr, ssim, quality_label, recommendation,
+                &size_ratio, &histogram,
+            );
+        }
+        _ => {
+            print_text_report(
+                input_path, upscaled_path, in_w, in_h, up_w, up_h, scale,
+                srgb_psnr, luma_psnr, ssim, quality_label, recommendation,
+                &size_ratio, &histogram,
+            );
+
+            // Side-by-side comparison image only in text mode
+            match save_comparison(&input_img, &upscaled_img, output_path, 256) {
+                Ok(_) => println!("\nComparison image saved to: {}", output_path),
+                Err(e) => eprintln!("Warning: could not save comparison image: {}", e),
+            }
+        }
+    }
 
     Ok(())
+}
+
+// ── Text report ───────────────────────────────────────────────────────────────
+
+fn print_text_report(
+    input_path: &str,
+    upscaled_path: &str,
+    in_w: u32, in_h: u32,
+    up_w: u32, up_h: u32,
+    scale: f32,
+    srgb_psnr: f32,
+    luma_psnr: f32,
+    ssim: f32,
+    quality_label: &str,
+    recommendation: &str,
+    size_ratio: &Option<SizeRatio>,
+    histogram: &DiffHistogram,
+) {
+    println!("=== Quality Comparison Report ===");
+    println!("Original: {} ({}x{})", input_path, in_w, in_h);
+    println!("Upscaled: {} ({}x{})", upscaled_path, up_w, up_h);
+    if scale > 0.0 {
+        println!("Scale:    {:.2}x", scale);
+    }
+
+    if let Some(r) = size_ratio {
+        println!(
+            "File size ratio: {:.2}x ({} -> {})",
+            r.ratio,
+            human_bytes(r.input_bytes),
+            human_bytes(r.output_bytes)
+        );
+    }
+
+    println!("\n--- Quality Metrics (overlapping region) ---");
+    println!("  sRGB PSNR : {:.2} dB", srgb_psnr);
+    println!("  Luma PSNR : {:.2} dB", luma_psnr);
+    println!("  SSIM      : {:.4}", ssim);
+    println!("  Rating    : {}", quality_label);
+
+    print_diff_histogram(histogram);
+
+    println!("\nRecommendation: {}", recommendation);
+}
+
+// ── JSON report ───────────────────────────────────────────────────────────────
+
+#[allow(clippy::too_many_arguments)]
+fn print_json_report(
+    input_path: &str,
+    upscaled_path: &str,
+    in_w: u32, in_h: u32,
+    up_w: u32, up_h: u32,
+    scale: f32,
+    srgb_psnr: f32,
+    luma_psnr: f32,
+    ssim: f32,
+    quality_label: &str,
+    recommendation: &str,
+    size_ratio: &Option<SizeRatio>,
+    histogram: &DiffHistogram,
+) {
+    let size_json = match size_ratio {
+        Some(r) => format!(
+            r#"{{"input_bytes":{},"output_bytes":{},"ratio":{:.4}}}"#,
+            r.input_bytes, r.output_bytes, r.ratio
+        ),
+        None => "null".to_string(),
+    };
+
+    let buckets_json: Vec<String> = histogram.buckets.iter().map(|b| b.to_string()).collect();
+
+    // Clamp NaN/inf for valid JSON
+    let srgb_psnr_out = if srgb_psnr.is_finite() { srgb_psnr } else { -1.0 };
+    let luma_psnr_out = if luma_psnr.is_finite() { luma_psnr } else { -1.0 };
+    let ssim_out = if ssim.is_finite() { ssim } else { 0.0 };
+
+    println!(
+        r#"{{
+  "original": {{"path":"{input}","width":{iw},"height":{ih}}},
+  "upscaled": {{"path":"{upscaled}","width":{uw},"height":{uh}}},
+  "scale_factor": {scale:.4},
+  "metrics": {{
+    "srgb_psnr_db": {srgb:.4},
+    "luma_psnr_db": {luma:.4},
+    "ssim": {ssim:.6},
+    "rating": "{rating}"
+  }},
+  "file_size": {size},
+  "pixel_diff_histogram": {{
+    "buckets": [{buckets}],
+    "mean_diff": {mean:.4},
+    "max_diff": {max}
+  }},
+  "recommendation": "{rec}"
+}}"#,
+        input = escape_json(input_path),
+        iw = in_w,
+        ih = in_h,
+        upscaled = escape_json(upscaled_path),
+        uw = up_w,
+        uh = up_h,
+        scale = scale,
+        srgb = srgb_psnr_out,
+        luma = luma_psnr_out,
+        ssim = ssim_out,
+        rating = quality_label,
+        size = size_json,
+        buckets = buckets_json.join(","),
+        mean = histogram.mean_diff,
+        max = histogram.max_diff,
+        rec = escape_json(recommendation),
+    );
+}
+
+fn escape_json(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// ── Quality label ─────────────────────────────────────────────────────────────
+
+fn quality_label(psnr: f32, ssim: f32) -> &'static str {
+    if !psnr.is_finite() {
+        return "Identical";
+    }
+    if psnr >= 38.0 && ssim >= 0.96 {
+        "Excellent"
+    } else if psnr >= 32.0 && ssim >= 0.90 {
+        "Good"
+    } else if psnr >= 26.0 && ssim >= 0.80 {
+        "Acceptable"
+    } else {
+        "Poor"
+    }
 }
 
 // ── File size ratio ───────────────────────────────────────────────────────────

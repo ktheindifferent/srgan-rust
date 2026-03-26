@@ -766,25 +766,36 @@ fn build_models_subcommand() -> App<'static, 'static> {
 
 fn build_compare_subcommand() -> App<'static, 'static> {
 	SubCommand::with_name("compare")
-		.about("Compare an input image with its upscaled version (PSNR, SSIM, histogram)")
+		.about("Compare an original image with an upscaled/processed image (PSNR, SSIM, histogram)")
 		.long_about(
 			"Computes PSNR, SSIM, file-size ratio, and a pixel-difference histogram\n\
-			 between INPUT and UPSCALED.  Also saves a side-by-side centre-crop\n\
+			 between ORIGINAL and UPSCALED.  Also saves a side-by-side centre-crop\n\
 			 comparison image.\n\n\
 			 Examples:\n  srgan-rust compare original.png upscaled.png\n  \
+			 srgan-rust compare --original original.png --upscaled upscaled.png --format json\n  \
 			 srgan-rust compare original.png upscaled.png --output comparison.jpg",
 		)
 		.arg(
 			Arg::with_name("INPUT")
-				.help("Original (low-resolution) image")
-				.required(true)
+				.help("Original image (positional)")
 				.index(1),
 		)
 		.arg(
-			Arg::with_name("UPSCALED")
-				.help("Upscaled image to evaluate")
-				.required(true)
+			Arg::with_name("UPSCALED_POS")
+				.help("Upscaled image (positional)")
 				.index(2),
+		)
+		.arg(
+			Arg::with_name("original")
+				.help("Original image path")
+				.long("original")
+				.value_name("PATH"),
+		)
+		.arg(
+			Arg::with_name("upscaled")
+				.help("Upscaled image path")
+				.long("upscaled")
+				.value_name("PATH"),
 		)
 		.arg(
 			Arg::with_name("OUTPUT")
@@ -792,6 +803,14 @@ fn build_compare_subcommand() -> App<'static, 'static> {
 				.short("o")
 				.long("output")
 				.value_name("FILE"),
+		)
+		.arg(
+			Arg::with_name("format")
+				.help("Output format: text (default) or json")
+				.long("format")
+				.value_name("FORMAT")
+				.possible_values(&["text", "json"])
+				.default_value("text"),
 		)
 }
 
