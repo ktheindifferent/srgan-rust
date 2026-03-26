@@ -17,7 +17,11 @@ pub mod org;
 pub mod rate_limit;
 pub mod upscale;
 
-pub use auth::{ApiKey, CreateKeyRequest, CreateKeyResponse, KeyStore, KeyTier};
+pub use auth::{
+    ApiKey, Claims, CreateKeyRequest, CreateKeyResponse, KeyListEntry, KeyStore, KeyTier,
+    RegisterRequest, RegisterResponse, RotateKeyResponse,
+    issue_jwt, verify_jwt,
+};
 pub use rate_limit::{ApiRateLimiter, RateLimitResult};
 pub use admin::{AdminStats, check_admin_auth, get_stats};
 pub use upscale::{

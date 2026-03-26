@@ -14,13 +14,22 @@ pub struct RateLimitPolicy {
 
 impl RateLimitPolicy {
     pub fn for_tier(tier: &SubscriptionTier) -> Self {
+        // Allow overriding the default per-key rate via DEFAULT_KEY_RATE env.
+        // Format: "N/hour" (e.g. "100/hour"). Applied to Free and Pro tiers.
+        let env_rate: Option<u32> = std::env::var("DEFAULT_KEY_RATE")
+            .ok()
+            .and_then(|v| {
+                let v = v.trim().to_lowercase();
+                v.split('/').next().and_then(|n| n.trim().parse().ok())
+            });
+
         match tier {
             SubscriptionTier::Free => Self {
-                requests_per_hour: 10,
+                requests_per_hour: env_rate.unwrap_or(10),
                 max_output_megapixels: 2,
             },
             SubscriptionTier::Pro => Self {
-                requests_per_hour: 1000,
+                requests_per_hour: env_rate.map(|r| r * 10).unwrap_or(1000),
                 max_output_megapixels: 10,
             },
             SubscriptionTier::Enterprise => Self {

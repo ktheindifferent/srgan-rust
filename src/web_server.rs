@@ -11,6 +11,7 @@ use image::{ImageFormat, GenericImage};
 use log::{info, warn};
 use crate::error::SrganError;
 use crate::thread_safe_network::ThreadSafeNetwork;
+use crate::api::auth::{self, KeyStore, RegisterRequest};
 use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, SubscriptionTier};
 use crate::api::middleware::TierRateLimiter;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
@@ -404,6 +405,8 @@ pub struct WebServer {
     request_metrics: Arc<Mutex<RequestMetrics>>,
     /// Multi-tenant organization database
     org_db: Arc<Mutex<crate::api::org::OrgDb>>,
+    /// SQLite-backed user + API key store
+    key_store: Arc<KeyStore>,
 }
 
 /// Cached result
@@ -462,6 +465,12 @@ impl WebServer {
         
         let s3_config = S3Config::from_env();
 
+        let key_store = KeyStore::open_in_memory()
+            .map_err(|e| SrganError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("KeyStore init: {}", e),
+            )))?;
+
         Ok(Self {
             config,
             network: Arc::new(network),
@@ -476,6 +485,7 @@ impl WebServer {
             images_processed: Arc::new(AtomicU64::new(0)),
             request_metrics: Arc::new(Mutex::new(RequestMetrics::new())),
             org_db: Arc::new(Mutex::new(crate::api::org::OrgDb::new())),
+            key_store: Arc::new(key_store),
         })
     }
     
@@ -627,6 +637,16 @@ impl WebServer {
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
+                // Registration & API key management
+                ("POST", "/api/register") | ("POST", "/api/v1/register") => self.handle_register(&request),
+                ("GET", "/api/keys") | ("GET", "/api/v1/keys") => self.handle_list_keys(&request),
+                ("POST", "/api/keys") | ("POST", "/api/v1/keys") => self.handle_create_key(&request),
+                _ if method == "DELETE"
+                    && (path.starts_with("/api/keys/") || path.starts_with("/api/v1/keys/"))
+                    && !path.contains("/rotate") => self.handle_revoke_key(&request, path),
+                _ if method == "POST"
+                    && (path.starts_with("/api/keys/") || path.starts_with("/api/v1/keys/"))
+                    && path.ends_with("/rotate") => self.handle_rotate_key(&request, path),
                 // Organization endpoints
                 ("POST", "/api/orgs") | ("POST", "/api/v1/orgs") => self.handle_create_org(&request),
                 _ if method == "GET"
@@ -1747,9 +1767,7 @@ function renderEndpointMetrics(metrics){
 
     /// GET /api/me — current user profile and credit balance
     fn handle_api_me(&self, request: &str) -> String {
-        let api_key = self
-            .extract_header(request, "x-api-key")
-            .unwrap_or_else(|| "anonymous".to_string());
+        let api_key = self.resolve_api_identity(request);
 
         let status = if let Ok(mut db) = self.billing_db.lock() {
             let account = db.get_or_create_free(&api_key);
@@ -1769,6 +1787,232 @@ function renderEndpointMetrics(metrics){
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
             status
         )
+    }
+
+    // ── Registration & API key management ────────────────────────────────────
+
+    /// POST /api/register — create account, return JWT.
+    fn handle_register(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+        let req: RegisterRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid JSON: {}", e)),
+        };
+        if req.email.is_empty() || !req.email.contains('@') {
+            return self.error_response(400, "Valid email required");
+        }
+        if req.password.len() < 8 {
+            return self.error_response(400, "Password must be at least 8 characters");
+        }
+
+        let user_id = match self.key_store.register_user(&req.email, &req.password) {
+            Ok(uid) => uid,
+            Err(e) => return self.error_response(409, &format!("{}", e)),
+        };
+
+        let token = match auth::issue_jwt(&user_id, &req.email) {
+            Ok(t) => t,
+            Err(_) => return self.error_response(500, "Failed to issue token"),
+        };
+
+        let resp = serde_json::json!({
+            "user_id": user_id,
+            "email": req.email,
+            "token": token,
+        });
+        format!(
+            "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+            resp
+        )
+    }
+
+    /// POST /api/keys — create a named API key (requires auth).
+    fn handle_create_key(&self, request: &str) -> String {
+        let user_id = match self.authenticate_request(request) {
+            Some(uid) => uid,
+            None => return self.error_response(401, "Authentication required"),
+        };
+
+        let body = self.extract_body(request);
+        let req: crate::api::auth::CreateKeyRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid JSON: {}", e)),
+        };
+
+        let tier = req
+            .tier
+            .as_deref()
+            .and_then(|t| t.parse::<crate::api::auth::KeyTier>().ok())
+            .unwrap_or(crate::api::auth::KeyTier::Free);
+
+        match self.key_store.create_key_for_user(tier, req.label.clone(), Some(&user_id)) {
+            Ok(key) => {
+                let resp = serde_json::json!({
+                    "id": key.id,
+                    "key": key.key,
+                    "label": key.label,
+                    "tier": tier.as_str(),
+                    "daily_limit": tier.daily_limit(),
+                    "created_at": key.created_at,
+                });
+                format!(
+                    "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    resp
+                )
+            }
+            Err(e) => self.error_response(500, &format!("Failed to create key: {}", e)),
+        }
+    }
+
+    /// GET /api/keys — list caller's active API keys (masked).
+    fn handle_list_keys(&self, request: &str) -> String {
+        let user_id = match self.authenticate_request(request) {
+            Some(uid) => uid,
+            None => return self.error_response(401, "Authentication required"),
+        };
+
+        match self.key_store.list_keys_for_user(&user_id) {
+            Ok(keys) => {
+                let entries: Vec<serde_json::Value> = keys
+                    .iter()
+                    .map(|k| {
+                        let prefix = if k.key.len() > 8 {
+                            format!("{}...{}", &k.key[..7], &k.key[k.key.len() - 4..])
+                        } else {
+                            k.key.clone()
+                        };
+                        serde_json::json!({
+                            "id": k.id,
+                            "key_prefix": prefix,
+                            "label": k.label,
+                            "tier": k.tier.as_str(),
+                            "created_at": k.created_at,
+                            "last_used_at": k.last_used_at,
+                        })
+                    })
+                    .collect();
+                let resp = serde_json::json!({ "keys": entries, "count": entries.len() });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    resp
+                )
+            }
+            Err(e) => self.error_response(500, &format!("Failed to list keys: {}", e)),
+        }
+    }
+
+    /// DELETE /api/keys/:id — revoke a key.
+    fn handle_revoke_key(&self, request: &str, path: &str) -> String {
+        let user_id = match self.authenticate_request(request) {
+            Some(uid) => uid,
+            None => return self.error_response(401, "Authentication required"),
+        };
+
+        // Extract key id from path: /api/keys/{id} or /api/v1/keys/{id}
+        let key_id = path
+            .trim_start_matches("/api/v1/keys/")
+            .trim_start_matches("/api/keys/");
+
+        if key_id.is_empty() {
+            return self.error_response(400, "Key ID required");
+        }
+
+        match self.key_store.revoke_key(key_id, &user_id) {
+            Ok(true) => {
+                let resp = serde_json::json!({ "revoked": true, "id": key_id });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    resp
+                )
+            }
+            Ok(false) => self.error_response(404, "Key not found"),
+            Err(e) => self.error_response(500, &format!("Failed to revoke key: {}", e)),
+        }
+    }
+
+    /// POST /api/keys/:id/rotate — rotate key with 24 h grace period.
+    fn handle_rotate_key(&self, request: &str, path: &str) -> String {
+        let user_id = match self.authenticate_request(request) {
+            Some(uid) => uid,
+            None => return self.error_response(401, "Authentication required"),
+        };
+
+        // Extract key id from: /api/keys/{id}/rotate or /api/v1/keys/{id}/rotate
+        let trimmed = path
+            .trim_start_matches("/api/v1/keys/")
+            .trim_start_matches("/api/keys/");
+        let key_id = trimmed.trim_end_matches("/rotate");
+
+        if key_id.is_empty() {
+            return self.error_response(400, "Key ID required");
+        }
+
+        match self.key_store.rotate_key(key_id, &user_id) {
+            Ok(Some((new_key, grace_until))) => {
+                let resp = serde_json::json!({
+                    "id": new_key.id,
+                    "new_key": new_key.key,
+                    "old_key_valid_until": grace_until,
+                    "label": new_key.label,
+                    "tier": new_key.tier.as_str(),
+                });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    resp
+                )
+            }
+            Ok(None) => self.error_response(404, "Key not found or already revoked"),
+            Err(e) => self.error_response(500, &format!("Failed to rotate key: {}", e)),
+        }
+    }
+
+    /// Authenticate a request via JWT Bearer token or X-API-Key header.
+    /// Returns the user_id on success, or None if unauthenticated.
+    fn authenticate_request(&self, request: &str) -> Option<String> {
+        // Try JWT Bearer first
+        if let Some(auth_header) = self.extract_header(request, "authorization") {
+            if let Some(token) = auth_header.trim().strip_prefix("Bearer ") {
+                // Skip if it looks like an admin token (not a JWT)
+                if token.contains('.') {
+                    if let Ok(claims) = auth::verify_jwt(token.trim()) {
+                        return Some(claims.sub);
+                    }
+                }
+            }
+        }
+        // Fall back to X-API-Key
+        if let Some(api_key) = self.extract_header(request, "x-api-key") {
+            let api_key = api_key.trim().to_string();
+            if let Ok(Some(user_id)) = self.key_store.user_id_for_key(&api_key) {
+                // Record last-used timestamp
+                self.key_store.touch_key(&api_key);
+                return Some(user_id);
+            }
+            // Legacy keys without user_id — allow through with synthetic id
+            if let Ok(Some(_)) = self.key_store.get_key(&api_key) {
+                self.key_store.touch_key(&api_key);
+                return Some(api_key);
+            }
+        }
+        None
+    }
+
+    /// Extract the effective API key from the request — resolves both X-API-Key
+    /// and JWT (returning the user_id as the billing identity).
+    fn resolve_api_identity(&self, request: &str) -> String {
+        if let Some(api_key) = self.extract_header(request, "x-api-key") {
+            return api_key.trim().to_string();
+        }
+        if let Some(auth_header) = self.extract_header(request, "authorization") {
+            if let Some(token) = auth_header.trim().strip_prefix("Bearer ") {
+                if token.contains('.') {
+                    if let Ok(claims) = auth::verify_jwt(token.trim()) {
+                        return claims.sub;
+                    }
+                }
+            }
+        }
+        "anonymous".to_string()
     }
 
     /// Returns true when the request carries a valid admin bearer token.
@@ -2939,9 +3183,7 @@ function renderEndpointMetrics(metrics){
     /// Rate-limit check using the tier-aware limiter.
     /// Returns the HTTP headers string and whether the request is allowed.
     fn tier_rate_limit_check(&self, request: &str) -> (bool, String) {
-        let api_key = self
-            .extract_header(request, "x-api-key")
-            .unwrap_or_else(|| "anonymous".to_string());
+        let api_key = self.resolve_api_identity(request);
         let tier = self.tier_for_key(&api_key);
         let result = self.tier_rate_limiter.check(&api_key, &tier);
         let headers = result.headers();
