@@ -104,12 +104,27 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 |-------|----------|-------|------|-------|
 | `natural` | Photos, scenery, portraits | 4× | 28.5 dB | Trained on DIV2K dataset |
 | `anime` | Anime, cartoons, illustrations | 4× | 29.1 dB | L1 loss, UCID-anime dataset |
-| `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3; best for scans/screenshots |
+| `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3; best for scans/screenshots. **Requires weight file** — see below. |
 | `real-esrgan` | Compressed/noisy photos | 4× | 31.8 dB | Real-world degradation training (JPEG, noise, blur) |
 | `real-esrgan-anime` | Compressed/noisy anime | 4× | 32.1 dB | Anime-specific degradation pipeline; sharpest line art |
 | `real-esrgan-x2` | Photos, low-memory | 2× | 32.4 dB | Half the memory of `real-esrgan`; moderate upscale |
 
 When `model` is omitted the server classifies the image and picks `natural` or `anime` automatically.
+
+### Waifu2x weight installation
+
+Waifu2x weight files are not bundled with the binary. To enable waifu2x:
+
+1. Obtain the ncnn-format waifu2x weights for your desired noise level and scale.
+2. Place the file in a `models/` directory next to the binary, named:
+   `models/waifu2x_noise{N}_scale{M}x.bin`
+   — for example `models/waifu2x_noise0_scale2x.bin` (noise=0, scale=2×).
+3. Supported combinations: noise 0–3, scale 1 (denoise only) or 2 (upscale ×2).
+
+Until the weight file is present, selecting a waifu2x model returns:
+```
+waifu2x weights not yet bundled; place waifu2x_noise0_scale2x.bin in models/
+```
 
 ---
 

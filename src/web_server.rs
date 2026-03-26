@@ -962,6 +962,14 @@ impl WebServer {
             );
         }
 
+        // Waifu2x requires external weight files that are not yet bundled.
+        // Return a descriptive error rather than silently falling back to the
+        // default network.
+        if effective_label == "waifu2x" || effective_label.starts_with("waifu2x-") {
+            crate::waifu2x::Waifu2xNetwork::from_label(&effective_label)?;
+            // Unreachable until weights are bundled — the call above errors.
+        }
+
         // Run SRGAN inference
         let upscaled = self.network.upscale_image(&img)?;
         let upscaled_size = (upscaled.width(), upscaled.height());

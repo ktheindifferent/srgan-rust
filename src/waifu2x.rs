@@ -104,23 +104,45 @@ pub struct Waifu2xNetwork {
 impl Waifu2xNetwork {
     /// Build a `Waifu2xNetwork` from a [`Waifu2xConfig`].
     ///
-    /// # Note on weights
+    /// # Weight status
     ///
-    /// Real waifu2x weights (ncnn / waifu2x-caffe format) have not yet been
-    /// converted to the `.rsr` format used by this binary.  Until that
-    /// conversion pipeline is complete the built-in anime model is used as the
-    /// inference backend.  The noise-level and scale parameters are recorded
-    /// and reported but do not yet alter the network topology.
+    /// Native waifu2x weights (ncnn / waifu2x-caffe `.bin` format) have not
+    /// yet been bundled with this binary.  To use waifu2x, place the
+    /// appropriate weight file in the `models/` directory next to the binary:
     ///
-    /// TODO: replace with dedicated waifu2x weights once the
-    ///       ncnn/ONNX → `.rsr` conversion is available.
+    ///   `models/waifu2x_noise{N}_scale{M}x.bin`
+    ///
+    /// e.g. `models/waifu2x_noise0_scale2x.bin` for noise=0, scale=2.
+    ///
+    /// Until then this function returns a descriptive [`SrganError::Network`]
+    /// so the caller (CLI or API client) receives a clear message rather than
+    /// a silent fallback.
+    ///
+    /// TODO: when weight files are present, load and run the native waifu2x
+    ///       inference engine (ncnn-based or converted `.rsr`) here.
     pub fn from_config(config: &Waifu2xConfig) -> Result<Self> {
         let noise_level = NoiseLevel::from_u8(config.noise_level);
         let scale = Waifu2xScale::from_u8(config.scale);
-        let label = config.model_label();
-        let inner = UpscalingNetwork::from_label(&label, None)
-            .map_err(SrganError::Network)?;
-        Ok(Self { inner, noise_level, scale })
+
+        // TODO: load dedicated waifu2x weights (ncnn/ONNX → .rsr conversion
+        //       pipeline not yet implemented).  Expected file name pattern:
+        //           models/waifu2x_noise{N}_scale{M}x.bin
+        //       Replace the Err below with actual weight loading once the file
+        //       is available.
+        return Err(SrganError::Network(format!(
+            "waifu2x weights not yet bundled; place waifu2x_noise{}_scale{}x.bin in models/",
+            noise_level.as_u8(),
+            scale.as_u8()
+        )));
+
+        // Unreachable until weights are bundled — kept so the compiler checks
+        // the construction path and the struct remains usable once weights land.
+        #[allow(unreachable_code)]
+        {
+            let inner = UpscalingNetwork::from_label("anime", None)
+                .map_err(SrganError::Network)?;
+            Ok(Self { inner, noise_level, scale })
+        }
     }
 
     /// Load waifu2x network from a canonical label such as `"waifu2x"` or

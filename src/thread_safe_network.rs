@@ -166,16 +166,15 @@ impl ThreadSafeNetwork {
                 Self::new_bilinear(bilinear_factor.unwrap_or(4))
             },
             label if label == "waifu2x" || label.starts_with("waifu2x-") => {
-                // TODO: load dedicated waifu2x weights (ncnn/ONNX → .rsr) when
-                //       weight-conversion pipeline is implemented.
-                let data = crate::L1_SRGB_ANIME_PARAMS;
-                let desc = crate::network_from_bytes(data)
-                    .map_err(|e| SrganError::Network(e))?;
-                let display = format!(
-                    "waifu2x ({}; backed by built-in anime model — TODO: real waifu2x weights)",
-                    label
-                );
-                Self::new_with_display(desc, &display)
+                // Delegate to Waifu2xNetwork so missing weights produce a clear
+                // error rather than a silent fallback to the anime model.
+                // TODO: when native waifu2x weights are available, load them
+                //       here via Waifu2xNetwork::from_label and convert to
+                //       ThreadSafeNetwork instead of returning an error.
+                crate::waifu2x::Waifu2xNetwork::from_label(label)?;
+                // Unreachable until weights are bundled.
+                #[allow(unreachable_code)]
+                Err(SrganError::Network(format!("waifu2x not available: {}", label)))
             },
             _ => Err(SrganError::Network(format!("Unsupported network type: {}", label))),
         }
