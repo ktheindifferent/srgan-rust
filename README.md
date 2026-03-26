@@ -104,7 +104,7 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 |-------|----------|-------|------|-------|
 | `natural` | Photos, scenery, portraits | 4× | 28.5 dB | Trained on DIV2K dataset |
 | `anime` | Anime, cartoons, illustrations | 4× | 29.1 dB | L1 loss, UCID-anime dataset |
-| `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3; best for scans/screenshots. Falls back to built-in anime model; native weights optional. |
+| `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3, style: anime/photo/artwork; best for scans/screenshots. Falls back to built-in anime model; native weights optional. |
 | `real-esrgan` | Compressed/noisy photos | 4× | 31.8 dB | Real-world degradation training (JPEG, noise, blur) |
 | `real-esrgan-anime` | Compressed/noisy anime | 4× | 32.1 dB | Anime-specific degradation pipeline; sharpest line art |
 | `real-esrgan-x2` | Photos, low-memory | 2× | 32.4 dB | Half the memory of `real-esrgan`; moderate upscale |

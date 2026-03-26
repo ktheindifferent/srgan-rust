@@ -227,18 +227,73 @@ impl LossType {
 	}
 }
 
+/// Waifu2x content style hint.
+///
+/// Different waifu2x model weights are trained on different content types.
+/// The style parameter selects the weight set best suited for the input
+/// image.  When native waifu2x weights are available, this controls which
+/// weight file is loaded; in the current software-fallback path it adjusts
+/// the sharpening profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waifu2xStyle {
+    /// Optimised for anime and manga illustrations (default).
+    Anime,
+    /// Optimised for photographs and realistic images.
+    Photo,
+    /// Optimised for digital artwork, paintings, and mixed media.
+    Artwork,
+}
+
+impl Default for Waifu2xStyle {
+    fn default() -> Self {
+        Waifu2xStyle::Anime
+    }
+}
+
+impl Waifu2xStyle {
+    /// Parse from a string (case-insensitive).
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "anime" => Ok(Waifu2xStyle::Anime),
+            "photo" => Ok(Waifu2xStyle::Photo),
+            "artwork" => Ok(Waifu2xStyle::Artwork),
+            _ => Err(SrganError::InvalidParameter(format!(
+                "Waifu2x style must be 'anime', 'photo', or 'artwork', got '{}'",
+                s
+            ))),
+        }
+    }
+
+    /// Return the canonical string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Waifu2xStyle::Anime => "anime",
+            Waifu2xStyle::Photo => "photo",
+            Waifu2xStyle::Artwork => "artwork",
+        }
+    }
+}
+
+impl std::fmt::Display for Waifu2xStyle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Waifu2x-specific configuration options.
 ///
-/// Waifu2x supports noise reduction (levels 0–3) and two scale factors.
-/// These options are passed alongside the model label `"waifu2x"` and map
-/// to the label variants used by `UpscalingNetwork::from_label` /
-/// `ThreadSafeNetwork::from_label`.
+/// Waifu2x supports noise reduction (levels 0–3), two scale factors, and
+/// a content style hint (anime, photo, artwork).  These options are passed
+/// alongside the model label `"waifu2x"` and map to the label variants
+/// used by `UpscalingNetwork::from_label` / `ThreadSafeNetwork::from_label`.
 #[derive(Debug, Clone)]
 pub struct Waifu2xConfig {
     /// Noise-reduction level (0 = none, 1 = light, 2 = medium, 3 = aggressive).
     pub noise_level: u8,
     /// Upscaling factor (1 or 2).
     pub scale: u8,
+    /// Content style hint for weight selection.
+    pub style: Waifu2xStyle,
 }
 
 impl Default for Waifu2xConfig {
@@ -246,6 +301,7 @@ impl Default for Waifu2xConfig {
         Self {
             noise_level: 1,
             scale: 2,
+            style: Waifu2xStyle::default(),
         }
     }
 }
@@ -264,7 +320,14 @@ impl Waifu2xConfig {
                 scale
             )));
         }
-        Ok(Self { noise_level, scale })
+        Ok(Self { noise_level, scale, style: Waifu2xStyle::default() })
+    }
+
+    /// Build with an explicit style.
+    pub fn with_style(noise_level: u8, scale: u8, style: Waifu2xStyle) -> Result<Self> {
+        let mut cfg = Self::new(noise_level, scale)?;
+        cfg.style = style;
+        Ok(cfg)
     }
 
     /// Return the model-label string understood by `from_label`.

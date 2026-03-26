@@ -20,7 +20,7 @@
 //! which was trained on the same class of content and provides equivalent
 //! upscaling quality at ×4.
 
-use crate::config::Waifu2xConfig;
+use crate::config::{Waifu2xConfig, Waifu2xStyle};
 use crate::error::{Result, SrganError};
 use image::GenericImage;
 
@@ -110,6 +110,7 @@ impl std::fmt::Display for Waifu2xScale {
 pub struct Waifu2xNetwork {
     noise_level: NoiseLevel,
     scale: Waifu2xScale,
+    style: Waifu2xStyle,
 }
 
 impl Waifu2xNetwork {
@@ -120,13 +121,23 @@ impl Waifu2xNetwork {
     pub fn from_config(config: &Waifu2xConfig) -> Result<Self> {
         let noise_level = NoiseLevel::from_u8(config.noise_level);
         let scale = Waifu2xScale::from_u8(config.scale);
-        Ok(Self { noise_level, scale })
+        Ok(Self { noise_level, scale, style: config.style })
     }
 
     /// Load from a canonical label such as `"waifu2x"` or
     /// `"waifu2x-noise2-scale2"`.
+    ///
+    /// Uses the default style (`Anime`).  To specify a style, use
+    /// [`from_label_with_style`] or [`from_config`].
     pub fn from_label(label: &str) -> Result<Self> {
         let config = parse_label(label)?;
+        Self::from_config(&config)
+    }
+
+    /// Load from a label with an explicit style override.
+    pub fn from_label_with_style(label: &str, style: Waifu2xStyle) -> Result<Self> {
+        let mut config = parse_label(label)?;
+        config.style = style;
         Self::from_config(&config)
     }
 
@@ -140,8 +151,22 @@ impl Waifu2xNetwork {
         self.scale
     }
 
+    /// Content style this instance was built with.
+    pub fn style(&self) -> Waifu2xStyle {
+        self.style
+    }
+
     /// Upscale (and optionally denoise) a [`image::DynamicImage`] using the
     /// waifu2x-compat software path (Lanczos3 resize + unsharp mask).
+    ///
+    /// The `style` parameter adjusts the sharpening profile:
+    /// - `Anime`: stronger edge sharpening (default waifu2x behaviour)
+    /// - `Photo`: gentler sharpening to preserve natural texture
+    /// - `Artwork`: moderate sharpening tuned for digital paintings
+    ///
+    /// TODO: When native waifu2x weights are bundled, replace this with real
+    /// CNN inference and load style-specific weight files (e.g.
+    /// `noise{N}_scale{M}_{style}.json`).
     pub fn upscale_image(
         &self,
         img: &image::DynamicImage,
@@ -156,13 +181,27 @@ impl Waifu2xNetwork {
             img.clone()
         };
 
-        // Step 2: Unsharp-mask sharpening based on noise level.
-        let amount = match self.noise_level {
+        // Step 2: Unsharp-mask sharpening based on noise level, adjusted by
+        // content style.
+        //
+        // Style multipliers:
+        //   Anime   → 1.0× (baseline — waifu2x was designed for anime)
+        //   Artwork → 0.8× (slightly softer for painterly detail)
+        //   Photo   → 0.6× (gentler to preserve natural texture/grain)
+        let style_multiplier = match self.style {
+            Waifu2xStyle::Anime   => 1.0f32,
+            Waifu2xStyle::Artwork => 0.8,
+            Waifu2xStyle::Photo   => 0.6,
+        };
+
+        let base_amount = match self.noise_level {
             NoiseLevel::None   => 0.0f32,
             NoiseLevel::Low    => 0.3,
             NoiseLevel::Medium => 0.5,
             NoiseLevel::High   => 0.8,
         };
+
+        let amount = base_amount * style_multiplier;
 
         if amount < f32::EPSILON {
             return Ok(resized);
@@ -174,8 +213,8 @@ impl Waifu2xNetwork {
     /// Human-readable description of the active configuration.
     pub fn description(&self) -> String {
         format!(
-            "waifu2x-compat noise={} scale={}x (Lanczos3 + unsharp mask)",
-            self.noise_level, self.scale
+            "waifu2x-compat noise={} scale={}x style={} (Lanczos3 + unsharp mask)",
+            self.noise_level, self.scale, self.style
         )
     }
 }
@@ -248,7 +287,7 @@ fn unsharp_mask(img: &image::DynamicImage, amount: f32) -> image::DynamicImage {
 /// - `"waifu2x-noise{0..3}-scale{1,2}"` → explicit parameters
 fn parse_label(label: &str) -> Result<Waifu2xConfig> {
     if label == "waifu2x" {
-        return Ok(Waifu2xConfig { noise_level: 1, scale: 2 });
+        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::default() });
     }
 
     if let Some(rest) = label.strip_prefix("waifu2x-") {
@@ -265,7 +304,7 @@ fn parse_label(label: &str) -> Result<Waifu2xConfig> {
                 .and_then(|s| s.parse::<u8>().ok())
                 .unwrap_or(2);
             let scale = if scale == 1 { 1 } else { 2 };
-            return Ok(Waifu2xConfig { noise_level: noise, scale });
+            return Ok(Waifu2xConfig { noise_level: noise, scale, style: Waifu2xStyle::default() });
         }
     }
 

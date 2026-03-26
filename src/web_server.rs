@@ -156,6 +156,11 @@ pub struct UpscaleRequest {
     /// Waifu2x upscaling factor (1 or 2).
     /// Only used when `model` is `"waifu2x"` (ignored otherwise).
     pub waifu2x_scale: Option<u8>,
+    /// Waifu2x content style: `"anime"` (default), `"photo"`, or `"artwork"`.
+    /// Selects the weight set / sharpening profile best suited for the input.
+    /// Only used when `model` is `"waifu2x"` (ignored otherwise).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waifu2x_style: Option<String>,
     /// When `true` (default) and `model` is `None`, auto-detect the image type
     /// and select the best model automatically.
     #[serde(default = "default_auto_detect")]
@@ -689,13 +694,14 @@ impl WebServer {
             serde_json::json!({
                 "name": "waifu2x",
                 "display_name": "Waifu2x",
-                "description": "Waifu2x-compat: Lanczos3 resize + unsharp-mask noise reduction (noise_level 0–3, scale 1×/2×). Software fallback — no neural network weights required.",
+                "description": "Waifu2x-compat: Lanczos3 resize + unsharp-mask noise reduction (noise_level 0–3, scale 1×/2×, style anime/photo/artwork). Software fallback — no neural network weights required.",
                 "architecture": "waifu2x",
                 "scale_factors": [1, 2],
                 "recommended_for": ["anime", "illustrations", "photos"],
                 "parameters": {
                     "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
-                    "waifu2x_scale": "1 or 2 (default 2)"
+                    "waifu2x_scale": "1 or 2 (default 2)",
+                    "waifu2x_style": "'anime' (default), 'photo', or 'artwork' — selects weight set / sharpening profile"
                 },
                 "variants": crate::waifu2x::WAIFU2X_LABELS,
                 "source": "built-in"
@@ -2053,9 +2059,11 @@ function renderEndpointMetrics(metrics){
     
     /// Resolve the effective model label from an `UpscaleRequest`.
     ///
-    /// When `model` is `"waifu2x"`, the `waifu2x_noise_level` and
-    /// `waifu2x_scale` fields are used to build the canonical label
-    /// (e.g. `"waifu2x-noise1-scale2"`).
+    /// When `model` is `"waifu2x"`, the `waifu2x_noise_level`,
+    /// `waifu2x_scale`, and `waifu2x_style` fields are used to build the
+    /// canonical label (e.g. `"waifu2x-noise1-scale2"`).  The style is
+    /// not encoded in the label — it is passed separately to the
+    /// `Waifu2xNetwork` via [`resolve_waifu2x_style`].
     fn resolve_model_label(request: &UpscaleRequest) -> String {
         match request.model.as_deref() {
             Some("waifu2x") => {
@@ -2069,6 +2077,13 @@ function renderEndpointMetrics(metrics){
             Some(label) => label.to_string(),
             None => "natural".to_string(),
         }
+    }
+
+    /// Resolve the waifu2x style from the request, defaulting to `Anime`.
+    fn resolve_waifu2x_style(request: &UpscaleRequest) -> crate::config::Waifu2xStyle {
+        request.waifu2x_style.as_deref()
+            .and_then(|s| crate::config::Waifu2xStyle::from_str(s).ok())
+            .unwrap_or_default()
     }
 
     /// POST /api/v1/detect — classify image type without upscaling.
@@ -2147,7 +2162,10 @@ function renderEndpointMetrics(metrics){
         let upscaled = if effective_label == "waifu2x"
             || effective_label.starts_with("waifu2x-")
         {
-            let waifu = crate::waifu2x::Waifu2xNetwork::from_label(&effective_label)?;
+            let style = Self::resolve_waifu2x_style(&request);
+            let waifu = crate::waifu2x::Waifu2xNetwork::from_label_with_style(
+                &effective_label, style,
+            )?;
             log::info!("Using {}", waifu.description());
             waifu.upscale_image(&img)?
         } else if effective_label == "natural"

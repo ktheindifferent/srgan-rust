@@ -28,6 +28,7 @@
 //! ```
 
 pub use crate::waifu2x::{NoiseLevel, Waifu2xNetwork, Waifu2xScale, WAIFU2X_LABELS};
+pub use crate::config::Waifu2xStyle;
 
 // ── Waifu2xVariant ────────────────────────────────────────────────────────────
 
