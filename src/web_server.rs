@@ -13,6 +13,7 @@ use crate::error::SrganError;
 use crate::thread_safe_network::ThreadSafeNetwork;
 use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, SubscriptionTier};
 use crate::api::middleware::TierRateLimiter;
+use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
 use crate::storage::S3Config;
 
 fn format_uptime(secs: u64) -> String {
@@ -84,6 +85,9 @@ pub struct UpscaleRequest {
     /// and select the best model automatically.
     #[serde(default = "default_auto_detect")]
     pub auto_detect: bool,
+    /// Optional webhook to call when the job completes (async jobs only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_config: Option<WebhookConfig>,
 }
 
 /// Request body for the `/api/v1/detect` endpoint.
@@ -201,6 +205,9 @@ pub struct JobInfo {
     pub result_url: Option<String>,
     pub result_data: Option<String>,  // base64-encoded result image
     pub error: Option<String>,
+    /// Webhook delivery state (present when a webhook_config was supplied).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_delivery: Option<WebhookDeliveryState>,
 }
 
 /// Web API server
@@ -382,6 +389,10 @@ impl WebServer {
                 ("POST", "/api/v1/billing/checkout") => self.handle_billing_checkout(&request),
                 ("POST", "/api/v1/billing/webhook") => self.handle_billing_webhook(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
+                ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
+                _ if method == "GET"
+                    && (path.starts_with("/api/v1/job/") || path.starts_with("/api/job/"))
+                    && path.ends_with("/webhook") => self.handle_job_webhook_status(path),
                 _ if method == "GET" && (path.starts_with("/api/job/") || path.starts_with("/api/v1/job/")) => self.handle_job_status(path),
                 _ if method == "GET" && (path.starts_with("/api/result/") || path.starts_with("/api/v1/result/")) => self.handle_job_result(path),
                 _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
@@ -514,7 +525,10 @@ impl WebServer {
             Ok(req) => {
                 // Generate job ID
                 let job_id = self.generate_job_id();
-                
+
+                // Extract webhook config before moving req into the thread
+                let webhook_config = req.webhook_config.clone();
+
                 // Create job entry
                 let job = JobInfo {
                     id: job_id.clone(),
@@ -530,20 +544,21 @@ impl WebServer {
                     result_url: None,
                     result_data: None,
                     error: None,
+                    webhook_delivery: webhook_config.as_ref().map(|_| WebhookDeliveryState::default()),
                 };
-                
+
                 if let Ok(mut jobs) = self.jobs.lock() {
                     jobs.insert(job_id.clone(), job.clone());
                 } else {
                     return self.error_response(500, "Failed to acquire job lock");
                 }
-                
+
                 // Start processing in background
                 let jobs = Arc::clone(&self.jobs);
                 let network = Arc::clone(&self.network);
                 let job_id_clone = job_id.clone();
                 let req_clone = req;
-                
+
                 thread::spawn(move || {
                     // Update status to processing
                     if let Ok(mut jobs_guard) = jobs.lock() {
@@ -555,7 +570,7 @@ impl WebServer {
                                 .unwrap_or(0);
                         }
                     }
-                    
+
                     // Process image with thread-safe network, return base64-encoded result
                     let result: std::result::Result<String, SrganError> = (|| {
                         let image_data = general_purpose::STANDARD.decode(&req_clone.image_data)
@@ -577,6 +592,12 @@ impl WebServer {
                         Ok(general_purpose::STANDARD.encode(cursor.into_inner()))
                     })();
 
+                    // Capture outcome for webhook before consuming result
+                    let webhook_status = match &result {
+                        Ok(_) => "completed",
+                        Err(_) => "failed",
+                    };
+
                     // Update job with result
                     if let Ok(mut jobs_guard) = jobs.lock() {
                         if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
@@ -595,6 +616,39 @@ impl WebServer {
                                 .duration_since(UNIX_EPOCH)
                                 .map(|d| d.as_secs())
                                 .unwrap_or(0);
+                        }
+                    }
+
+                    // Fire webhook with retry if configured
+                    if let Some(config) = webhook_config {
+                        if !config.url.is_empty() {
+                            let payload = serde_json::json!({
+                                "job_id": job_id_clone,
+                                "status": webhook_status,
+                                "timestamp": api_unix_now(),
+                            })
+                            .to_string();
+                            let jobs_wh = Arc::clone(&jobs);
+                            let id_wh = job_id_clone.clone();
+                            deliver_webhook(
+                                config.url,
+                                config.secret,
+                                payload,
+                                config.max_retries,
+                                config.retry_delay_secs,
+                                move |attempts, last_status_code, delivered| {
+                                    if let Ok(mut jg) = jobs_wh.lock() {
+                                        if let Some(job) = jg.get_mut(&id_wh) {
+                                            job.webhook_delivery = Some(WebhookDeliveryState {
+                                                attempts,
+                                                last_attempt_at: Some(api_unix_now()),
+                                                last_status_code,
+                                                delivered,
+                                            });
+                                        }
+                                    }
+                                },
+                            );
                         }
                     }
                 });
@@ -618,7 +672,7 @@ impl WebServer {
     /// Handle job status check
     fn handle_job_status(&self, path: &str) -> String {
         let job_id = path.trim_start_matches("/api/job/");
-        
+
         if let Ok(jobs) = self.jobs.lock() {
             if let Some(job) = jobs.get(job_id) {
                 format!(
@@ -633,7 +687,79 @@ impl WebServer {
             self.error_response(500, "Failed to acquire job lock")
         }
     }
-    
+
+    /// GET /api/v1/job/:id/webhook — webhook delivery status for a job.
+    fn handle_job_webhook_status(&self, path: &str) -> String {
+        // Strip prefix and /webhook suffix to extract job id
+        let inner = path
+            .trim_start_matches("/api/v1/job/")
+            .trim_start_matches("/api/job/");
+        let job_id = inner.trim_end_matches("/webhook");
+
+        if let Ok(jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get(job_id) {
+                let delivery = job.webhook_delivery.as_ref();
+                let response = serde_json::json!({
+                    "job_id": job_id,
+                    "webhook_configured": delivery.is_some(),
+                    "delivery": delivery,
+                });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    response
+                )
+            } else {
+                self.error_response(404, "Job not found")
+            }
+        } else {
+            self.error_response(500, "Failed to acquire job lock")
+        }
+    }
+
+    /// POST /api/v1/webhook/test — fire a one-shot test ping to a provided URL.
+    fn handle_webhook_test(&self, request: &str) -> String {
+        #[derive(serde::Deserialize)]
+        struct TestWebhookRequest {
+            url: String,
+            secret: Option<String>,
+        }
+
+        let body = self.extract_body(request);
+        let req: TestWebhookRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        if req.url.is_empty() {
+            return self.error_response(400, "url is required");
+        }
+
+        let payload = serde_json::json!({
+            "event": "ping",
+            "timestamp": api_unix_now(),
+        })
+        .to_string();
+
+        deliver_webhook(
+            req.url.clone(),
+            req.secret,
+            payload,
+            0, // no retries for a test ping
+            0,
+            |_attempts, _status, _delivered| {}, // fire-and-forget, no state to update
+        );
+
+        let response = serde_json::json!({
+            "status": "queued",
+            "url": req.url,
+            "message": "Test ping dispatched",
+        });
+        format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\n\r\n{}",
+            response
+        )
+    }
+
     /// Handle not found
     fn handle_not_found(&self) -> String {
         self.error_response(404, "Not found")

@@ -19,5 +19,10 @@ pub mod upscale;
 pub use auth::{ApiKey, CreateKeyRequest, CreateKeyResponse, KeyStore, KeyTier};
 pub use rate_limit::{ApiRateLimiter, RateLimitResult};
 pub use admin::{AdminStats, check_admin_auth, get_stats};
-pub use upscale::{AsyncUpscaleRequest, AsyncUpscaleResponse, JobPriority, JobRecord, JobStatus, PriorityJobQueue};
+pub use upscale::{
+    deliver_webhook, unix_now,
+    AsyncUpscaleRequest, AsyncUpscaleResponse,
+    JobPriority, JobRecord, JobStatus, PriorityJobQueue,
+    WebhookConfig, WebhookDeliveryState,
+};
 pub use jobs::{JobFilter, JobListResponse, list_jobs};
