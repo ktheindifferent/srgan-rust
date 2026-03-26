@@ -583,7 +583,9 @@ impl WebServer {
 
             // Route request
             let response = match (method, path) {
-                ("GET", "/") => self.handle_root_dashboard(),
+                ("GET", "/") => self.handle_public_ui(),
+                ("GET", "/demo") => self.handle_demo_page(),
+                ("GET", "/dashboard") => self.handle_root_dashboard(),
                 ("GET", "/admin") => self.handle_admin_panel(),
                 ("GET", "/api/me") => self.handle_api_me(&request),
                 ("GET", "/api/admin/users") => self.handle_admin_users(&request),
@@ -592,7 +594,6 @@ impl WebServer {
                 ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
                 ("GET", "/api/v1/stats") => self.handle_stats(),
                 ("GET", "/api/v1/jobs") | ("GET", "/api/jobs") => self.handle_jobs(&request),
-                ("GET", "/dashboard") => self.handle_dashboard(),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
                 ("POST", "/api/batch") | ("POST", "/api/v1/batch") => self.handle_batch(&request),
@@ -1095,9 +1096,29 @@ impl WebServer {
         )
     }
 
-    // ── New dashboard / admin endpoints ──────────────────────────────────────
+    // ── Public UI endpoints ─────────────────────────────────────────────────
 
-    /// GET / — main web dashboard (SPA; all data fetched via JS)
+    /// GET / — public-facing image upscaling page
+    fn handle_public_ui(&self) -> String {
+        const HTML: &str = include_str!("static/index.html");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            HTML.len(), HTML
+        )
+    }
+
+    /// GET /demo — demo gallery with pre-baked before/after examples
+    fn handle_demo_page(&self) -> String {
+        const HTML: &str = include_str!("static/demo.html");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            HTML.len(), HTML
+        )
+    }
+
+    // ── Dashboard / admin endpoints ──────────────────────────────────────────
+
+    /// GET /dashboard — internal dashboard (SPA; all data fetched via JS)
     fn handle_root_dashboard(&self) -> String {
         let html = r##"<!DOCTYPE html>
 <html lang="en">
@@ -2913,9 +2934,8 @@ function renderEndpointMetrics(metrics){
         )
     }
 
-    fn handle_dashboard(&self) -> String {
-        // All live data is fetched client-side via /api/v1/stats and /api/v1/jobs.
-        // Return a static self-contained SPA with no external dependencies.
+    fn _handle_dashboard_removed(&self) -> String {
+        // Removed: old standalone dashboard replaced by handle_root_dashboard at /dashboard
         let html = r#"<!DOCTYPE html>
 <html lang="en">
 <head>

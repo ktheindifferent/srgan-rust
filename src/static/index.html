@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRGAN-Rust — Image Upscaling</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--accent:#00d4ff;
+  --green:#3fb950;--yellow:#d29922;--red:#f85149;
+  --text:#c9d1d9;--muted:#8b949e;--r:8px;--font:ui-monospace,'Menlo',monospace}
+html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px}
+a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}
+.top-bar{background:var(--bg2);border-bottom:1px solid var(--border);padding:.6rem 1.5rem;
+  display:flex;align-items:center;gap:1rem;font-size:.85rem}
+.top-bar .logo{color:var(--accent);font-weight:700;font-size:1rem;letter-spacing:.03em}
+.top-bar .sep{color:var(--border)}
+.top-bar .link{color:var(--muted);cursor:pointer;transition:color .15s}
+.top-bar .link:hover,.top-bar .link.active{color:var(--accent)}
+.top-bar .right{margin-left:auto;display:flex;align-items:center;gap:.8rem}
+.credit-badge{font-size:.78rem;padding:.2rem .6rem;border-radius:4px;border:1px solid var(--border);background:var(--bg3)}
+.credit-badge.low{border-color:var(--yellow);color:var(--yellow)}
+.credit-badge.ok{border-color:var(--green);color:var(--green)}
+.key-input{font-size:.78rem;padding:.25rem .5rem;background:var(--bg);border:1px solid var(--border);
+  border-radius:4px;color:var(--text);font-family:var(--font);width:180px}
+
+.container{max-width:720px;margin:0 auto;padding:2rem 1.5rem}
+h1{font-size:1.6rem;color:var(--accent);font-weight:700;margin-bottom:.25rem}
+.subtitle{color:var(--muted);font-size:.88rem;margin-bottom:2rem}
+
+.dropzone{border:2px dashed var(--border);border-radius:var(--r);padding:2.5rem 1.5rem;text-align:center;
+  cursor:pointer;transition:all .2s;color:var(--muted);margin-bottom:1.2rem}
+.dropzone.drag,.dropzone:hover{border-color:var(--accent);background:rgba(0,212,255,.04)}
+.dropzone .icon{font-size:2.5rem;margin-bottom:.5rem}
+.dropzone .hint{font-size:.78rem;margin-top:.4rem}
+
+.preview-row{display:none;margin-bottom:1.2rem;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--r);padding:.75rem;align-items:center;gap:.75rem}
+.preview-row.show{display:flex}
+.preview-row img{width:64px;height:64px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
+.preview-info{flex:1}
+.preview-info .name{font-size:.84rem;color:var(--text)}
+.preview-info .size{font-size:.72rem;color:var(--muted)}
+.preview-remove{cursor:pointer;color:var(--muted);font-size:1rem;padding:.25rem}.preview-remove:hover{color:var(--red)}
+
+.options{display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:1.2rem}
+.form-group label{display:block;color:var(--muted);font-size:.78rem;margin-bottom:.35rem}
+.form-group select{width:100%;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--r);padding:.45rem .65rem;color:var(--text);font-family:var(--font);font-size:.86rem}
+.form-group select:focus{outline:none;border-color:var(--accent)}
+
+.btn{display:inline-block;padding:.55rem 1.2rem;border-radius:var(--r);font-family:var(--font);
+  font-size:.88rem;cursor:pointer;border:none;transition:opacity .15s;font-weight:600}
+.btn-p{background:var(--accent);color:#000}.btn-p:hover{opacity:.85}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+
+.progress-area{display:none;margin-top:1.2rem}
+.progress-area.show{display:block}
+.progress-bar-wrap{background:var(--bg3);border-radius:var(--r);height:6px;margin-bottom:.6rem;overflow:hidden}
+.progress-bar{height:100%;background:var(--accent);border-radius:var(--r);width:0%;transition:width .3s}
+.progress-status{font-size:.82rem;color:var(--muted)}
+
+.result-area{display:none;margin-top:1.5rem}
+.result-area.show{display:block}
+.result-title{font-size:1rem;font-weight:700;color:var(--green);margin-bottom:.75rem}
+.compare{display:grid;grid-template-columns:1fr 1fr;gap:.75rem;margin-bottom:1rem}
+.compare-panel{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.compare-panel .label{font-size:.72rem;color:var(--muted);padding:.35rem .55rem;background:var(--bg3);
+  border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.05em}
+.compare-panel img{width:100%;display:block}
+.result-actions{display:flex;gap:.5rem;align-items:center}
+.btn-s{background:var(--bg3);color:var(--text);border:1px solid var(--border);padding:.42rem .9rem;
+  border-radius:var(--r);font-family:var(--font);font-size:.84rem;cursor:pointer;text-decoration:none;display:inline-block}
+.btn-s:hover{border-color:var(--accent)}
+
+.error-msg{color:var(--red);font-size:.84rem;margin-top:.75rem;display:none}
+.error-msg.show{display:block}
+
+@media(max-width:600px){
+  .options{grid-template-columns:1fr}
+  .compare{grid-template-columns:1fr}
+  .container{padding:1.5rem 1rem}
+}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <span class="logo">&#9650; SRGAN-Rust</span>
+  <span class="sep">|</span>
+  <a href="/" class="link active">Upscale</a>
+  <a href="/demo" class="link">Demo</a>
+  <a href="/dashboard" class="link">Dashboard</a>
+  <div class="right">
+    <div class="credit-badge" id="creditBadge" title="API credits remaining">Credits: --</div>
+    <input type="text" class="key-input" id="apiK" placeholder="API key (sk-...)" title="API key for authentication">
+  </div>
+</div>
+
+<div class="container">
+  <h1>Image Upscaling</h1>
+  <p class="subtitle">Upload an image and enhance it with neural network super-resolution.</p>
+
+  <div id="dz" class="dropzone" onclick="document.getElementById('fi').click()">
+    <div class="icon">&#128247;</div>
+    <div>Drag &amp; drop an image or <strong style="color:var(--accent)">browse</strong></div>
+    <div class="hint">PNG, JPG, WebP &middot; max 50 MB</div>
+  </div>
+  <input type="file" id="fi" accept="image/*" style="display:none">
+
+  <div class="preview-row" id="prevRow">
+    <img id="prevImg" alt="preview">
+    <div class="preview-info">
+      <div class="name" id="prevName"></div>
+      <div class="size" id="prevSize"></div>
+    </div>
+    <span class="preview-remove" onclick="clearFile()" title="Remove">&#10005;</span>
+  </div>
+
+  <div class="options">
+    <div class="form-group">
+      <label>Scale Factor</label>
+      <select id="scaleSel">
+        <option value="2">2x</option>
+        <option value="4" selected>4x</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label>Model</label>
+      <select id="modelSel">
+        <option value="auto">Auto-detect</option>
+        <option value="natural">SRGAN (photos)</option>
+        <option value="anime">SRGAN (anime)</option>
+        <option value="waifu2x">Waifu2x</option>
+        <option value="real-esrgan">Real-ESRGAN</option>
+      </select>
+    </div>
+  </div>
+
+  <button class="btn btn-p" id="subBtn" onclick="submitJob()" disabled>Upscale Image</button>
+
+  <div class="error-msg" id="errMsg"></div>
+
+  <div class="progress-area" id="progressArea">
+    <div class="progress-bar-wrap"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="progress-status" id="progressStatus">Uploading...</div>
+  </div>
+
+  <div class="result-area" id="resultArea">
+    <div class="result-title">Upscaling Complete</div>
+    <div class="compare">
+      <div class="compare-panel">
+        <div class="label">Before (original)</div>
+        <img id="beforeImg" alt="original">
+      </div>
+      <div class="compare-panel">
+        <div class="label">After (upscaled)</div>
+        <img id="afterImg" alt="upscaled">
+      </div>
+    </div>
+    <div class="result-actions">
+      <a id="dlLink" class="btn-s" download="upscaled.png">&#8595; Download</a>
+      <button class="btn-s" onclick="resetUI()">Upscale Another</button>
+    </div>
+  </div>
+</div>
+
+<script>
+var apiKey = localStorage.getItem('srgan_k') || '';
+var selFile = null;
+var selFileData = null;
+var pollTimer = null;
+
+document.getElementById('apiK').value = apiKey;
+document.getElementById('apiK').addEventListener('change', function() {
+  apiKey = this.value.trim();
+  localStorage.setItem('srgan_k', apiKey);
+  refreshCredits();
+});
+
+setupDz();
+refreshCredits();
+setInterval(refreshCredits, 30000);
+
+function hdrs() {
+  var h = {};
+  if (apiKey) h['X-API-Key'] = apiKey;
+  return h;
+}
+
+function refreshCredits() {
+  var badge = document.getElementById('creditBadge');
+  fetch('/api/v1/billing/status', { headers: hdrs() })
+    .then(function(r) { return r.ok ? r.json() : null; })
+    .then(function(d) {
+      if (!d) { badge.textContent = 'Credits: --'; badge.className = 'credit-badge'; return; }
+      var c = d.credits_remaining != null ? d.credits_remaining : '--';
+      badge.textContent = 'Credits: ' + c;
+      if (typeof c === 'number' && c < 10) {
+        badge.className = 'credit-badge low';
+        badge.title = 'Low credits! Purchase more to continue upscaling.';
+      } else {
+        badge.className = 'credit-badge ok';
+        badge.title = 'API credits remaining';
+      }
+    })
+    .catch(function() {
+      // Try /api/me as fallback
+      fetch('/api/me', { headers: hdrs() })
+        .then(function(r) { return r.ok ? r.json() : null; })
+        .then(function(d) {
+          if (d && d.credits_remaining != null) {
+            badge.textContent = 'Credits: ' + d.credits_remaining;
+            badge.className = d.credits_remaining < 10 ? 'credit-badge low' : 'credit-badge ok';
+          }
+        }).catch(function() {});
+    });
+}
+
+function setupDz() {
+  var dz = document.getElementById('dz');
+  var fi = document.getElementById('fi');
+  dz.addEventListener('dragover', function(e) { e.preventDefault(); dz.classList.add('drag'); });
+  dz.addEventListener('dragleave', function() { dz.classList.remove('drag'); });
+  dz.addEventListener('drop', function(e) {
+    e.preventDefault(); dz.classList.remove('drag');
+    if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
+  });
+  fi.addEventListener('change', function() { if (fi.files[0]) loadFile(fi.files[0]); });
+}
+
+function loadFile(f) {
+  selFile = f;
+  var r = new FileReader();
+  r.onload = function(e) {
+    selFileData = e.target.result;
+    document.getElementById('prevImg').src = selFileData;
+  };
+  r.readAsDataURL(f);
+  document.getElementById('prevRow').classList.add('show');
+  document.getElementById('prevName').textContent = f.name;
+  document.getElementById('prevSize').textContent = (f.size / 1024).toFixed(1) + ' KB';
+  document.getElementById('subBtn').disabled = false;
+  document.getElementById('dz').style.display = 'none';
+  hideError();
+  hideResult();
+}
+
+function clearFile() {
+  selFile = null; selFileData = null;
+  document.getElementById('prevRow').classList.remove('show');
+  document.getElementById('subBtn').disabled = true;
+  document.getElementById('dz').style.display = '';
+  document.getElementById('fi').value = '';
+  hideError();
+}
+
+function showError(msg) {
+  var el = document.getElementById('errMsg');
+  el.textContent = msg; el.classList.add('show');
+}
+function hideError() { document.getElementById('errMsg').classList.remove('show'); }
+function hideResult() { document.getElementById('resultArea').classList.remove('show'); }
+
+function submitJob() {
+  if (!selFile || !selFileData) return;
+  hideError(); hideResult();
+  var btn = document.getElementById('subBtn');
+  btn.disabled = true;
+
+  var b64 = selFileData;
+  if (b64.indexOf(',') > -1) b64 = b64.split(',')[1];
+
+  var model = document.getElementById('modelSel').value;
+  var scale = parseInt(document.getElementById('scaleSel').value);
+
+  // Auto-detect: call detect endpoint first, then submit
+  if (model === 'auto') {
+    showProgress('Detecting image type...');
+    setProgress(10);
+    fetch('/api/v1/detect', {
+      method: 'POST',
+      headers: Object.assign({ 'Content-Type': 'application/json' }, hdrs()),
+      body: JSON.stringify({ image_data: b64 })
+    }).then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(d) {
+        var detected = (d && d.recommended_model) ? d.recommended_model : 'natural';
+        doSubmit(b64, detected, scale);
+      })
+      .catch(function() { doSubmit(b64, 'natural', scale); });
+  } else {
+    doSubmit(b64, model, scale);
+  }
+}
+
+function doSubmit(b64, model, scale) {
+  showProgress('Uploading...');
+  setProgress(25);
+
+  // Use waifu2x for 2x with waifu2x model; otherwise send scale_factor hint
+  var payload = { image_data: b64, model: model };
+  if (scale) payload.scale_factor = scale;
+
+  fetch('/api/v1/upscale/async', {
+    method: 'POST',
+    headers: Object.assign({ 'Content-Type': 'application/json' }, hdrs()),
+    body: JSON.stringify(payload)
+  }).then(function(res) {
+    return res.json().then(function(d) { return { ok: res.ok, status: res.status, d: d }; });
+  }).then(function(r) {
+    if (!r.ok) {
+      hideProgress();
+      document.getElementById('subBtn').disabled = false;
+      if (r.status === 402) {
+        showError('No credits remaining. Please purchase more credits to continue.');
+      } else {
+        showError('Error: ' + (r.d.error || 'Unknown error'));
+      }
+      return;
+    }
+    setProgress(40);
+    updateStatus('Processing (model: ' + model + ')...');
+    pollJob(r.d.job_id);
+  }).catch(function(e) {
+    hideProgress();
+    document.getElementById('subBtn').disabled = false;
+    showError('Network error: ' + e.message);
+  });
+}
+
+function pollJob(jobId) {
+  if (pollTimer) clearInterval(pollTimer);
+  var dots = 0;
+  pollTimer = setInterval(function() {
+    dots = (dots + 1) % 4;
+    fetch('/api/v1/job/' + jobId, { headers: hdrs() })
+      .then(function(r) { return r.ok ? r.json() : null; })
+      .then(function(d) {
+        if (!d) return;
+        var st = normalizeStatus(d.status);
+        if (st === 'completed') {
+          clearInterval(pollTimer); pollTimer = null;
+          setProgress(100);
+          updateStatus('Done!');
+          setTimeout(function() { showResult(d); }, 300);
+        } else if (st === 'failed') {
+          clearInterval(pollTimer); pollTimer = null;
+          hideProgress();
+          document.getElementById('subBtn').disabled = false;
+          showError('Job failed: ' + (d.error || 'Unknown error'));
+        } else if (st === 'processing') {
+          setProgress(40 + dots * 12);
+          updateStatus('Processing' + '.'.repeat(dots + 1));
+        } else {
+          setProgress(35);
+          updateStatus('Queued' + '.'.repeat(dots + 1));
+        }
+      })
+      .catch(function() {});
+  }, 1500);
+}
+
+function normalizeStatus(s) {
+  if (typeof s === 'string') return s.toLowerCase();
+  if (typeof s === 'object' && s !== null) {
+    if (s.Completed != null || s.completed != null) return 'completed';
+    if (s.Failed != null || s.failed != null) return 'failed';
+    if (s.Processing != null || s.processing != null) return 'processing';
+    if (s.Pending != null || s.pending != null) return 'pending';
+  }
+  return 'pending';
+}
+
+function showProgress(msg) {
+  document.getElementById('progressArea').classList.add('show');
+  document.getElementById('progressStatus').textContent = msg;
+  document.getElementById('progressBar').style.width = '0%';
+}
+function hideProgress() {
+  document.getElementById('progressArea').classList.remove('show');
+}
+function setProgress(pct) {
+  document.getElementById('progressBar').style.width = Math.min(pct, 100) + '%';
+}
+function updateStatus(msg) {
+  document.getElementById('progressStatus').textContent = msg;
+}
+
+function showResult(d) {
+  hideProgress();
+  var area = document.getElementById('resultArea');
+  area.classList.add('show');
+  // Before image
+  if (selFileData) document.getElementById('beforeImg').src = selFileData;
+  // After image
+  var resultSrc;
+  if (d.result_data) {
+    resultSrc = 'data:image/png;base64,' + d.result_data;
+  } else if (d.result_url) {
+    resultSrc = d.result_url;
+  }
+  if (resultSrc) {
+    document.getElementById('afterImg').src = resultSrc;
+    var dl = document.getElementById('dlLink');
+    dl.href = resultSrc;
+    dl.download = 'upscaled_' + (selFile ? selFile.name : 'image') + '.png';
+  }
+  refreshCredits();
+}
+
+function resetUI() {
+  clearFile();
+  hideResult();
+  hideProgress();
+  hideError();
+  document.getElementById('subBtn').disabled = true;
+}
+</script>
+</body>
+</html>
