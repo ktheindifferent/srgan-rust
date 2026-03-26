@@ -1,0 +1,10 @@
+{
+  "name": "natural",
+  "description": "SRGAN trained on natural photographs (UCID dataset). Best for landscape, architecture, and general photography.",
+  "architecture": "srgan",
+  "scale_factor": 4,
+  "version": "1.0.0",
+  "psnr": 30.5,
+  "recommended_for": ["photos", "general", "landscape"],
+  "auto_select_for": ["photograph", "face-heavy"]
+}

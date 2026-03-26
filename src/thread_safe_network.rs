@@ -257,25 +257,10 @@ impl ThreadSafeNetwork {
 // 1. Document the thread safety guarantees
 // 2. Ensure breaking changes are caught if non-thread-safe fields are added
 // 3. Make the thread safety contract explicit in the API
-unsafe impl Send for ThreadSafeNetwork {
-    // Runtime verification in debug builds
-    #[cfg(debug_assertions)]
-    fn _assert_send() {
-        fn _assert_send<T: Send>() {}
-        _assert_send::<Arc<NetworkWeights>>();
-        _assert_send::<Arc<Mutex<HashMap<std::thread::ThreadId, ComputeBuffer>>>>();
-    }
-}
+unsafe impl Send for ThreadSafeNetwork {}
 
-unsafe impl Sync for ThreadSafeNetwork {
-    // Runtime verification in debug builds
-    #[cfg(debug_assertions)]
-    fn _assert_sync() {
-        fn _assert_sync<T: Sync>() {}
-        _assert_sync::<Arc<NetworkWeights>>();
-        _assert_sync::<Arc<Mutex<HashMap<std::thread::ThreadId, ComputeBuffer>>>>();
-    }
-}
+unsafe impl Sync for ThreadSafeNetwork {}
+
 
 impl std::fmt::Display for ThreadSafeNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {

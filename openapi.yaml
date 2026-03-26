@@ -1,0 +1,849 @@
+openapi: "3.0.3"
+info:
+  title: SRGAN-Rust API
+  description: |
+    REST API for the SRGAN-Rust super-resolution service.
+
+    ## Authentication
+
+    Two schemes are supported — supply **one** per request:
+
+    * **Bearer JWT** — `Authorization: Bearer <token>`
+    * **API Key** — `X-API-Key: <key>` header, or `api_key` query parameter
+
+    ## Rate limiting
+
+    Default: **60 requests/min** per authenticated client.
+    The `X-RateLimit-*` headers are present on every response.
+    Exceed the limit and you receive `429 Too Many Requests`.
+
+    ## Async jobs
+
+    Large images are best submitted via `/upscale/async`.
+    Poll `/jobs/{job_id}` or supply a `callback_url` for a webhook.
+  version: "0.2.0"
+  contact:
+    name: SRGAN-Rust
+    url: https://github.com/your-org/srgan-rust
+  license:
+    name: MIT
+
+servers:
+  - url: https://api.srgan.example.com/api/v1
+    description: Production
+  - url: http://localhost:8080/api/v1
+    description: Local development
+
+tags:
+  - name: upscale
+    description: Image super-resolution endpoints
+  - name: jobs
+    description: Async job management
+  - name: models
+    description: Model discovery and management
+  - name: health
+    description: Service health and metrics
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Security schemes
+# ─────────────────────────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT issued by the `/auth/token` endpoint (not yet public).
+    ApiKeyHeader:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    ApiKeyQuery:
+      type: apiKey
+      in: query
+      name: api_key
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Reusable schemas
+  # ───────────────────────────────────────────────────────────────────────────
+  schemas:
+
+    # ── Request bodies ──────────────────────────────────────────────────────
+
+    UpscaleRequest:
+      type: object
+      required: [image_base64]
+      properties:
+        image_base64:
+          type: string
+          format: byte
+          description: Base64-encoded input image (PNG or JPEG).
+          example: "/9j/4AAQSkZJRgAB..."
+        scale_factor:
+          type: integer
+          enum: [2, 4, 8]
+          default: 4
+          description: Upscaling multiplier.
+        model:
+          type: string
+          enum: [natural, anime, bilinear]
+          default: natural
+          description: Which pre-trained model to use.
+        output_format:
+          type: string
+          enum: [png, jpeg, webp]
+          default: png
+          description: Encoding of the returned image.
+        quality:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 85
+          description: JPEG/WebP output quality (ignored for PNG).
+        callback_url:
+          type: string
+          format: uri
+          description: |
+            If provided, the result is POSTed here instead of being returned
+            inline. Useful with `/upscale/async`.
+
+    AsyncUpscaleRequest:
+      allOf:
+        - $ref: '#/components/schemas/UpscaleRequest'
+        - type: object
+          properties:
+            priority:
+              type: string
+              enum: [low, normal, high]
+              default: normal
+              description: Job queue priority.
+
+    # ── Response bodies ─────────────────────────────────────────────────────
+
+    UpscaleResponse:
+      type: object
+      required: [success, image_base64, metadata]
+      properties:
+        success:
+          type: boolean
+          example: true
+        image_base64:
+          type: string
+          format: byte
+          description: Base64-encoded upscaled image.
+        metadata:
+          $ref: '#/components/schemas/ResponseMetadata'
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Non-fatal processing notes.
+
+    ResponseMetadata:
+      type: object
+      properties:
+        processing_time_ms:
+          type: integer
+          example: 1240
+        input_width:
+          type: integer
+          example: 256
+        input_height:
+          type: integer
+          example: 256
+        output_width:
+          type: integer
+          example: 1024
+        output_height:
+          type: integer
+          example: 1024
+        model_used:
+          type: string
+          example: natural
+        scale_factor:
+          type: integer
+          example: 4
+        psnr:
+          type: number
+          format: float
+          description: PSNR vs. bicubic baseline (dB), if computed.
+          example: 32.5
+        ssim:
+          type: number
+          format: float
+          description: SSIM score (0–1), if computed.
+          example: 0.94
+        cached:
+          type: boolean
+          example: false
+
+    AsyncJobResponse:
+      type: object
+      required: [job_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          example: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        created_at:
+          type: string
+          format: date-time
+        estimated_completion_ms:
+          type: integer
+          description: Rough ETA in milliseconds.
+          example: 3000
+        queue_position:
+          type: integer
+          example: 2
+
+    JobStatus:
+      type: string
+      enum: [queued, processing, completed, failed, cancelled]
+
+    JobStatusResponse:
+      type: object
+      required: [job_id, status, created_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        status:
+          $ref: '#/components/schemas/JobStatus'
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        progress_pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          example: 72
+        error:
+          type: string
+          nullable: true
+        result_url:
+          type: string
+          format: uri
+          nullable: true
+          description: Signed URL to download the result (valid 1 hour after completion).
+
+    ModelInfo:
+      type: object
+      required: [name, description, scale_factor]
+      properties:
+        name:
+          type: string
+          example: natural
+        description:
+          type: string
+          example: General-purpose natural image upscaling (UCID dataset)
+        scale_factor:
+          type: integer
+          example: 4
+        file_size_bytes:
+          type: integer
+          example: 2097152
+        version:
+          type: string
+          example: "1.0.0"
+        downloaded:
+          type: boolean
+          example: true
+        sha256:
+          type: string
+          example: "e3b0c44298fc1c149afb..."
+
+    ModelsListResponse:
+      type: object
+      required: [models]
+      properties:
+        models:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelInfo'
+
+    HealthStatus:
+      type: object
+      required: [status, version, uptime_seconds]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+          example: healthy
+        version:
+          type: string
+          example: "0.2.0"
+        uptime_seconds:
+          type: integer
+          example: 86400
+        requests_total:
+          type: integer
+          example: 14200
+        requests_per_minute:
+          type: number
+          example: 9.8
+        errors_total:
+          type: integer
+          example: 12
+        cache_hit_rate:
+          type: number
+          format: float
+          example: 0.73
+        active_jobs:
+          type: integer
+          example: 3
+        queue_depth:
+          type: integer
+          example: 7
+        models_loaded:
+          type: array
+          items:
+            type: string
+          example: [natural, anime]
+
+    # ── Error ────────────────────────────────────────────────────────────────
+
+    ApiError:
+      type: object
+      required: [error, code]
+      properties:
+        error:
+          type: string
+          description: Human-readable error message.
+          example: "Input image exceeds maximum size of 50 MB"
+        code:
+          type: string
+          description: Machine-readable error code.
+          example: "PAYLOAD_TOO_LARGE"
+        details:
+          type: object
+          additionalProperties: true
+          description: Optional structured context.
+        request_id:
+          type: string
+          example: "req_01HXYZ"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Reusable responses
+  # ───────────────────────────────────────────────────────────────────────────
+  responses:
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: "Authentication required"
+            code: "UNAUTHORIZED"
+
+    Forbidden:
+      description: Insufficient permissions for this operation.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: "API key does not have permission to use high-priority jobs"
+            code: "FORBIDDEN"
+
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds until the rate limit resets.
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: "Rate limit exceeded — retry after 42 seconds"
+            code: "RATE_LIMITED"
+
+    NotFound:
+      description: Resource not found.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: "Job not found"
+            code: "NOT_FOUND"
+
+    UnprocessableEntity:
+      description: Validation error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: "scale_factor must be 2, 4, or 8"
+            code: "VALIDATION_ERROR"
+
+    InternalServerError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+          example:
+            error: "Internal server error"
+            code: "INTERNAL_ERROR"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Common parameters
+  # ───────────────────────────────────────────────────────────────────────────
+  parameters:
+    JobId:
+      name: job_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: UUID of the async job.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Global security (can be overridden per operation)
+# ─────────────────────────────────────────────────────────────────────────────
+security:
+  - BearerAuth: []
+  - ApiKeyHeader: []
+  - ApiKeyQuery: []
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Paths
+# ─────────────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Synchronous upscale ──────────────────────────────────────────────────
+
+  /upscale:
+    post:
+      operationId: upscaleImage
+      tags: [upscale]
+      summary: Upscale an image (synchronous)
+      description: |
+        Upscales the provided image synchronously.
+        The response body contains the full upscaled image encoded in base64.
+        For images > 4 MP, consider `/upscale/async` to avoid timeout issues.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpscaleRequest'
+            example:
+              image_base64: "/9j/4AAQSkZJRgAB..."
+              scale_factor: 4
+              model: natural
+              output_format: png
+      responses:
+        "200":
+          description: Upscaled image returned inline.
+          headers:
+            X-Processing-Time-Ms:
+              schema:
+                type: integer
+            X-RateLimit-Remaining:
+              schema:
+                type: integer
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpscaleResponse'
+              example:
+                success: true
+                image_base64: "iVBORw0KGgoAAAANSUhEUgAA..."
+                metadata:
+                  processing_time_ms: 1240
+                  input_width: 256
+                  input_height: 256
+                  output_width: 1024
+                  output_height: 1024
+                  model_used: natural
+                  scale_factor: 4
+                  psnr: 32.5
+                  ssim: 0.94
+                  cached: false
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/TooManyRequests'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── Async upscale ────────────────────────────────────────────────────────
+
+  /upscale/async:
+    post:
+      operationId: upscaleImageAsync
+      tags: [upscale, jobs]
+      summary: Submit an upscaling job (asynchronous)
+      description: |
+        Enqueues the image for upscaling and returns a `job_id` immediately.
+        Poll `GET /jobs/{job_id}` for status, or supply a `callback_url`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AsyncUpscaleRequest'
+            example:
+              image_base64: "/9j/4AAQSkZJRgAB..."
+              scale_factor: 4
+              model: anime
+              priority: normal
+              callback_url: "https://your-app.example.com/webhook/srgan"
+      responses:
+        "202":
+          description: Job accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncJobResponse'
+              example:
+                job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                status: queued
+                created_at: "2026-03-26T12:00:00Z"
+                estimated_completion_ms: 3000
+                queue_position: 2
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/TooManyRequests'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+        "500":
+          $ref: '#/components/responses/InternalServerError'
+
+  # ── Multipart upscale (file upload) ─────────────────────────────────────
+
+  /upscale/file:
+    post:
+      operationId: upscaleFile
+      tags: [upscale]
+      summary: Upscale an image via multipart file upload
+      description: |
+        Convenience endpoint for browser/CLI clients that can't easily
+        base64-encode images. Returns the upscaled image as a binary file
+        download.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Image file to upscale.
+                scale_factor:
+                  type: integer
+                  enum: [2, 4, 8]
+                  default: 4
+                model:
+                  type: string
+                  enum: [natural, anime, bilinear]
+                  default: natural
+                output_format:
+                  type: string
+                  enum: [png, jpeg, webp]
+                  default: png
+                quality:
+                  type: integer
+                  minimum: 1
+                  maximum: 100
+                  default: 85
+      responses:
+        "200":
+          description: Upscaled image as binary download.
+          headers:
+            Content-Disposition:
+              schema:
+                type: string
+              example: 'attachment; filename="upscaled.png"'
+            X-Processing-Time-Ms:
+              schema:
+                type: integer
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "413":
+          description: Upload exceeds max size (default 50 MB).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        "422":
+          $ref: '#/components/responses/UnprocessableEntity'
+        "429":
+          $ref: '#/components/responses/TooManyRequests'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Jobs ─────────────────────────────────────────────────────────────────
+
+  /jobs/{job_id}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get job status
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        "200":
+          description: Job status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatusResponse'
+              example:
+                job_id: "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+                status: completed
+                created_at: "2026-03-26T12:00:00Z"
+                started_at: "2026-03-26T12:00:01Z"
+                completed_at: "2026-03-26T12:00:04Z"
+                progress_pct: 100
+                error: null
+                result_url: "https://cdn.srgan.example.com/results/3fa85f64.png?sig=..."
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+    delete:
+      operationId: cancelJob
+      tags: [jobs]
+      summary: Cancel a queued or in-progress job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        "204":
+          description: Job cancelled.
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Job already completed or cancelled.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /jobs/{job_id}/result:
+    get:
+      operationId: downloadJobResult
+      tags: [jobs]
+      summary: Download the upscaled image for a completed job
+      parameters:
+        - $ref: '#/components/parameters/JobId'
+      responses:
+        "200":
+          description: Upscaled image binary.
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: '#/components/responses/NotFound'
+        "409":
+          description: Job not yet completed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List jobs for the authenticated client
+      parameters:
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/JobStatus'
+          description: Filter by status.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Paginated job list.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JobStatusResponse'
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer
+        "401":
+          $ref: '#/components/responses/Unauthorized'
+
+  # ── Models ───────────────────────────────────────────────────────────────
+
+  /models:
+    get:
+      operationId: listModels
+      tags: [models]
+      summary: List available models
+      security: []   # public endpoint
+      responses:
+        "200":
+          description: List of available models.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsListResponse'
+              example:
+                models:
+                  - name: natural
+                    description: General-purpose natural image upscaling (UCID dataset)
+                    scale_factor: 4
+                    file_size_bytes: 2097152
+                    version: "1.0.0"
+                    downloaded: true
+                    sha256: "e3b0c44298fc1c149afb..."
+                  - name: anime
+                    description: Anime/illustration-optimised upscaling
+                    scale_factor: 4
+                    file_size_bytes: 2097152
+                    version: "1.0.0"
+                    downloaded: true
+                    sha256: "a1b2c3d4e5f6..."
+
+  /models/{name}:
+    get:
+      operationId: getModel
+      tags: [models]
+      summary: Get details for a specific model
+      security: []
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [natural, anime, bilinear]
+      responses:
+        "200":
+          description: Model details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelInfo'
+        "404":
+          $ref: '#/components/responses/NotFound'
+
+  # ── Health ───────────────────────────────────────────────────────────────
+
+  /health:
+    get:
+      operationId: getHealth
+      tags: [health]
+      summary: Service health check
+      description: Used by Kubernetes liveness/readiness probes.
+      security: []
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+              example:
+                status: healthy
+                version: "0.2.0"
+                uptime_seconds: 86400
+                requests_total: 14200
+                requests_per_minute: 9.8
+                errors_total: 12
+                cache_hit_rate: 0.73
+                active_jobs: 3
+                queue_depth: 7
+                models_loaded: [natural, anime]
+        "503":
+          description: Service is unhealthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /metrics:
+    get:
+      operationId: getMetrics
+      tags: [health]
+      summary: Prometheus metrics endpoint
+      security: []
+      responses:
+        "200":
+          description: Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string

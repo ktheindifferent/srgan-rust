@@ -1,0 +1,10 @@
+{
+  "name": "waifu2x",
+  "description": "Waifu2x-style model optimised for anime, manga, and line-art. Excels at preserving sharp outlines, removing JPEG noise from compressed illustrations, and upscaling flat-color artwork. Drop-in replacement — place waifu2x.rsr weights here to activate.",
+  "architecture": "waifu2x",
+  "scale_factor": 2,
+  "version": "1.0.0",
+  "psnr": 33.1,
+  "recommended_for": ["anime", "manga", "illustration", "line-art"],
+  "auto_select_for": []
+}

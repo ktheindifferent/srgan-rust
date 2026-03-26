@@ -31,6 +31,10 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_server_subcommand())
 		.subcommand(build_download_model_subcommand())
 		.subcommand(build_models_subcommand())
+		.subcommand(build_compare_subcommand())
+		.subcommand(build_completions_subcommand())
+		.subcommand(build_classify_subcommand())
+		.subcommand(build_batch_status_subcommand())
 		.get_matches()
 }
 
@@ -253,6 +257,53 @@ fn build_batch_subcommand() -> App<'static, 'static> {
 				.help("Number of images to process per batch (default: 10)")
 				.value_name("SIZE")
 				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("RESUME")
+				.long("resume")
+				.help("Resume an interrupted batch using batch_state.json in the output directory")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("ERRORS_LOG")
+				.long("errors-log")
+				.help("Path for the error log (default: <OUTPUT_DIR>/batch_errors.log)")
+				.value_name("FILE")
+				.empty_values(false),
+		)
+		.arg(
+			Arg::with_name("WEBHOOK")
+				.long("webhook")
+				.help("HTTP URL to POST a JSON completion notification to when the batch finishes")
+				.value_name("URL")
+				.empty_values(false),
+		)
+}
+
+fn build_batch_status_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("batch-status")
+		.about("Show progress of a running or interrupted batch job")
+		.arg(
+			Arg::with_name("DIR")
+				.help("Output directory that contains batch_state.json (default: current directory)")
+				.index(1),
+		)
+}
+
+fn build_classify_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("classify")
+		.about("Detect the type of an image and recommend the best upscaling model")
+		.arg(
+			Arg::with_name("IMAGE")
+				.help("Image file to classify")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("json")
+				.long("json")
+				.help("Output result as JSON")
+				.takes_value(false),
 		)
 }
 
@@ -710,6 +761,56 @@ fn build_models_subcommand() -> App<'static, 'static> {
 						.long("dir")
 						.value_name("DIR"),
 				),
+		)
+}
+
+fn build_compare_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("compare")
+		.about("Compare an input image with its upscaled version (PSNR, SSIM, histogram)")
+		.long_about(
+			"Computes PSNR, SSIM, file-size ratio, and a pixel-difference histogram\n\
+			 between INPUT and UPSCALED.  Also saves a side-by-side centre-crop\n\
+			 comparison image.\n\n\
+			 Examples:\n  srgan-rust compare original.png upscaled.png\n  \
+			 srgan-rust compare original.png upscaled.png --output comparison.jpg",
+		)
+		.arg(
+			Arg::with_name("INPUT")
+				.help("Original (low-resolution) image")
+				.required(true)
+				.index(1),
+		)
+		.arg(
+			Arg::with_name("UPSCALED")
+				.help("Upscaled image to evaluate")
+				.required(true)
+				.index(2),
+		)
+		.arg(
+			Arg::with_name("OUTPUT")
+				.help("Path for the side-by-side comparison image (default: comparison.jpg)")
+				.short("o")
+				.long("output")
+				.value_name("FILE"),
+		)
+}
+
+fn build_completions_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("completions")
+		.about("Generate shell completion scripts")
+		.long_about(
+			"Prints a shell completion script to stdout.\n\n\
+			 Examples:\n  \
+			 srgan-rust completions bash >> ~/.bash_completion\n  \
+			 srgan-rust completions zsh  > ~/.zfunc/_srgan-rust\n  \
+			 srgan-rust completions fish > ~/.config/fish/completions/srgan-rust.fish",
+		)
+		.arg(
+			Arg::with_name("shell")
+				.help("Target shell")
+				.required(true)
+				.index(1)
+				.possible_values(&["bash", "zsh", "fish", "powershell"]),
 		)
 }
 

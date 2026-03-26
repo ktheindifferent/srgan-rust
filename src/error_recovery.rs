@@ -4,7 +4,6 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use backtrace::Backtrace;
 use thiserror::Error;
 use tracing::{error, warn, info, debug};
 
@@ -16,56 +15,56 @@ pub enum EnhancedError {
         message: String,
         #[source]
         source: io::Error,
-        backtrace: Backtrace,
+        bt: String,
     },
-    
+
     #[error("Image processing error: {message}")]
     Image {
         message: String,
         #[source]
         source: image::ImageError,
-        backtrace: Backtrace,
+        bt: String,
     },
-    
+
     #[error("Network error: {message}")]
     Network {
         message: String,
-        backtrace: Backtrace,
+        bt: String,
         retryable: bool,
     },
-    
+
     #[error("Validation error: {message}")]
     Validation {
         message: String,
         field: Option<String>,
-        backtrace: Backtrace,
+        bt: String,
     },
-    
+
     #[error("Transient error (retryable): {message}")]
     Transient {
         message: String,
         retry_after: Option<Duration>,
-        backtrace: Backtrace,
+        bt: String,
     },
-    
+
     #[error("Permanent error: {message}")]
     Permanent {
         message: String,
-        backtrace: Backtrace,
+        bt: String,
     },
-    
+
     #[error("Rate limit exceeded: {message}")]
     RateLimit {
         message: String,
         retry_after: Duration,
-        backtrace: Backtrace,
+        bt: String,
     },
-    
+
     #[error("Circuit breaker open: {message}")]
     CircuitBreakerOpen {
         message: String,
         reset_after: Duration,
-        backtrace: Backtrace,
+        bt: String,
     },
 }
 
@@ -95,15 +94,15 @@ impl EnhancedError {
         EnhancedError::Transient {
             message: message.into(),
             retry_after,
-            backtrace: Backtrace::new(),
+            bt: String::new(),
         }
     }
-    
+
     /// Create a permanent error
     pub fn permanent<S: Into<String>>(message: S) -> Self {
         EnhancedError::Permanent {
             message: message.into(),
-            backtrace: Backtrace::new(),
+            bt: String::new(),
         }
     }
 }
@@ -307,7 +306,7 @@ impl CircuitBreaker {
                     return Err(EnhancedError::CircuitBreakerOpen {
                         message: "Circuit breaker is open".to_string(),
                         reset_after: remaining,
-                        backtrace: Backtrace::new(),
+                        bt: String::new(),
                     });
                 }
             }
@@ -380,7 +379,7 @@ pub enum RecoveryStrategy {
 /// Error aggregator for batch operations
 #[derive(Debug, Default)]
 pub struct ErrorAggregator {
-    errors: dashmap::DashMap<String, Vec<(PathBuf, String, Backtrace)>>,
+    errors: dashmap::DashMap<String, Vec<(PathBuf, String, String)>>,
     error_counts: dashmap::DashMap<String, usize>,
     total_errors: std::sync::atomic::AtomicUsize,
 }
@@ -393,12 +392,10 @@ impl ErrorAggregator {
     pub fn record_error(&self, category: impl Into<String>, path: PathBuf, message: impl Into<String>) {
         let category = category.into();
         let message = message.into();
-        let backtrace = Backtrace::new();
-        
         self.errors
             .entry(category.clone())
             .or_insert_with(Vec::new)
-            .push((path, message, backtrace));
+            .push((path, message, String::new()));
         
         self.error_counts
             .entry(category)
@@ -447,7 +444,7 @@ pub struct ErrorSummary {
 pub struct ErrorCategory {
     pub name: String,
     pub count: usize,
-    pub sample_errors: Vec<(PathBuf, String, Backtrace)>,
+    pub sample_errors: Vec<(PathBuf, String, String)>,
 }
 
 impl fmt::Display for ErrorSummary {

@@ -22,6 +22,7 @@ extern crate xz2;
 pub mod api;
 pub mod storage;
 pub mod aligned_crop;
+pub mod image_classifier;
 pub mod benchmarks;
 pub mod cli;
 pub mod commands;

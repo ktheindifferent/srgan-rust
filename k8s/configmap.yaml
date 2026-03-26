@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: srgan-config
+  namespace: srgan
+  labels:
+    app: srgan-api
+data:
+  RUST_LOG: "info"
+  SRGAN_MODEL_PATH: "/models"
+  SRGAN_CACHE_DIR: "/tmp/srgan-cache"
+  SRGAN_MAX_WORKERS: "4"
+  RATE_LIMIT_RPM: "60"
+  MAX_UPLOAD_SIZE: "50MB"

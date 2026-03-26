@@ -123,7 +123,7 @@ fn setup_panic_handler() {
         }
         
         // Increment panic counter
-        metrics::increment_counter!("srgan_panics_total", 1);
+        metrics::increment_counter!("srgan_panics_total");
         
         // Call the default panic handler
         default_panic(panic_info);

@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, BTreeMap};
+use std::convert::TryInto;
 use std::io::{Read, Cursor, Seek, SeekFrom};
 use std::path::Path;
 use std::fs::File;
@@ -116,9 +117,10 @@ impl PyTorchParser {
 
         if !found_model {
             // Try to find any .pkl file
-            archive.by_index(0)
-                .and_then(|mut f| f.read_to_end(&mut model_data))
+            let mut f = archive.by_index(0)
                 .map_err(|e| SrganError::Parse(format!("No model data found in ZIP: {}", e)))?;
+            f.read_to_end(&mut model_data)
+                .map_err(|e| SrganError::Parse(format!("Failed to read model data: {}", e)))?;
         }
 
         // Parse the extracted pickle data
@@ -677,13 +679,14 @@ impl PyTorchParser {
     }
 
     /// Extract tensor from dictionary
-    fn extract_tensor_from_dict(&self, dict: HashMap<HashableValue, Value>) -> Result<Vec<f32>, SrganError> {
+    fn extract_tensor_from_dict(&self, dict: std::collections::BTreeMap<HashableValue, Value>) -> Result<Vec<f32>, SrganError> {
         // Check for PyTorch tensor structure
         let storage_keys = ["storage", "_storage", "data", "_data"];
         
         for key in storage_keys {
-            let hashable_key = HashableValue::String(key.into());
-            if let Some(storage) = dict.get(&hashable_key) {
+            if let Some((_, storage)) = dict.iter().find(|(k, _)| {
+                matches!(k, HashableValue::String(s) if s.as_str() == key)
+            }) {
                 if let Ok(data) = self.extract_tensor_data(storage.clone()) {
                     if !data.is_empty() {
                         return Ok(data);

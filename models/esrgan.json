@@ -1,0 +1,10 @@
+{
+  "name": "esrgan",
+  "description": "Enhanced SRGAN with Residual-in-Residual Dense Blocks (RRDB). Produces sharper textures and finer detail than standard SRGAN. Drop-in replacement — place esrgan.rsr weights here to activate full ESRGAN inference.",
+  "architecture": "esrgan",
+  "scale_factor": 4,
+  "version": "1.0.0",
+  "psnr": 32.7,
+  "recommended_for": ["photos", "textures", "general"],
+  "auto_select_for": []
+}

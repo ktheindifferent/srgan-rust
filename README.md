@@ -235,6 +235,53 @@ Bug reports and feature requests via [GitHub Issues](https://github.com/your-org
 
 ---
 
+## Kubernetes Deployment
+
+All manifests live in `k8s/`. Apply them in order:
+
+```bash
+# 1. Create namespace
+kubectl create namespace srgan
+
+# 2. Populate secrets (never commit real values — see k8s/secret.yaml for the template)
+kubectl create secret generic srgan-secrets \
+  --from-literal=JWT_SECRET=<jwt-secret> \
+  --from-literal=API_KEY=<api-key> \
+  --from-literal=STRIPE_KEY=<stripe-key> \
+  --from-literal=S3_ACCESS_KEY=<s3-access-key> \
+  --from-literal=S3_SECRET_KEY=<s3-secret-key> \
+  -n srgan
+
+# 3. Apply all manifests
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/pvc.yaml
+kubectl apply -f k8s/deployment.yaml
+kubectl apply -f k8s/service.yaml
+kubectl apply -f k8s/hpa.yaml
+kubectl apply -f k8s/ingress.yaml
+
+# 4. Watch rollout
+kubectl rollout status deployment/srgan-api -n srgan
+```
+
+### Manifest overview
+
+| File | Purpose |
+|------|---------|
+| `deployment.yaml` | 3-replica Deployment with liveness/readiness probes, resource limits, pod anti-affinity |
+| `service.yaml` | ClusterIP Service on port 8080 (+ 9090 for Prometheus metrics) |
+| `ingress.yaml` | nginx Ingress with TLS (cert-manager) and rate-limiting annotations |
+| `hpa.yaml` | HorizontalPodAutoscaler — scales 2–10 pods on CPU > 70 % |
+| `pvc.yaml` | 5 Gi ReadOnlyMany PVC for the `/models` directory |
+| `configmap.yaml` | Non-secret runtime config (log level, worker count, upload limits) |
+| `secret.yaml` | Template for JWT_SECRET, STRIPE_KEY, S3 credentials, API key |
+
+### Resource requirements
+
+Each pod is allocated **0.5–2 CPU cores** and **512 Mi – 2 Gi** RAM. For GPU nodes, add a `resources.limits."nvidia.com/gpu": "1"` entry to `deployment.yaml` and schedule onto a GPU node pool.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

@@ -172,7 +172,7 @@ impl OperationLogger {
             "Operation failed"
         );
         
-        metrics::increment_counter!("srgan_errors_total", 1);
+        metrics::increment_counter!("srgan_errors_total");
     }
     
     pub fn complete(self) {
@@ -284,9 +284,9 @@ impl PerformanceTracker {
             });
         
         // Update metrics
-        metrics::histogram!(format!("srgan_{}_duration_seconds", operation).as_str(), duration.as_secs_f64());
+        metrics::histogram!("srgan_operation_duration_seconds", duration.as_secs_f64());
         if result.is_err() {
-            metrics::increment_counter!(format!("srgan_{}_failures", operation).as_str(), 1);
+            metrics::counter!("srgan_operation_failures_total", 1);
         }
         
         result

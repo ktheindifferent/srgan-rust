@@ -26,7 +26,7 @@ pub trait WeightExtractor {
     fn get_model_info(&self) -> ModelInfo;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ModelInfo {
     pub format: String,
     pub version: String,

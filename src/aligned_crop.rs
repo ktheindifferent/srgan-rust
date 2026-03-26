@@ -218,14 +218,14 @@ fn range(cropping: &Cropping, input_width: isize, output_width: isize) -> (Slice
 		&Cropping::Random { .. } => {
 			if input_width < output_width {
 				let width = input_width;
-				let output_start = thread_rng().gen_range(0, output_width - input_width + 1);
+				let output_start = thread_rng().gen_range(0..output_width - input_width + 1);
 				(
 					Slice::new(0, Some(width), 1),
 					Slice::new(output_start, Some(output_start + width), 1),
 				)
 			} else {
 				let width = output_width;
-				let input_start = thread_rng().gen_range(0, input_width - output_width + 1);
+				let input_start = thread_rng().gen_range(0..input_width - output_width + 1);
 				(
 					Slice::new(input_start, Some(input_start + width), 1),
 					Slice::new(0, Some(width), 1),

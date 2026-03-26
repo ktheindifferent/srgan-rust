@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn, span, Level};
 use crate::metrics_wrapper::{increment_counter, record_histogram, set_gauge, increment_gauge, decrement_gauge};
 
 /// Enhanced batch upscaling with retry logic and error recovery
-pub async fn batch_upscale_enhanced(app_m: &ArgMatches) -> Result<()> {
+pub async fn batch_upscale_enhanced(app_m: &ArgMatches<'_>) -> Result<()> {
     let span = span!(Level::INFO, "batch_upscale");
     let _enter = span.enter();
     
@@ -84,7 +84,7 @@ pub async fn batch_upscale_enhanced(app_m: &ArgMatches) -> Result<()> {
     let thread_safe_network = Arc::new(
         performance_tracker.track("load_network", || {
             load_network(app_m, factor).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-        })?
+        }).map_err(|e| SrganError::Network(e.to_string()))?
     );
 
     info!("Starting enhanced batch processing with error recovery");
@@ -97,7 +97,7 @@ pub async fn batch_upscale_enhanced(app_m: &ArgMatches) -> Result<()> {
     let image_files = performance_tracker.track("collect_files", || {
         collect_image_files(&input_path, pattern, recursive)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-    })?;
+    }).map_err(|e| SrganError::Network(e.to_string()))?;
     
     if image_files.is_empty() {
         warn!("No image files found matching pattern: {}", pattern);
@@ -203,7 +203,7 @@ pub async fn batch_upscale_enhanced(app_m: &ArgMatches) -> Result<()> {
     increment_counter("srgan_images_processed", successful_count as u64);
     increment_counter("srgan_images_skipped", skipped_count as u64);
     increment_counter("srgan_images_failed", failed_count as u64);
-    record_histogram("srgan_batch_duration_seconds", duration.as_secs_f64);
+    record_histogram("srgan_batch_duration_seconds", duration.as_secs_f64());
     
     operation_logger.add_metadata("successful", successful_count.to_string());
     operation_logger.add_metadata("failed", failed_count.to_string());
@@ -274,13 +274,11 @@ fn process_single_image_with_retry(
     
     let process_result = tokio::runtime::Handle::current().block_on(async {
         circuit_breaker.call(|| {
-            performance_tracker.track("process_image", || {
-                process_image_internal(image_path, &output_path, network)
-                    .map_err(|e| EnhancedError::transient(
-                        format!("Failed to process image: {}", e),
-                        Some(Duration::from_millis(500))
-                    ))
-            })
+            process_image_internal(image_path, &output_path, network)
+                .map_err(|e| EnhancedError::transient(
+                    format!("Failed to process image: {}", e),
+                    Some(Duration::from_millis(500))
+                ))
         }).await
     });
     
@@ -320,8 +318,8 @@ fn process_image_internal(
     let upscaled = network.upscale_image(&img)?;
     
     // Save the result
-    upscaled.save_with_format(output_path, ImageFormat::Png)
-        .map_err(|e| SrganError::Image(e))?;
+    upscaled.save(output_path)
+        .map_err(|e| SrganError::Io(e))?;
     
     Ok(())
 }

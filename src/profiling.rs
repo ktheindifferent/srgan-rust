@@ -75,7 +75,7 @@ pub struct OomEvent {
 }
 
 #[cfg(debug_assertions)]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct AllocationMetadata {
     pub size: usize,
     pub alignment: usize,
@@ -410,6 +410,75 @@ pub struct TrackingAllocator;
 //
 // This allocator can be safely used as a global allocator in multi-threaded
 // programs. The tracking overhead is minimal due to lock-free atomic operations.
+
+#[cfg(debug_assertions)]
+impl TrackingAllocator {
+    #[track_caller]
+    fn get_allocation_metadata(&self, _ptr: *mut u8, size: usize, layout: Layout) -> AllocationMetadata {
+        let location = std::panic::Location::caller();
+        AllocationMetadata {
+            size,
+            alignment: layout.align(),
+            source_file: location.file().to_string(),
+            source_line: location.line(),
+            timestamp: Instant::now(),
+            freed: AtomicBool::new(false),
+            backtrace: String::new(),
+        }
+    }
+
+    fn check_double_free(&self, ptr: *mut u8) -> Result<(), String> {
+        let ptr_addr = ptr as usize;
+        if let Ok(freed) = FREED_ALLOCATIONS.lock() {
+            if freed.contains(&ptr_addr) {
+                return Err(format!("Double free detected at address {:p}", ptr));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_guard_bytes(&self, ptr: *mut u8, _layout: Layout) -> Result<(), String> {
+        let guard_ptr = ptr as usize;
+        if guard_ptr < GUARD_SIZE {
+            return Err(format!("Invalid pointer {:p}", ptr));
+        }
+        Ok(())
+    }
+
+    fn poison_memory(&self, ptr: *mut u8, size: usize) {
+        unsafe {
+            std::ptr::write_bytes(ptr, POISON_BYTE, size);
+        }
+    }
+
+    fn validate_allocation_size(&self, size: usize) -> Result<(), String> {
+        if size > MAX_ALLOCATION_SIZE {
+            return Err(format!("Allocation too large: {} bytes (max: {})", size, MAX_ALLOCATION_SIZE));
+        }
+        Ok(())
+    }
+
+    fn add_guard_bytes(&self, raw_ptr: *mut u8, layout: Layout) -> *mut u8 {
+        unsafe {
+            std::ptr::write_bytes(raw_ptr, GUARD_BYTE, GUARD_SIZE);
+            let user_ptr = raw_ptr.add(GUARD_SIZE);
+            let after_ptr = user_ptr.add(layout.size());
+            std::ptr::write_bytes(after_ptr, GUARD_BYTE, GUARD_SIZE);
+            user_ptr
+        }
+    }
+}
+
+#[cfg(not(debug_assertions))]
+impl TrackingAllocator {
+    fn validate_allocation_size(&self, size: usize) -> Result<(), String> {
+        if size > MAX_ALLOCATION_SIZE {
+            return Err(format!("Allocation too large: {} bytes (max: {})", size, MAX_ALLOCATION_SIZE));
+        }
+        Ok(())
+    }
+}
+
 impl TrackingAllocator {
     fn check_memory_limit(&self, size: usize) -> bool {
         let limit = MEMORY_LIMIT.load(Ordering::Relaxed);

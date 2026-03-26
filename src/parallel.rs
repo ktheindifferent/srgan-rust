@@ -110,23 +110,23 @@ impl ThreadSafeNetwork {
 //
 // This approach trades memory usage for simplicity and safety - each thread
 // has its own copy, eliminating any possibility of data races.
-unsafe impl Send for ThreadSafeNetwork {
-    #[cfg(debug_assertions)]
-    fn _assert_send() {
-        // Verify that UpscalingNetwork can be cloned safely
-        fn _assert_clone<T: Clone>() {}
-        _assert_clone::<UpscalingNetwork>();
-    }
+unsafe impl Send for ThreadSafeNetwork {}
+
+unsafe impl Sync for ThreadSafeNetwork {}
+
+#[cfg(debug_assertions)]
+fn _assert_thread_safe_network_send() {
+    // Verify that UpscalingNetwork can be cloned safely
+    fn _assert_clone<T: Clone>() {}
+    _assert_clone::<UpscalingNetwork>();
 }
 
-unsafe impl Sync for ThreadSafeNetwork {
-    #[cfg(debug_assertions)]
-    fn _assert_sync() {
-        // Since we clone for each thread, we only need Clone, not Sync on UpscalingNetwork
-        // This assertion verifies our safety model
-        fn _assert_clone<T: Clone>() {}
-        _assert_clone::<UpscalingNetwork>();
-    }
+#[cfg(debug_assertions)]
+fn _assert_thread_safe_network_sync() {
+    // Since we clone for each thread, we only need Clone, not Sync on UpscalingNetwork
+    // This assertion verifies our safety model
+    fn _assert_clone<T: Clone>() {}
+    _assert_clone::<UpscalingNetwork>();
 }
 
 /// Configuration for parallel batch processing

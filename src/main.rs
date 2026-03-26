@@ -26,6 +26,10 @@ fn main() {
 		("server", Some(sub_m)) => commands::start_server(sub_m),
 		("models", Some(sub_m)) => commands::models_command(sub_m),
 		("download-model", Some(sub_m)) => commands::download_model(sub_m),
+		("compare", Some(sub_m)) => commands::compare(sub_m),
+		("classify", Some(sub_m)) => commands::classify(sub_m),
+		("batch-status", Some(sub_m)) => commands::batch_status(sub_m),
+		("completions", Some(sub_m)) => commands::completions(sub_m),
 		("profile-memory", Some(sub_m)) => {
 			match sub_m.value_of("input") {
 				Some(input) => {

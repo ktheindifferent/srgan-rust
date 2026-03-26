@@ -1,5 +1,8 @@
 pub mod batch;
 pub mod batch_improved;
+pub mod classify;
+pub mod compare;
+pub mod completions;
 pub mod benchmark;
 pub mod models;
 pub mod download_model;
@@ -19,8 +22,9 @@ pub mod upscale_gpu;
 pub mod video;
 
 pub use self::models::models_command;
-pub use self::batch::batch_upscale;
+pub use self::batch::{batch_upscale, batch_status};
 pub use self::batch_improved::batch_upscale_enhanced;
+pub use self::classify::classify;
 pub use self::benchmark::benchmark;
 pub use self::download_model::download_model;
 pub use self::convert_model::{convert_model, list_formats};
@@ -37,3 +41,5 @@ pub use self::train_prescaled::train_prescaled;
 pub use self::upscale::upscale;
 pub use self::upscale_gpu::{list_gpu_devices, upscale_gpu};
 pub use self::video::{upscale_video, batch_video};
+pub use self::compare::compare;
+pub use self::completions::completions;

@@ -1,0 +1,10 @@
+{
+  "name": "anime",
+  "description": "SRGAN trained on anime and illustration images. Preserves clean lines, flat color fills, and vibrant palettes.",
+  "architecture": "srgan",
+  "scale_factor": 4,
+  "version": "1.0.0",
+  "psnr": 31.2,
+  "recommended_for": ["anime", "illustration", "cartoon"],
+  "auto_select_for": ["anime"]
+}

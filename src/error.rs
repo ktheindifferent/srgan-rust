@@ -88,4 +88,10 @@ impl From<std::num::ParseFloatError> for SrganError {
 	}
 }
 
+impl From<Box<dyn StdError>> for SrganError {
+	fn from(err: Box<dyn StdError>) -> Self {
+		SrganError::Network(format!("{}", err))
+	}
+}
+
 pub type Result<T> = std::result::Result<T, SrganError>;

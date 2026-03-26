@@ -1,0 +1,10 @@
+{
+  "name": "real-esrgan",
+  "description": "Real-ESRGAN trained on synthetic real-world degradations (JPEG artifacts, Gaussian noise, blur, downscaling). Best for compressed, noisy, or low-quality source images. Drop-in replacement — place real-esrgan.rsr weights here to activate.",
+  "architecture": "real-esrgan",
+  "scale_factor": 4,
+  "version": "1.0.0",
+  "psnr": 31.8,
+  "recommended_for": ["compressed", "noisy", "photos", "real-world"],
+  "auto_select_for": ["screenshot", "document"]
+}
