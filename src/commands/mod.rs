@@ -22,7 +22,10 @@ pub mod upscale_gpu;
 pub mod video;
 
 pub use self::models::models_command;
-pub use self::batch::{batch_upscale, batch_status};
+pub use self::batch::{
+    batch_upscale, batch_status, batch_start, batch_resume, batch_status_by_id, batch_list,
+    collect_image_files, process_image,
+};
 pub use self::batch_improved::batch_upscale_enhanced;
 pub use self::classify::classify;
 pub use self::benchmark::benchmark;

@@ -13,7 +13,13 @@ fn main() {
 	let result = match app_m.subcommand() {
 		("train", Some(sub_m)) => commands::train(sub_m),
 		("train_prescaled", Some(sub_m)) => commands::train_prescaled(sub_m),
-		("batch", Some(sub_m)) => commands::batch_upscale(sub_m),
+		("batch", Some(sub_m)) => match sub_m.subcommand() {
+			("start",  Some(start_m))  => commands::batch_start(start_m),
+			("resume", Some(resume_m)) => commands::batch_resume(resume_m),
+			("status", Some(status_m)) => commands::batch_status_by_id(status_m),
+			("list",   Some(_))        => commands::batch_list(),
+			_                          => commands::batch_upscale(sub_m),
+		},
 		("downscale", Some(sub_m)) => commands::downscale(sub_m),
 		("psnr", Some(sub_m)) => commands::psnr(sub_m),
 		("quantise", Some(sub_m)) => commands::quantise(sub_m),

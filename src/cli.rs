@@ -205,17 +205,16 @@ fn build_train_prescaled_subcommand() -> App<'static, 'static> {
 
 fn build_batch_subcommand() -> App<'static, 'static> {
 	SubCommand::with_name("batch")
-		.about("Batch process multiple images in a directory")
+		.about("Batch process images. Sub-commands: start, resume, status, list")
+		.setting(AppSettings::SubcommandsNegateReqs)
 		.arg(
 			Arg::with_name("INPUT_DIR")
-				.help("Input directory containing images to upscale")
-				.required(true)
+				.help("Input directory containing images to upscale (legacy positional usage)")
 				.index(1),
 		)
 		.arg(
 			Arg::with_name("OUTPUT_DIR")
-				.help("Output directory for upscaled images")
-				.required(true)
+				.help("Output directory for upscaled images (legacy positional usage)")
 				.index(2),
 		)
 		.arg(
@@ -288,10 +287,18 @@ fn build_batch_subcommand() -> App<'static, 'static> {
 				.empty_values(false),
 		)
 		.arg(
+			Arg::with_name("BATCH_ID")
+				.long("batch-id")
+				.help("Assign a named ID to this batch run (auto-generates a UUID if omitted)")
+				.value_name("ID")
+				.empty_values(false),
+		)
+		.arg(
 			Arg::with_name("RESUME")
 				.long("resume")
-				.help("Resume an interrupted batch using batch_state.json in the output directory")
-				.takes_value(false),
+				.help("Resume an interrupted batch by its batch ID (reads the checkpoint from the output directory)")
+				.value_name("BATCH_ID")
+				.empty_values(false),
 		)
 		.arg(
 			Arg::with_name("ERRORS_LOG")
@@ -307,6 +314,95 @@ fn build_batch_subcommand() -> App<'static, 'static> {
 				.value_name("URL")
 				.empty_values(false),
 		)
+		.subcommand(build_batch_start_subcommand())
+		.subcommand(build_batch_resume_subcommand())
+		.subcommand(build_batch_status_id_subcommand())
+		.subcommand(build_batch_list_subcommand())
+}
+
+fn build_batch_start_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("start")
+		.about("Start a new batch job with checkpoint tracking (~/.srgan-rust/checkpoints/)")
+		.arg(
+			Arg::with_name("input-dir")
+				.long("input-dir")
+				.short("i")
+				.required(true)
+				.value_name("DIR")
+				.help("Input directory containing images to upscale"),
+		)
+		.arg(
+			Arg::with_name("output-dir")
+				.long("output-dir")
+				.short("o")
+				.required(true)
+				.value_name("DIR")
+				.help("Output directory for upscaled images"),
+		)
+		.arg(
+			Arg::with_name("model")
+				.long("model")
+				.short("m")
+				.value_name("MODEL")
+				.possible_values(&["natural", "anime", "bilinear"])
+				.default_value("natural")
+				.help("Model to use for upscaling"),
+		)
+		.arg(
+			Arg::with_name("scale")
+				.long("scale")
+				.short("s")
+				.value_name("N")
+				.default_value("4")
+				.help("Integer upscaling factor"),
+		)
+		.arg(
+			Arg::with_name("recursive")
+				.long("recursive")
+				.short("r")
+				.help("Process images in subdirectories recursively")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("sequential")
+				.long("sequential")
+				.help("Process images sequentially instead of in parallel")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("threads")
+				.long("threads")
+				.short("t")
+				.value_name("N")
+				.help("Number of parallel threads (default: all available)"),
+		)
+}
+
+fn build_batch_resume_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("resume")
+		.about("Resume an interrupted batch job by ID")
+		.arg(
+			Arg::with_name("BATCH_ID")
+				.help("Batch job ID returned by 'batch start'")
+				.required(true)
+				.index(1),
+		)
+}
+
+fn build_batch_status_id_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("status")
+		.about("Show progress and ETA for a batch job by ID")
+		.arg(
+			Arg::with_name("BATCH_ID")
+				.help("Batch job ID")
+				.required(true)
+				.index(1),
+		)
+}
+
+fn build_batch_list_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("list")
+		.about("List all batch job checkpoints in ~/.srgan-rust/checkpoints/")
 }
 
 fn build_batch_status_subcommand() -> App<'static, 'static> {
@@ -314,8 +410,15 @@ fn build_batch_status_subcommand() -> App<'static, 'static> {
 		.about("Show progress of a running or interrupted batch job")
 		.arg(
 			Arg::with_name("DIR")
-				.help("Output directory that contains batch_state.json (default: current directory)")
+				.help("Output directory containing the checkpoint file (default: current directory)")
 				.index(1),
+		)
+		.arg(
+			Arg::with_name("BATCH_ID")
+				.long("batch-id")
+				.help("Batch ID to look up (scans the directory for any checkpoint if omitted)")
+				.value_name("ID")
+				.empty_values(false),
 		)
 }
 

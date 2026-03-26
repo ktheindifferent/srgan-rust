@@ -149,6 +149,18 @@ pub struct BatchImageResult {
     pub processing_time_ms: u64,
 }
 
+/// Request to start a directory-based batch job with checkpoint tracking.
+#[derive(Debug, Deserialize)]
+pub struct BatchDirRequest {
+    /// Server-side input directory path.
+    pub input_dir: String,
+    /// Server-side output directory path.
+    pub output_dir: String,
+    pub model: Option<String>,
+    pub scale: Option<u32>,
+    pub recursive: Option<bool>,
+}
+
 /// Synchronous batch response (≤10 images)
 #[derive(Debug, Serialize)]
 pub struct BatchUpscaleResponse {
@@ -295,6 +307,7 @@ impl WebServer {
         info!("  POST /api/v1/detect          - Detect image type (photo/anime/illustration)");
         info!("  POST /api/v1/batch           - Batch upscaling (sync ≤10 images, else async)");
         info!("  GET  /api/v1/batch/{{id}}     - Poll async batch status");
+        info!("  GET  /api/v1/batch/{{id}}/checkpoint - Query CLI batch checkpoint");
         info!("  GET  /api/v1/job/{{id}}       - Check single-image job status");
         info!("  GET  /api/v1/health          - Health check");
         info!("  GET  /api/models             - List available models");
@@ -364,12 +377,14 @@ impl WebServer {
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
                 ("POST", "/api/batch") | ("POST", "/api/v1/batch") => self.handle_batch(&request),
+                ("POST", "/api/v1/batch/start") => self.handle_batch_dir_start(&request),
                 ("POST", "/api/v1/detect") => self.handle_detect(&request),
                 ("POST", "/api/v1/billing/checkout") => self.handle_billing_checkout(&request),
                 ("POST", "/api/v1/billing/webhook") => self.handle_billing_webhook(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 _ if method == "GET" && (path.starts_with("/api/job/") || path.starts_with("/api/v1/job/")) => self.handle_job_status(path),
                 _ if method == "GET" && (path.starts_with("/api/result/") || path.starts_with("/api/v1/result/")) => self.handle_job_result(path),
+                _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
                 _ => self.handle_not_found(),
             };
@@ -1012,18 +1027,165 @@ impl WebServer {
             .trim_start_matches("/api/v1/batch/")
             .trim_start_matches("/api/batch/");
 
+        // Check in-memory jobs first (base64-batch async jobs).
         if let Ok(jobs) = self.batch_jobs.lock() {
             if let Some(job) = jobs.get(batch_id) {
-                format!(
+                return format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
                     serde_json::to_string(job).unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
-                )
-            } else {
-                self.error_response(404, "Batch job not found")
+                );
             }
-        } else {
-            self.error_response(500, "Failed to acquire batch lock")
         }
+
+        // Fall back to on-disk checkpoint (directory-based batch jobs).
+        let cwd = std::env::current_dir().unwrap_or_default();
+        match crate::checkpoint::load_checkpoint(batch_id, &cwd) {
+            Ok(Some(cp)) => {
+                let completed = cp.completed_images.len();
+                let total = cp.total_images;
+                let failed = cp.failed_images.len();
+                let remaining = total.saturating_sub(completed + failed);
+                let response = serde_json::json!({
+                    "batch_id": cp.batch_id,
+                    "total_images": total,
+                    "completed": completed,
+                    "failed": failed,
+                    "remaining": remaining,
+                    "input_dir": cp.input_dir,
+                    "output_dir": cp.output_dir,
+                    "started_at": cp.started_at,
+                    "last_updated": cp.last_updated,
+                });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    response
+                )
+            }
+            Ok(None) => self.error_response(404, "Batch job not found"),
+            Err(e) => self.error_response(500, &format!("Checkpoint read error: {}", e)),
+        }
+    }
+
+    /// GET /api/v1/batch/{id}/checkpoint — query the persisted checkpoint for a CLI batch run.
+    ///
+    /// Looks for `.srgan_checkpoint_<id>.json` in the current working directory.
+    fn handle_batch_checkpoint(&self, path: &str) -> String {
+        // Strip prefix and the trailing "/checkpoint" suffix to get the batch ID.
+        let without_prefix = path
+            .trim_start_matches("/api/v1/batch/")
+            .trim_start_matches("/api/batch/");
+        let batch_id = without_prefix.trim_end_matches("/checkpoint");
+
+        let cwd = match std::env::current_dir() {
+            Ok(d) => d,
+            Err(e) => return self.error_response(500, &format!("Cannot determine cwd: {}", e)),
+        };
+
+        match crate::checkpoint::load_checkpoint(batch_id, &cwd) {
+            Ok(Some(cp)) => {
+                match serde_json::to_string(&cp) {
+                    Ok(json) => format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                        json
+                    ),
+                    Err(e) => self.error_response(500, &format!("Serialization error: {}", e)),
+                }
+            }
+            Ok(None) => self.error_response(404, &format!("No checkpoint found for batch '{}'", batch_id)),
+            Err(e) => self.error_response(500, &format!("Failed to load checkpoint: {}", e)),
+        }
+    }
+
+    /// POST /api/v1/batch/start — start a directory-based batch job with checkpoint support.
+    fn handle_batch_dir_start(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+        let req: BatchDirRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        // Validate and canonicalize directories.
+        let input_path = match std::fs::canonicalize(&req.input_dir) {
+            Ok(p) => p,
+            Err(e) => return self.error_response(400, &format!("Invalid input_dir: {}", e)),
+        };
+        if let Err(e) = std::fs::create_dir_all(&req.output_dir) {
+            return self.error_response(400, &format!("Cannot create output_dir: {}", e));
+        }
+        let output_path = match std::fs::canonicalize(&req.output_dir) {
+            Ok(p) => p,
+            Err(e) => return self.error_response(400, &format!("Invalid output_dir: {}", e)),
+        };
+
+        let recursive = req.recursive.unwrap_or(false);
+        let batch_options = crate::checkpoint::BatchOptions {
+            parameters: req.model.clone(),
+            custom_model: None,
+            factor: req.scale.unwrap_or(4) as usize,
+            recursive,
+            parallel: true,
+            skip_existing: false,
+        };
+
+        let batch_id = uuid::Uuid::new_v4().to_string();
+        let mut checkpoint = crate::checkpoint::BatchCheckpoint::new(
+            batch_id.clone(),
+            req.input_dir.clone(),
+            req.output_dir.clone(),
+            0,
+            batch_options,
+        );
+
+        let image_files = match crate::commands::batch::collect_image_files(&input_path, "", recursive) {
+            Ok(f) => f,
+            Err(e) => return self.error_response(500, &format!("Failed to scan input_dir: {}", e)),
+        };
+
+        checkpoint.total_images = image_files.len();
+        if let Err(e) = crate::checkpoint::save_checkpoint(&mut checkpoint, &output_path) {
+            return self.error_response(500, &format!("Failed to save checkpoint: {}", e));
+        }
+
+        let total = image_files.len();
+        let batch_id_ret = batch_id.clone();
+        let network = Arc::clone(&self.network);
+
+        thread::spawn(move || {
+            let cp_arc = std::sync::Arc::new(std::sync::Mutex::new(checkpoint));
+            for image_file in &image_files {
+                let relative = image_file.strip_prefix(&input_path).unwrap_or(image_file);
+                let output_file = output_path.join(relative).with_extension("png");
+                let output_key = output_file.to_string_lossy().to_string();
+                if let Some(parent) = output_file.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                match crate::commands::batch::process_image(image_file, &output_file, &*network) {
+                    Ok(_) => {
+                        if let Ok(mut cp) = cp_arc.lock() {
+                            cp.completed_images.push(output_key);
+                            let _ = crate::checkpoint::save_checkpoint(&mut cp, &output_path);
+                        }
+                    }
+                    Err(_) => {
+                        if let Ok(mut cp) = cp_arc.lock() {
+                            cp.failed_images.push(output_key);
+                            let _ = crate::checkpoint::save_checkpoint(&mut cp, &output_path);
+                        }
+                    }
+                }
+            }
+        });
+
+        let response = serde_json::json!({
+            "batch_id": batch_id_ret,
+            "total_images": total,
+            "status": "processing",
+            "check_url": format!("/api/v1/batch/{}", batch_id_ret),
+        });
+        format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\n\r\n{}",
+            response
+        )
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
