@@ -205,6 +205,15 @@ pub struct JobInfo {
     pub result_url: Option<String>,
     pub result_data: Option<String>,  // base64-encoded result image
     pub error: Option<String>,
+    /// Model used for this job (e.g. "anime", "natural").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Input image dimensions "WxH".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_size: Option<String>,
+    /// Output image dimensions "WxH".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_size: Option<String>,
     /// Webhook delivery state (present when a webhook_config was supplied).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_delivery: Option<WebhookDeliveryState>,
@@ -379,7 +388,9 @@ impl WebServer {
             // Route request
             let response = match (method, path) {
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
-                ("GET", "/api/models") => self.handle_list_models(),
+                ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
+                ("GET", "/api/v1/stats") => self.handle_stats(),
+                ("GET", "/api/v1/jobs") => self.handle_jobs(),
                 ("GET", "/dashboard") => self.handle_dashboard(),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
@@ -529,6 +540,24 @@ impl WebServer {
                 // Extract webhook config before moving req into the thread
                 let webhook_config = req.webhook_config.clone();
 
+                // Decode image dimensions for job metadata (best-effort)
+                let (job_model, job_input_size) = {
+                    let m = req.model.clone().unwrap_or_else(|| "natural".to_string());
+                    let sz = general_purpose::STANDARD.decode(&req.image_data).ok()
+                        .and_then(|b| image::load_from_memory(&b).ok())
+                        .map(|img| format!("{}x{}", img.width(), img.height()));
+                    (m, sz)
+                };
+                let job_scale = req.scale_factor.unwrap_or(self.network.factor() as u32);
+                let job_output_size = job_input_size.as_ref().and_then(|s| {
+                    let parts: Vec<&str> = s.split('x').collect();
+                    if parts.len() == 2 {
+                        let w: u32 = parts[0].parse().ok()?;
+                        let h: u32 = parts[1].parse().ok()?;
+                        Some(format!("{}x{}", w * job_scale, h * job_scale))
+                    } else { None }
+                });
+
                 // Create job entry
                 let job = JobInfo {
                     id: job_id.clone(),
@@ -544,6 +573,9 @@ impl WebServer {
                     result_url: None,
                     result_data: None,
                     error: None,
+                    model: Some(job_model),
+                    input_size: job_input_size,
+                    output_size: job_output_size,
                     webhook_delivery: webhook_config.as_ref().map(|_| WebhookDeliveryState::default()),
                 };
 
@@ -1473,7 +1505,8 @@ impl WebServer {
     // ── Dashboard handler ─────────────────────────────────────────────────────
 
     /// GET /dashboard — HTML health dashboard
-    fn handle_dashboard(&self) -> String {
+    /// GET /api/v1/stats — server + queue statistics for the dashboard
+    fn handle_stats(&self) -> String {
         let uptime_secs = SystemTime::now()
             .duration_since(self.server_start_time)
             .map(|d| d.as_secs())
@@ -1481,19 +1514,18 @@ impl WebServer {
 
         let images_processed = self.images_processed.load(Ordering::Relaxed);
 
-        // Count jobs by status
-        let (queued, processing, completed, failed) =
+        let (pending, processing, completed, failed) =
             if let Ok(jobs) = self.jobs.lock() {
-                let mut q = 0u64; let mut p = 0u64; let mut c = 0u64; let mut f = 0u64;
+                let mut pe = 0u64; let mut pr = 0u64; let mut co = 0u64; let mut fa = 0u64;
                 for job in jobs.values() {
                     match &job.status {
-                        JobStatus::Pending    => q += 1,
-                        JobStatus::Processing => p += 1,
-                        JobStatus::Completed  => c += 1,
-                        JobStatus::Failed(_)  => f += 1,
+                        JobStatus::Pending    => pe += 1,
+                        JobStatus::Processing => pr += 1,
+                        JobStatus::Completed  => co += 1,
+                        JobStatus::Failed(_)  => fa += 1,
                     }
                 }
-                (q, p, c, f)
+                (pe, pr, co, fa)
             } else {
                 (0, 0, 0, 0)
             };
@@ -1511,102 +1543,723 @@ impl WebServer {
         let mem_free_mb  = sys_info::mem_info().map(|m| m.free  / 1024).unwrap_or(0);
         let mem_used_mb  = mem_total_mb.saturating_sub(mem_free_mb);
 
-        let model_name = self.network.display();
-        let model_factor = self.network.factor();
-        let s3_status = if self.s3_config.is_some() { "configured" } else { "disabled" };
-        let uptime_str = format_uptime(uptime_secs);
+        let response = serde_json::json!({
+            "version": "0.2.0",
+            "uptime_secs": uptime_secs,
+            "model": self.network.display(),
+            "model_factor": self.network.factor(),
+            "s3_enabled": self.s3_config.is_some(),
+            "images_processed": images_processed,
+            "jobs": {
+                "pending": pending,
+                "processing": processing,
+                "completed": completed,
+                "failed": failed,
+                "total": pending + processing + completed + failed,
+            },
+            "credits_today": {
+                "issued": credits_issued,
+                "consumed": credits_consumed,
+            },
+            "system": {
+                "load_avg_1m": load_avg,
+                "mem_used_mb": mem_used_mb,
+                "mem_total_mb": mem_total_mb,
+            }
+        });
 
-        let html = format!(
-            r#"<!DOCTYPE html>
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+            response
+        )
+    }
+
+    /// GET /api/v1/jobs — list recent jobs (newest first, up to 100)
+    fn handle_jobs(&self) -> String {
+        let jobs_snapshot: Vec<serde_json::Value> =
+            if let Ok(jobs) = self.jobs.lock() {
+                let mut list: Vec<&JobInfo> = jobs.values().collect();
+                list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+                list.truncate(100);
+                list.iter().map(|j| {
+                    let status_str = match &j.status {
+                        JobStatus::Pending    => "pending".to_string(),
+                        JobStatus::Processing => "processing".to_string(),
+                        JobStatus::Completed  => "completed".to_string(),
+                        JobStatus::Failed(e)  => format!("failed: {}", e),
+                    };
+                    let duration_secs = if matches!(&j.status, JobStatus::Completed | JobStatus::Failed(_)) {
+                        Some(j.updated_at.saturating_sub(j.created_at))
+                    } else {
+                        None
+                    };
+                    serde_json::json!({
+                        "id": j.id,
+                        "status": status_str,
+                        "model": j.model,
+                        "input_size": j.input_size,
+                        "output_size": j.output_size,
+                        "duration_secs": duration_secs,
+                        "created_at": j.created_at,
+                        "updated_at": j.updated_at,
+                        "result_url": j.result_url,
+                        "error": j.error,
+                        "webhook_delivery": j.webhook_delivery,
+                    })
+                }).collect()
+            } else {
+                vec![]
+            };
+
+        let response = serde_json::json!({ "jobs": jobs_snapshot, "count": jobs_snapshot.len() });
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+            response
+        )
+    }
+
+    fn handle_dashboard(&self) -> String {
+        // All live data is fetched client-side via /api/v1/stats and /api/v1/jobs.
+        // Return a static self-contained SPA with no external dependencies.
+        let html = r#"<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta http-equiv="refresh" content="30">
-  <title>SRGAN-Rust Dashboard</title>
-  <style>
-    body  {{ font-family: monospace; background:#1a1a2e; color:#e0e0e0; padding:2rem; margin:0; }}
-    h1    {{ color:#00d4ff; margin-bottom:0.25rem; }}
-    h2    {{ color:#7ec8e3; border-bottom:1px solid #333; padding-bottom:0.3rem; margin-top:2rem; }}
-    .meta {{ color:#888; font-size:0.85rem; margin-bottom:1.5rem; }}
-    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:1rem; margin:1rem 0; }}
-    .card {{ background:#16213e; border:1px solid #0f3460; border-radius:8px; padding:1rem; }}
-    .stat {{ font-size:1.8rem; color:#00d4ff; font-weight:bold; }}
-    .label{{ color:#888; font-size:0.75rem; margin-top:0.25rem; }}
-    .ok   {{ color:#4caf50; }} .warn {{ color:#ff9800; }}
-    .badge{{ display:inline-block; padding:0.15rem 0.5rem; border-radius:4px;
-             background:#0f3460; color:#00d4ff; font-size:0.8rem; }}
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRGAN-Rust &mdash; Dashboard</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--bg2:#161b22;--bg3:#21262d;
+  --border:#30363d;--accent:#00d4ff;--accent2:#7ec8e3;
+  --green:#3fb950;--yellow:#d29922;--red:#f85149;--purple:#a371f7;
+  --text:#c9d1d9;--text-muted:#8b949e;--text-dim:#484f58;
+  --radius:8px;--font:ui-monospace,'Cascadia Code','Fira Mono','Menlo',monospace;
+}
+html{font-size:14px}
+body{font-family:var(--font);background:var(--bg);color:var(--text);
+     min-height:100vh;padding:0}
+
+/* ── layout ── */
+.shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);
+         padding:1.5rem 1rem;display:flex;flex-direction:column;gap:1rem;
+         position:sticky;top:0;height:100vh;overflow-y:auto}
+.main{padding:2rem;overflow-y:auto;min-width:0}
+
+/* ── sidebar ── */
+.logo{color:var(--accent);font-size:1.1rem;font-weight:700;
+      letter-spacing:.04em;margin-bottom:.5rem}
+.logo span{color:var(--text-muted);font-weight:400}
+.nav-item{display:flex;align-items:center;gap:.6rem;padding:.5rem .75rem;
+          border-radius:var(--radius);color:var(--text-muted);cursor:pointer;
+          transition:background .15s,color .15s;font-size:.9rem}
+.nav-item:hover,.nav-item.active{background:var(--bg3);color:var(--accent)}
+.nav-icon{width:16px;text-align:center;flex-shrink:0}
+.sidebar-section{margin-top:auto;border-top:1px solid var(--border);padding-top:1rem}
+.pulse{display:inline-block;width:8px;height:8px;border-radius:50%;
+       background:var(--green);margin-right:.4rem;
+       animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+/* ── section pages ── */
+.page{display:none}.page.active{display:block}
+.section-title{font-size:1.4rem;color:var(--accent);font-weight:700;
+               margin-bottom:.25rem}
+.section-sub{color:var(--text-muted);font-size:.85rem;margin-bottom:1.5rem}
+
+/* ── stat cards ── */
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
+       gap:.85rem;margin-bottom:1.75rem}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);
+      padding:1rem 1.1rem}
+.card-value{font-size:1.75rem;font-weight:700;color:var(--accent);line-height:1}
+.card-label{color:var(--text-muted);font-size:.72rem;margin-top:.35rem;
+            text-transform:uppercase;letter-spacing:.06em}
+.card.green .card-value{color:var(--green)}
+.card.yellow .card-value{color:var(--yellow)}
+.card.red .card-value{color:var(--red)}
+.card.purple .card-value{color:var(--purple)}
+
+/* ── status bar ── */
+.statusbar{display:flex;align-items:center;gap:1.5rem;padding:.6rem 1rem;
+           background:var(--bg2);border-bottom:1px solid var(--border);
+           font-size:.78rem;color:var(--text-muted);flex-wrap:wrap}
+.statusbar strong{color:var(--text)}
+.tag{display:inline-block;padding:.1rem .45rem;border-radius:4px;font-size:.72rem;
+     background:var(--bg3);border:1px solid var(--border)}
+.tag.ok{color:var(--green);border-color:#238636}
+.tag.warn{color:var(--yellow);border-color:#9e6a03}
+.tag.err{color:var(--red);border-color:#8b2121}
+.tag.info{color:var(--accent);border-color:#0f6ab6}
+
+/* ── table ── */
+.tbl-wrap{overflow-x:auto;border-radius:var(--radius);
+          border:1px solid var(--border)}
+table{width:100%;border-collapse:collapse;font-size:.83rem}
+thead th{background:var(--bg3);color:var(--text-muted);font-weight:600;
+         text-align:left;padding:.6rem .9rem;border-bottom:1px solid var(--border);
+         text-transform:uppercase;font-size:.7rem;letter-spacing:.05em;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border);cursor:pointer;
+         transition:background .1s}
+tbody tr:last-child{border-bottom:none}
+tbody tr:hover{background:var(--bg3)}
+td{padding:.55rem .9rem;vertical-align:middle;white-space:nowrap}
+.id-cell{font-family:var(--font);color:var(--accent2);font-size:.78rem;
+         max-width:140px;overflow:hidden;text-overflow:ellipsis}
+.status-badge{display:inline-flex;align-items:center;gap:.35rem;
+              padding:.15rem .55rem;border-radius:4px;font-size:.73rem;font-weight:600}
+.s-pending{background:#1c2333;color:var(--text-muted);border:1px solid var(--border)}
+.s-processing{background:#12213b;color:var(--accent);border:1px solid #0f3460}
+.s-completed{background:#122116;color:var(--green);border:1px solid #238636}
+.s-failed{background:#2d1113;color:var(--red);border:1px solid #8b2121}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}
+.s-processing .dot{animation:pulse 1.2s ease-in-out infinite}
+.empty-row td{text-align:center;color:var(--text-dim);padding:2.5rem;font-size:.85rem}
+
+/* ── models grid ── */
+.models-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));
+             gap:.85rem}
+.model-card{background:var(--bg2);border:1px solid var(--border);
+            border-radius:var(--radius);padding:1rem 1.1rem}
+.model-card:hover{border-color:var(--accent)}
+.model-name{color:var(--accent);font-weight:700;font-size:.95rem;margin-bottom:.4rem}
+.model-desc{color:var(--text-muted);font-size:.78rem;line-height:1.5}
+.model-meta{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.6rem}
+.chip{background:var(--bg3);border:1px solid var(--border);border-radius:4px;
+      padding:.1rem .4rem;font-size:.68rem;color:var(--text-muted)}
+
+/* ── submit form ── */
+.form-card{background:var(--bg2);border:1px solid var(--border);
+           border-radius:var(--radius);padding:1.5rem;max-width:540px}
+.form-group{margin-bottom:1rem}
+.form-label{display:block;color:var(--text-muted);font-size:.78rem;
+            text-transform:uppercase;letter-spacing:.05em;margin-bottom:.4rem}
+.form-input,.form-select{width:100%;background:var(--bg3);border:1px solid var(--border);
+  border-radius:6px;padding:.5rem .7rem;color:var(--text);font-family:var(--font);
+  font-size:.88rem;outline:none;transition:border-color .15s}
+.form-input:focus,.form-select:focus{border-color:var(--accent)}
+.form-select option{background:var(--bg3)}
+.file-drop{border:2px dashed var(--border);border-radius:var(--radius);
+           padding:1.5rem;text-align:center;cursor:pointer;
+           color:var(--text-muted);transition:border-color .15s,background .15s}
+.file-drop:hover,.file-drop.dragover{border-color:var(--accent);
+  background:rgba(0,212,255,.04)}
+.file-drop input[type=file]{display:none}
+.file-name{color:var(--accent);font-size:.82rem;margin-top:.4rem}
+.btn{display:inline-flex;align-items:center;gap:.5rem;padding:.55rem 1.2rem;
+     border-radius:6px;border:none;cursor:pointer;font-family:var(--font);
+     font-size:.88rem;font-weight:600;transition:background .15s,opacity .15s}
+.btn-primary{background:var(--accent);color:#0d1117}
+.btn-primary:hover{background:#33dcff}
+.btn-primary:disabled{opacity:.45;cursor:not-allowed}
+.btn-ghost{background:var(--bg3);color:var(--text);border:1px solid var(--border)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.form-msg{margin-top:.75rem;padding:.5rem .75rem;border-radius:6px;font-size:.82rem}
+.form-msg.ok{background:#122116;color:var(--green);border:1px solid #238636}
+.form-msg.err{background:#2d1113;color:var(--red);border:1px solid #8b2121}
+.form-msg.info{background:#12213b;color:var(--accent);border:1px solid #0f3460}
+.preview-img{max-width:100%;max-height:180px;border-radius:6px;margin-top:.75rem;
+             border:1px solid var(--border);display:none}
+
+/* ── modal ── */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);
+               display:none;align-items:center;justify-content:center;z-index:100;
+               padding:1rem}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:12px;
+       width:100%;max-width:560px;max-height:90vh;overflow-y:auto}
+.modal-header{display:flex;align-items:center;justify-content:space-between;
+              padding:1rem 1.25rem;border-bottom:1px solid var(--border)}
+.modal-title{color:var(--accent);font-weight:700;font-size:.95rem}
+.modal-close{background:none;border:none;color:var(--text-muted);cursor:pointer;
+             font-size:1.2rem;line-height:1;padding:.2rem .4rem;border-radius:4px}
+.modal-close:hover{background:var(--bg3);color:var(--text)}
+.modal-body{padding:1.25rem}
+.detail-row{display:grid;grid-template-columns:130px 1fr;gap:.5rem;
+            padding:.45rem 0;border-bottom:1px solid var(--bg3);font-size:.83rem}
+.detail-row:last-child{border-bottom:none}
+.detail-key{color:var(--text-muted)}
+.detail-val{color:var(--text);word-break:break-all}
+.webhook-section{margin-top:1rem;padding:1rem;background:var(--bg3);
+                 border-radius:var(--radius)}
+.webhook-title{color:var(--accent2);font-size:.78rem;font-weight:600;
+               text-transform:uppercase;letter-spacing:.06em;margin-bottom:.75rem}
+
+/* ── refresh indicator ── */
+.refresh-indicator{display:flex;align-items:center;gap:.4rem;color:var(--text-dim);
+                   font-size:.72rem;margin-left:auto}
+.refresh-dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+.refresh-dot.refreshing{animation:pulse .6s ease-in-out infinite}
+
+/* ── top nav ── */
+.topbar{display:flex;align-items:center;gap:.75rem;padding:.7rem 2rem;
+        background:var(--bg2);border-bottom:1px solid var(--border);
+        position:sticky;top:0;z-index:10}
+.topbar-title{color:var(--text);font-weight:600;font-size:.9rem}
+</style>
 </head>
 <body>
-  <h1>SRGAN-Rust Dashboard</h1>
-  <p class="meta">
-    Model: <span class="ok">{model_name} {model_factor}x</span> &nbsp;|&nbsp;
-    Uptime: <strong>{uptime_str}</strong> &nbsp;|&nbsp;
-    Version: <span class="badge">0.2.0</span> &nbsp;|&nbsp;
-    S3: <span class="{s3_class}">{s3_status}</span>
-  </p>
 
-  <h2>Job Queue</h2>
-  <div class="grid">
-    <div class="card"><div class="stat">{queued}</div><div class="label">Queued</div></div>
-    <div class="card"><div class="stat">{processing}</div><div class="label">Processing</div></div>
-    <div class="card"><div class="stat">{completed}</div><div class="label">Completed</div></div>
-    <div class="card"><div class="stat">{failed}</div><div class="label">Failed</div></div>
-    <div class="card"><div class="stat">{images_processed}</div><div class="label">Total Processed</div></div>
+<div class="topbar">
+  <span class="logo">SRGAN<span>-Rust</span></span>
+  <span class="topbar-title">Admin Dashboard</span>
+  <div class="refresh-indicator">
+    <span class="refresh-dot" id="rdot"></span>
+    <span id="refresh-ts">--</span>
   </div>
+</div>
 
-  <h2>Credits (Today)</h2>
-  <div class="grid">
-    <div class="card"><div class="stat">{credits_issued}</div><div class="label">Issued</div></div>
-    <div class="card"><div class="stat">{credits_consumed}</div><div class="label">Consumed</div></div>
-  </div>
+<div class="statusbar" id="statusbar">
+  <span><strong id="sb-model">--</strong></span>
+  <span>Uptime: <strong id="sb-uptime">--</strong></span>
+  <span>Version: <span class="tag info" id="sb-version">--</span></span>
+  <span>S3: <span class="tag" id="sb-s3">--</span></span>
+  <span>Load: <strong id="sb-load">--</strong></span>
+  <span>RAM: <strong id="sb-ram">--</strong></span>
+</div>
 
-  <h2>System</h2>
-  <div class="grid">
-    <div class="card"><div class="stat">{load_avg:.2}</div><div class="label">Load Avg (1m)</div></div>
-    <div class="card"><div class="stat">{mem_used_mb} MB</div><div class="label">RAM Used</div></div>
-    <div class="card"><div class="stat">{mem_total_mb} MB</div><div class="label">RAM Total</div></div>
-  </div>
-
-  <h2>Supported Models</h2>
-  <div class="grid">
-    <div class="card">
-      <div class="label" style="font-size:0.9rem;color:#00d4ff">natural</div>
-      <div class="label">Photos &amp; general (×4)</div>
-    </div>
-    <div class="card">
-      <div class="label" style="font-size:0.9rem;color:#00d4ff">anime</div>
-      <div class="label">Anime / illustrations (×4)</div>
-    </div>
-    <div class="card">
-      <div class="label" style="font-size:0.9rem;color:#00d4ff">waifu2x</div>
-      <div class="label">Anime/illustration + noise reduction<br>noise 0–3 · scale ×1/×2</div>
-    </div>
-    <div class="card">
-      <div class="label" style="font-size:0.9rem;color:#00d4ff">bilinear</div>
-      <div class="label">Bilinear interpolation (no NN)</div>
+<div class="shell">
+  <div class="sidebar">
+    <nav style="display:flex;flex-direction:column;gap:.25rem">
+      <div class="nav-item active" onclick="showPage('overview')">
+        <span class="nav-icon">&#9635;</span> Overview
+      </div>
+      <div class="nav-item" onclick="showPage('jobs')">
+        <span class="nav-icon">&#8801;</span> Jobs
+      </div>
+      <div class="nav-item" onclick="showPage('submit')">
+        <span class="nav-icon">&#8679;</span> Submit Job
+      </div>
+      <div class="nav-item" onclick="showPage('models')">
+        <span class="nav-icon">&#9670;</span> Models
+      </div>
+    </nav>
+    <div class="sidebar-section">
+      <div style="color:var(--text-dim);font-size:.72rem">
+        <span class="pulse"></span>Live &mdash; refreshes every 5s
+      </div>
     </div>
   </div>
+
+  <div class="main">
+
+    <!-- ── Overview ── -->
+    <div class="page active" id="page-overview">
+      <div class="section-title">Overview</div>
+      <div class="section-sub">Real-time server and job queue metrics</div>
+
+      <div style="margin-bottom:.5rem;color:var(--text-muted);font-size:.75rem;
+                  text-transform:uppercase;letter-spacing:.06em">Job Queue</div>
+      <div class="cards" id="queue-cards">
+        <div class="card"><div class="card-value" id="c-pending">--</div><div class="card-label">Pending</div></div>
+        <div class="card s-processing" style="border-color:#0f3460"><div class="card-value" id="c-processing">--</div><div class="card-label">Processing</div></div>
+        <div class="card green"><div class="card-value" id="c-completed">--</div><div class="card-label">Completed</div></div>
+        <div class="card red"><div class="card-value" id="c-failed">--</div><div class="card-label">Failed</div></div>
+        <div class="card purple"><div class="card-value" id="c-total">--</div><div class="card-label">All&#8209;Time Processed</div></div>
+      </div>
+
+      <div style="margin-bottom:.5rem;color:var(--text-muted);font-size:.75rem;
+                  text-transform:uppercase;letter-spacing:.06em;margin-top:1.25rem">
+        Credits Today</div>
+      <div class="cards">
+        <div class="card green"><div class="card-value" id="c-issued">--</div><div class="card-label">Issued</div></div>
+        <div class="card yellow"><div class="card-value" id="c-consumed">--</div><div class="card-label">Consumed</div></div>
+      </div>
+
+      <div style="margin-top:1.5rem;margin-bottom:.5rem;color:var(--text-muted);
+                  font-size:.75rem;text-transform:uppercase;letter-spacing:.06em">
+        Recent Jobs</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Status</th><th>Model</th>
+              <th>Input</th><th>Output</th><th>Duration</th><th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody-overview"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Jobs ── -->
+    <div class="page" id="page-jobs">
+      <div class="section-title">Job Queue</div>
+      <div class="section-sub">All jobs &mdash; newest first (up to 100)</div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th><th>Status</th><th>Model</th>
+              <th>Input</th><th>Output</th><th>Duration</th><th>Created</th>
+            </tr>
+          </thead>
+          <tbody id="jobs-tbody-full"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Submit Job ── -->
+    <div class="page" id="page-submit">
+      <div class="section-title">Submit Job</div>
+      <div class="section-sub">Upload an image to upscale asynchronously</div>
+      <div class="form-card">
+        <div class="form-group">
+          <label class="form-label">Image File</label>
+          <div class="file-drop" id="file-drop" onclick="document.getElementById('file-input').click()">
+            <input type="file" id="file-input" accept="image/*">
+            <div>&#8679; Click or drag &amp; drop an image</div>
+            <div class="file-name" id="file-name"></div>
+          </div>
+          <img id="preview-img" class="preview-img" alt="preview">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Model</label>
+          <select class="form-select" id="model-select">
+            <option value="natural">natural &mdash; Photos &amp; general (&#215;4)</option>
+            <option value="anime">anime &mdash; Anime / illustrations (&#215;4)</option>
+            <option value="waifu2x">waifu2x &mdash; Anime + noise reduction (&#215;4)</option>
+            <option value="waifu2x-noise0-scale2">waifu2x-noise0-scale2 &mdash; No noise reduction (&#215;2)</option>
+            <option value="waifu2x-noise1-scale2">waifu2x-noise1-scale2 &mdash; Light denoising (&#215;2)</option>
+            <option value="waifu2x-noise2-scale2">waifu2x-noise2-scale2 &mdash; Medium denoising (&#215;2)</option>
+            <option value="waifu2x-noise3-scale2">waifu2x-noise3-scale2 &mdash; Aggressive denoising (&#215;2)</option>
+            <option value="bilinear">bilinear &mdash; No neural network</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Scale Factor <span style="color:var(--text-dim)">(leave 0 for model default)</span></label>
+          <input type="number" class="form-input" id="scale-input"
+                 min="0" max="8" value="0" placeholder="0 = model default">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Output Format</label>
+          <select class="form-select" id="format-select">
+            <option value="png">PNG (lossless)</option>
+            <option value="jpeg">JPEG (lossy, smaller)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary" id="submit-btn" disabled onclick="submitJob()">
+          &#8679; Submit Job
+        </button>
+        <div id="submit-msg" style="display:none" class="form-msg"></div>
+      </div>
+    </div>
+
+    <!-- ── Models ── -->
+    <div class="page" id="page-models">
+      <div class="section-title">Supported Models</div>
+      <div class="section-sub">Available upscaling models and their capabilities</div>
+      <div class="models-grid" id="models-grid"></div>
+    </div>
+
+  </div><!-- .main -->
+</div><!-- .shell -->
+
+<!-- ── Job Detail Modal ── -->
+<div class="modal-overlay" id="modal" onclick="closeModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <div class="modal-header">
+      <span class="modal-title">Job Details</span>
+      <button class="modal-close" onclick="closeModal()">&times;</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+  </div>
+</div>
+
+<script>
+'use strict';
+// ── navigation ─────────────────────────────────────────────────────────────
+function showPage(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  event.currentTarget.classList.add('active');
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+function fmtUptime(s) {
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+  if (h < 24) return h + 'h ' + m + 'm';
+  const d = Math.floor(h/24);
+  return d + 'd ' + (h%24) + 'h';
+}
+function fmtTs(unix) {
+  if (!unix) return '--';
+  const d = new Date(unix * 1000);
+  return d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+function fmtDur(secs) {
+  if (secs == null) return '--';
+  if (secs < 1) return '<1s';
+  if (secs < 60) return secs + 's';
+  return Math.floor(secs/60) + 'm ' + (secs%60) + 's';
+}
+function statusBadge(s) {
+  const st = s.startsWith('failed') ? 'failed'
+           : s === 'completed' ? 'completed'
+           : s === 'processing' ? 'processing' : 'pending';
+  const icons = {pending:'&#9675;',processing:'&#9679;',completed:'&#10003;',failed:'&#10005;'};
+  return `<span class="status-badge s-${st}"><span class="dot"></span>${icons[st]} ${s}</span>`;
+}
+function el(id) { return document.getElementById(id); }
+function setText(id, v) { const e = el(id); if(e) e.textContent = v; }
+
+// ── fetch helpers ─────────────────────────────────────────────────────────
+let lastStats = null, lastJobs = [];
+
+async function fetchStats() {
+  try {
+    const r = await fetch('/api/v1/stats');
+    if (!r.ok) return;
+    lastStats = await r.json();
+    applyStats(lastStats);
+  } catch(e) { /* server may be starting */ }
+}
+
+async function fetchJobs() {
+  try {
+    const r = await fetch('/api/v1/jobs');
+    if (!r.ok) return;
+    const d = await r.json();
+    lastJobs = d.jobs || [];
+    renderJobTable('jobs-tbody-overview', lastJobs.slice(0, 10));
+    renderJobTable('jobs-tbody-full', lastJobs);
+  } catch(e) {}
+}
+
+function applyStats(s) {
+  // status bar
+  el('sb-model').textContent = s.model + ' \u00d7' + s.model_factor;
+  el('sb-uptime').textContent = fmtUptime(s.uptime_secs);
+  el('sb-version').textContent = 'v' + s.version;
+  const s3el = el('sb-s3');
+  s3el.textContent = s.s3_enabled ? 'S3 on' : 'S3 off';
+  s3el.className = 'tag ' + (s.s3_enabled ? 'ok' : 'warn');
+  el('sb-load').textContent = s.system.load_avg_1m.toFixed(2);
+  el('sb-ram').textContent = s.system.mem_used_mb + ' / ' + s.system.mem_total_mb + ' MB';
+  // cards
+  const j = s.jobs;
+  setText('c-pending',    j.pending);
+  setText('c-processing', j.processing);
+  setText('c-completed',  j.completed);
+  setText('c-failed',     j.failed);
+  setText('c-total',      s.images_processed);
+  setText('c-issued',   s.credits_today.issued);
+  setText('c-consumed', s.credits_today.consumed);
+}
+
+function renderJobTable(tbodyId, jobs) {
+  const tb = el(tbodyId);
+  if (!tb) return;
+  if (!jobs || jobs.length === 0) {
+    tb.innerHTML = '<tr class="empty-row"><td colspan="7">No jobs yet</td></tr>';
+    return;
+  }
+  tb.innerHTML = jobs.map(j => `
+    <tr onclick="openJobModal('${j.id}')">
+      <td class="id-cell" title="${j.id}">${j.id.substring(0,16)}&hellip;</td>
+      <td>${statusBadge(j.status)}</td>
+      <td>${j.model || '<span style="color:var(--text-dim)">--</span>'}</td>
+      <td>${j.input_size || '--'}</td>
+      <td>${j.output_size || '--'}</td>
+      <td>${fmtDur(j.duration_secs)}</td>
+      <td>${fmtTs(j.created_at)}</td>
+    </tr>`).join('');
+}
+
+// ── models ────────────────────────────────────────────────────────────────
+const MODELS = [
+  { name:'natural',   arch:'SRGAN',    scale:'&#215;4',
+    desc:'Neural network trained on natural photographs using L1 loss. Best for photos and real-world images.',
+    tags:['photos','general','landscapes'] },
+  { name:'anime',     arch:'SRGAN',    scale:'&#215;4',
+    desc:'Neural network trained on animation art using L1 loss. Sharp edges and vibrant colours.',
+    tags:['anime','illustrations','cartoons'] },
+  { name:'waifu2x',   arch:'Waifu2x',  scale:'&#215;2 / &#215;4',
+    desc:'Waifu2x-style model with configurable noise reduction (noise_level 0&ndash;3, scale 1&times; or 2&times;).',
+    tags:['anime','illustrations','denoising'] },
+  { name:'bilinear',  arch:'Bilinear', scale:'&#215;4',
+    desc:'Classical bilinear interpolation. No neural network &mdash; fast preview or fallback.',
+    tags:['general','quick-preview'] },
+];
+
+function renderModels() {
+  const g = el('models-grid');
+  if (!g) return;
+  g.innerHTML = MODELS.map(m => `
+    <div class="model-card">
+      <div class="model-name">${m.name}</div>
+      <div class="model-desc">${m.desc}</div>
+      <div class="model-meta">
+        <span class="chip">${m.arch}</span>
+        <span class="chip">${m.scale}</span>
+        ${m.tags.map(t => `<span class="chip">${t}</span>`).join('')}
+      </div>
+    </div>`).join('');
+}
+
+// ── job detail modal ──────────────────────────────────────────────────────
+function openJobModal(id) {
+  const job = lastJobs.find(j => j.id === id);
+  if (!job) return;
+  const wh = job.webhook_delivery;
+  let whHtml = '';
+  if (wh) {
+    const delivered = wh.delivered
+      ? '<span class="tag ok">delivered</span>'
+      : '<span class="tag warn">not delivered</span>';
+    whHtml = `
+      <div class="webhook-section">
+        <div class="webhook-title">Webhook Delivery</div>
+        <div class="detail-row"><span class="detail-key">Status</span><span class="detail-val">${delivered}</span></div>
+        <div class="detail-row"><span class="detail-key">Attempts</span><span class="detail-val">${wh.attempts}</span></div>
+        ${wh.last_status_code != null ? `<div class="detail-row"><span class="detail-key">Last HTTP</span><span class="detail-val">${wh.last_status_code}</span></div>` : ''}
+        ${wh.last_attempt_at ? `<div class="detail-row"><span class="detail-key">Last Attempt</span><span class="detail-val">${fmtTs(wh.last_attempt_at)}</span></div>` : ''}
+      </div>`;
+  }
+  el('modal-body').innerHTML = `
+    <div class="detail-row"><span class="detail-key">Job ID</span><span class="detail-val" style="font-size:.78rem;word-break:break-all">${job.id}</span></div>
+    <div class="detail-row"><span class="detail-key">Status</span><span class="detail-val">${statusBadge(job.status)}</span></div>
+    <div class="detail-row"><span class="detail-key">Model</span><span class="detail-val">${job.model || '--'}</span></div>
+    <div class="detail-row"><span class="detail-key">Input Size</span><span class="detail-val">${job.input_size || '--'}</span></div>
+    <div class="detail-row"><span class="detail-key">Output Size</span><span class="detail-val">${job.output_size || '--'}</span></div>
+    <div class="detail-row"><span class="detail-key">Duration</span><span class="detail-val">${fmtDur(job.duration_secs)}</span></div>
+    <div class="detail-row"><span class="detail-key">Created</span><span class="detail-val">${fmtTs(job.created_at)}</span></div>
+    <div class="detail-row"><span class="detail-key">Updated</span><span class="detail-val">${fmtTs(job.updated_at)}</span></div>
+    ${job.result_url ? `<div class="detail-row"><span class="detail-key">Result</span><span class="detail-val"><a href="${job.result_url}" style="color:var(--accent)" target="_blank">Download &#8599;</a></span></div>` : ''}
+    ${job.error ? `<div class="detail-row"><span class="detail-key">Error</span><span class="detail-val" style="color:var(--red)">${job.error}</span></div>` : ''}
+    ${whHtml}`;
+  el('modal').classList.add('open');
+}
+function closeModal(e) {
+  if (!e || e.target === el('modal') || e.currentTarget === el('modal')) {
+    el('modal').classList.remove('open');
+  }
+}
+document.addEventListener('keydown', e => { if(e.key==='Escape') el('modal').classList.remove('open'); });
+
+// ── submit job ─────────────────────────────────────────────────────────────
+let selectedFileB64 = null;
+
+el('file-input').addEventListener('change', function() {
+  const file = this.files[0];
+  if (!file) return;
+  el('file-name').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    const dataUrl = ev.target.result;
+    // strip data:image/...;base64, prefix
+    selectedFileB64 = dataUrl.split(',')[1];
+    const img = el('preview-img');
+    img.src = dataUrl;
+    img.style.display = 'block';
+    el('submit-btn').disabled = false;
+  };
+  reader.readAsDataURL(file);
+});
+
+// drag-and-drop
+const dropZone = el('file-drop');
+['dragenter','dragover'].forEach(evt => {
+  dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+});
+['dragleave','drop'].forEach(evt => {
+  dropZone.addEventListener(evt, e => { e.preventDefault(); dropZone.classList.remove('dragover'); });
+});
+dropZone.addEventListener('drop', e => {
+  const file = e.dataTransfer.files[0];
+  if (!file || !file.type.startsWith('image/')) return;
+  el('file-name').textContent = file.name;
+  const reader = new FileReader();
+  reader.onload = ev => {
+    const dataUrl = ev.target.result;
+    selectedFileB64 = dataUrl.split(',')[1];
+    const img = el('preview-img');
+    img.src = dataUrl;
+    img.style.display = 'block';
+    el('submit-btn').disabled = false;
+  };
+  reader.readAsDataURL(file);
+});
+
+async function submitJob() {
+  if (!selectedFileB64) return;
+  const btn = el('submit-btn');
+  const msgEl = el('submit-msg');
+  const model = el('model-select').value;
+  const scale = parseInt(el('scale-input').value, 10) || null;
+  const format = el('format-select').value;
+
+  btn.disabled = true;
+  btn.textContent = 'Submitting\u2026';
+  msgEl.style.display = 'none';
+
+  const payload = { image_data: selectedFileB64, model, format };
+  if (scale && scale > 0) payload.scale_factor = scale;
+
+  try {
+    const r = await fetch('/api/v1/upscale/async', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const d = await r.json();
+    if (r.ok || r.status === 202) {
+      msgEl.className = 'form-msg ok';
+      msgEl.textContent = 'Job queued: ' + (d.job_id || '');
+      msgEl.style.display = 'block';
+      selectedFileB64 = null;
+      el('file-name').textContent = '';
+      el('preview-img').style.display = 'none';
+      el('file-input').value = '';
+      btn.textContent = '\u2191 Submit Job';
+      // switch to jobs page and refresh
+      setTimeout(() => { showPageByName('jobs'); refreshAll(); }, 800);
+    } else {
+      throw new Error(d.error || ('HTTP ' + r.status));
+    }
+  } catch(e) {
+    msgEl.className = 'form-msg err';
+    msgEl.textContent = 'Error: ' + e.message;
+    msgEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = '\u2191 Submit Job';
+  }
+}
+
+function showPageByName(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+  document.getElementById('page-' + name).classList.add('active');
+  // activate matching nav item
+  document.querySelectorAll('.nav-item').forEach(n => {
+    if (n.getAttribute('onclick') && n.getAttribute('onclick').includes("'" + name + "'"))
+      n.classList.add('active');
+  });
+}
+
+// ── auto-refresh ─────────────────────────────────────────────────────────
+async function refreshAll() {
+  const dot = el('rdot');
+  dot.classList.add('refreshing');
+  await Promise.all([fetchStats(), fetchJobs()]);
+  dot.classList.remove('refreshing');
+  el('refresh-ts').textContent = new Date().toLocaleTimeString();
+}
+
+// initial render
+renderModels();
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
 </body>
-</html>"#,
-            model_name = model_name,
-            model_factor = model_factor,
-            uptime_str = uptime_str,
-            s3_class = if self.s3_config.is_some() { "ok" } else { "warn" },
-            s3_status = s3_status,
-            queued = queued,
-            processing = processing,
-            completed = completed,
-            failed = failed,
-            images_processed = images_processed,
-            credits_issued = credits_issued,
-            credits_consumed = credits_consumed,
-            load_avg = load_avg,
-            mem_used_mb = mem_used_mb,
-            mem_total_mb = mem_total_mb,
-        );
+</html>"#;
 
-        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n{}", html)
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nCache-Control: no-cache\r\n\r\n{}", html)
     }
 
     /// Start cache cleanup thread
