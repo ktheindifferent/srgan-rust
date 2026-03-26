@@ -23,12 +23,14 @@ pub fn psnr(app_m: &ArgMatches) -> Result<()> {
 	}
 
 	let (err, y_err, pix) = crate::psnr::psnr_calculation(image1_data.view(), image2_data.view());
+	let ssim_val = crate::ssim::ssim_calculation(image1_data.view(), image2_data.view());
 
-	println!(
-		"sRGB PSNR: {}\tLuma PSNR:{}",
-		psnr_constants::LOG10_MULTIPLIER * (err / pix).log10(),
-		psnr_constants::LOG10_MULTIPLIER * (y_err / pix).log10()
-	);
+	let srgb_psnr = psnr_constants::LOG10_MULTIPLIER * (err / pix).log10();
+	let luma_psnr = psnr_constants::LOG10_MULTIPLIER * (y_err / pix).log10();
+
+	println!("sRGB PSNR: {:.2} dB", srgb_psnr);
+	println!("Luma PSNR: {:.2} dB", luma_psnr);
+	println!("SSIM:      {:.4}", ssim_val);
 
 	Ok(())
 }

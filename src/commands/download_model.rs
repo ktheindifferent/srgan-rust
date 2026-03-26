@@ -9,7 +9,7 @@ pub fn download_model(app_m: &ArgMatches) -> Result<()> {
     // --list: just print available models
     if app_m.is_present("list") {
         println!("Available built-in models:");
-        for (name, desc) in model_downloader::list_available_models() {
+        for (name, desc, _size, _checksum) in model_downloader::list_available_models() {
             println!("  {:12}  {}", name, desc);
         }
         return Ok(());

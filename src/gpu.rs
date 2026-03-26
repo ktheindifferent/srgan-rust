@@ -43,8 +43,8 @@ impl GpuBackend {
     pub fn is_available(&self) -> bool {
         match self {
             GpuBackend::None => true,
-            // For now, GPU backends are not implemented
-            // In a real implementation, we would check for driver/library availability
+            #[cfg(target_os = "macos")]
+            GpuBackend::Metal => true,
             _ => false,
         }
     }
@@ -68,14 +68,30 @@ impl GpuDevice {
     }
 
     pub fn list_devices() -> Vec<GpuDevice> {
-        // For now, only CPU is available
-        // In a real implementation, we would query available GPU devices
-        vec![Self::cpu()]
+        let mut devices = vec![Self::cpu()];
+        #[cfg(target_os = "macos")]
+        {
+            devices.push(GpuDevice {
+                backend: GpuBackend::Metal,
+                device_id: 0,
+                memory_mb: 0, // unified memory — treated as unlimited
+                name: "Apple Metal GPU".to_string(),
+            });
+        }
+        devices
     }
 
     pub fn select_best() -> Self {
-        // Select the best available device
-        // For now, this is always CPU
+        #[cfg(target_os = "macos")]
+        {
+            return GpuDevice {
+                backend: GpuBackend::Metal,
+                device_id: 0,
+                memory_mb: 0,
+                name: "Apple Metal GPU".to_string(),
+            };
+        }
+        #[cfg(not(target_os = "macos"))]
         Self::cpu()
     }
 
@@ -148,14 +164,19 @@ impl GpuContext {
             )));
         }
 
-        let device = if backend == GpuBackend::None {
-            GpuDevice::cpu()
-        } else {
-            // In a real implementation, we would select the best GPU
-            return Err(SrganError::InvalidParameter(format!(
+        let device = match backend {
+            GpuBackend::None => GpuDevice::cpu(),
+            #[cfg(target_os = "macos")]
+            GpuBackend::Metal => GpuDevice {
+                backend: GpuBackend::Metal,
+                device_id: 0,
+                memory_mb: 0,
+                name: "Apple Metal GPU".to_string(),
+            },
+            _ => return Err(SrganError::InvalidParameter(format!(
                 "GPU backend {} is not yet implemented",
                 backend
-            )));
+            ))),
         };
 
         Ok(GpuContext {
@@ -175,6 +196,9 @@ impl GpuContext {
     }
 
     pub fn available_mb(&self) -> usize {
+        if self.device.memory_mb == 0 {
+            return usize::MAX; // unified memory — no fixed limit
+        }
         let allocated = *self.allocated_mb.read()
             .expect("GPU memory tracking lock poisoned");
         if self.device.memory_mb > allocated {
@@ -192,10 +216,10 @@ impl GpuContext {
         let mut allocated = self.allocated_mb.write()
             .expect("GPU memory tracking lock poisoned");
         
-        // Check if we have enough memory
-        if *allocated + size_mb > self.device.memory_mb {
+        // Check if we have enough memory (memory_mb == 0 means unlimited unified memory)
+        if self.device.memory_mb > 0 && *allocated + size_mb > self.device.memory_mb {
             return Err(SrganError::InvalidParameter(
-                format!("Insufficient GPU memory: requested {} MB, available {} MB", 
+                format!("Insufficient GPU memory: requested {} MB, available {} MB",
                     size_mb, self.device.memory_mb - *allocated)
             ));
         }
@@ -267,24 +291,24 @@ impl GpuContext {
 // - GPU context handles are thread-safe or wrapped in synchronization primitives
 // - Memory operations are properly synchronized
 // - Command queues/streams are either thread-local or synchronized
-unsafe impl Send for GpuContext {
-    #[cfg(debug_assertions)]
-    fn _assert_send() {
-        fn _assert_send<T: Send>() {}
-        _assert_send::<Arc<GpuDevice>>();
-        _assert_send::<Arc<RwLock<usize>>>();
-        _assert_send::<Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>>();
-    }
+unsafe impl Send for GpuContext {}
+
+unsafe impl Sync for GpuContext {}
+
+#[cfg(debug_assertions)]
+fn _assert_gpu_context_send() {
+    fn _assert_send<T: Send>() {}
+    _assert_send::<Arc<GpuDevice>>();
+    _assert_send::<Arc<RwLock<usize>>>();
+    _assert_send::<Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>>();
 }
 
-unsafe impl Sync for GpuContext {
-    #[cfg(debug_assertions)]
-    fn _assert_sync() {
-        fn _assert_sync<T: Sync>() {}
-        _assert_sync::<Arc<GpuDevice>>();
-        _assert_sync::<Arc<RwLock<usize>>>();
-        _assert_sync::<Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>>();
-    }
+#[cfg(debug_assertions)]
+fn _assert_gpu_context_sync() {
+    fn _assert_sync<T: Sync>() {}
+    _assert_sync::<Arc<GpuDevice>>();
+    _assert_sync::<Arc<RwLock<usize>>>();
+    _assert_sync::<Arc<RwLock<HashMap<std::thread::ThreadId, MemoryPool>>>>();
 }
 
 impl Clone for GpuContext {

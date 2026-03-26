@@ -11,6 +11,9 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_parameters_arg())
 		.arg(build_custom_arg())
 		.arg(build_bilinear_factor_arg())
+		.arg(build_gpu_flag_arg())
+		.arg(build_format_arg())
+		.arg(build_quality_arg())
 		.subcommand(build_train_subcommand())
 		.subcommand(build_train_prescaled_subcommand())
 		.subcommand(build_batch_subcommand())
@@ -69,6 +72,30 @@ fn build_bilinear_factor_arg() -> Arg<'static, 'static> {
 		.short("f")
 		.long("factor")
 		.help("The integer upscaling factor used if bilinear upscaling is performed. Default 4")
+		.empty_values(false)
+}
+
+fn build_gpu_flag_arg() -> Arg<'static, 'static> {
+	Arg::with_name("GPU")
+		.long("gpu")
+		.help("Enable GPU acceleration if available (Metal on macOS, CUDA on Linux/Windows)")
+		.takes_value(false)
+}
+
+fn build_format_arg() -> Arg<'static, 'static> {
+	Arg::with_name("FORMAT")
+		.long("format")
+		.help("Output image format. Auto-detected from extension if omitted.")
+		.value_name("FORMAT")
+		.possible_values(&["png", "jpeg", "webp"])
+		.empty_values(false)
+}
+
+fn build_quality_arg() -> Arg<'static, 'static> {
+	Arg::with_name("QUALITY")
+		.long("quality")
+		.help("JPEG output quality (1–100, default: 85)")
+		.value_name("QUALITY")
 		.empty_values(false)
 }
 
