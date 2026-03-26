@@ -28,6 +28,53 @@ pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 	let input_path_buf = validation::validate_input_file(input_path_str)?;
 	validation::validate_image_extension(&input_path_buf)?;
 
+	// ── Content-aware auto-enhance shortcut ─────────────────────────────
+	if app_m.is_present("AUTO_ENHANCE") {
+		info!("Auto-enhance enabled — running content-aware region analysis");
+		let dyn_img = image::open(&input_path_buf)
+			.map_err(|e| SrganError::InvalidParameter(format!("Cannot open image: {}", e)))?;
+
+		let output_path = app_m
+			.value_of("OUTPUT_FILE")
+			.ok_or_else(|| SrganError::InvalidParameter("No output file given".to_string()))?;
+		let output_path_buf = validation::validate_output_path(output_path)?;
+		let format = detect_format(app_m, &output_path_buf);
+		let quality: u8 = app_m
+			.value_of("QUALITY")
+			.and_then(|s| s.parse::<u8>().ok())
+			.unwrap_or(85)
+			.max(1);
+
+		let spinner = ProgressBar::new_spinner();
+		spinner.set_message("Auto-enhance: analysing regions...");
+
+		let result = crate::auto_enhance::auto_enhance_upscale(&dyn_img, factor)?;
+
+		spinner.set_message("Writing output file...");
+		let mut output_file = File::create(&output_path_buf)?;
+		match format.as_str() {
+			"jpeg" | "jpg" => {
+				let rgb = result.to_rgb();
+				let (w, h) = rgb.dimensions();
+				image::jpeg::JPEGEncoder::new_with_quality(&mut output_file, quality)
+					.encode(rgb.as_ref(), w, h, image::ColorType::RGB(8))
+					.map_err(SrganError::Io)?;
+			}
+			_ => {
+				result
+					.write_to(&mut output_file, image::ImageFormat::PNG)
+					.map_err(SrganError::Image)?;
+			}
+		}
+
+		spinner.finish_with_message(format!(
+			"✓ Auto-enhance complete [format: {}, quality: {}]",
+			format, quality
+		));
+		info!("Output saved to: {}", output_path_buf.display());
+		return Ok(());
+	}
+
 	let network = load_network(app_m, factor, &input_path_buf)?;
 
 	// GPU device selection

@@ -17,6 +17,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_quality_arg())
 		.arg(build_tile_size_arg())
 		.arg(build_progressive_arg())
+		.arg(build_auto_enhance_arg())
 		.subcommand(build_train_subcommand())
 		.subcommand(build_train_prescaled_subcommand())
 		.subcommand(build_batch_subcommand())
@@ -161,6 +162,18 @@ fn build_progressive_arg() -> Arg<'static, 'static> {
              the neural network (producing an 8× intermediate), then downscaled back to \
              the standard 4× output size. This two-stage approach often yields sharper \
              results on tiny thumbnails and pixel-art sources.",
+		)
+		.takes_value(false)
+}
+
+fn build_auto_enhance_arg() -> Arg<'static, 'static> {
+	Arg::with_name("AUTO_ENHANCE")
+		.long("auto-enhance")
+		.help(
+			"Content-aware upscaling: analyse the image for faces, text, edges, \
+			 and flat-color regions, then apply the best model per region. \
+			 Text/edge regions receive extra sharpening. Overrides --parameters \
+			 and --auto-detect.",
 		)
 		.takes_value(false)
 }

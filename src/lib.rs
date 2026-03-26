@@ -26,6 +26,7 @@ pub mod preprocessing;
 pub mod storage;
 pub mod worker;
 pub mod aligned_crop;
+pub mod auto_enhance;
 pub mod detection;
 pub mod image_classifier;
 pub mod benchmarks;

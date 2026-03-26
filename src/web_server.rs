@@ -180,6 +180,11 @@ pub struct UpscaleRequest {
     /// Optional output format / quality / scale settings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<crate::output_options::OutputConfig>,
+    /// When `true`, enable content-aware region analysis and per-region model
+    /// selection (faces → natural, flat color → anime, text/edges → sharpened
+    /// natural).  Overrides `model` and `auto_detect` when set.
+    #[serde(default)]
+    pub auto_enhance: bool,
 }
 
 /// Request body for the `/api/v1/detect` endpoint.
@@ -2410,6 +2415,65 @@ function renderEndpointMetrics(metrics){
         let original_size = (img.width(), img.height());
         let network_factor = self.network.factor();
         let requested_factor = request.scale_factor.unwrap_or(network_factor);
+
+        // ── Content-aware auto-enhance shortcut ─────────────────────────
+        if request.auto_enhance {
+            log::info!("Auto-enhance enabled via API — running content-aware upscaling");
+            let upscaled = crate::auto_enhance::auto_enhance_upscale(
+                &img,
+                network_factor as usize,
+            )?;
+            let upscaled = crate::output_options::apply_output_scale(
+                upscaled,
+                original_size.0,
+                original_size.1,
+                output_cfg.scale,
+            );
+            let upscaled_size = (upscaled.width(), upscaled.height());
+            let format = if request.output.is_some() {
+                output_cfg.effective_format().to_string()
+            } else {
+                request.format.as_deref().unwrap_or("png").to_string()
+            };
+            let quality = if request.output.is_some() {
+                output_cfg.quality
+            } else {
+                request.quality.unwrap_or(85)
+            };
+            let img_format = match format.as_str() {
+                "jpeg" | "jpg" => ImageFormat::JPEG,
+                _ => ImageFormat::PNG,
+            };
+            let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+            if format == "jpeg" {
+                let rgb = upscaled.to_rgb();
+                let (w, h) = rgb.dimensions();
+                image::jpeg::JPEGEncoder::new_with_quality(&mut cursor, quality)
+                    .encode(rgb.as_ref(), w, h, image::ColorType::RGB(8))
+                    .map_err(SrganError::Io)?;
+            } else {
+                upscaled.write_to(&mut cursor, img_format)
+                    .map_err(|e| SrganError::Image(e))?;
+            }
+            let encoded = general_purpose::STANDARD.encode(cursor.into_inner());
+            let processing_time = start_time.elapsed()
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            self.images_processed.fetch_add(1, Ordering::Relaxed);
+            return Ok(UpscaleResponse {
+                success: true,
+                image_data: Some(encoded),
+                s3_url: None,
+                error: None,
+                metadata: ResponseMetadata {
+                    original_size,
+                    upscaled_size,
+                    processing_time_ms: processing_time,
+                    format,
+                    model_used: "auto-enhance".to_string(),
+                },
+            });
+        }
 
         // When auto_detect is enabled and no model is explicitly specified,
         // detect the image type and pick the recommended model label.
