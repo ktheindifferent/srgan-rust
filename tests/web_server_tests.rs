@@ -85,6 +85,10 @@ fn test_job_info_creation() {
         output_size: None,
         webhook_delivery: None,
         org_id: None,
+        input_file_size: None,
+        output_file_size: None,
+        scale_factor: None,
+        input_data: None,
     };
     
     assert_eq!(job.id, "job_123");
@@ -110,6 +114,10 @@ fn test_job_info_with_result() {
         output_size: None,
         webhook_delivery: None,
         org_id: None,
+        input_file_size: None,
+        output_file_size: None,
+        scale_factor: None,
+        input_data: None,
     };
     
     assert_eq!(job.id, "job_456");
@@ -135,6 +143,10 @@ fn test_job_info_with_error() {
         output_size: None,
         webhook_delivery: None,
         org_id: None,
+        input_file_size: None,
+        output_file_size: None,
+        scale_factor: None,
+        input_data: None,
     };
     
     assert_eq!(job.id, "job_789");

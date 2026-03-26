@@ -79,6 +79,10 @@ loom = { version = "0.7", features = ["checkpoint"] }
 name = "srgan-upscale"
 path = "src/bin/upscale.rs"
 
+[[bin]]
+name = "srgan"
+path = "src/bin/srgan_cli.rs"
+
 [[bench]]
 name = "thread_safety_bench"
 harness = false

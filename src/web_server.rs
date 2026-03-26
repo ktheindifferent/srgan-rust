@@ -311,6 +311,18 @@ pub struct JobInfo {
     /// Organization ID if this job was submitted by an org member.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_id: Option<String>,
+    /// Input file size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_file_size: Option<u64>,
+    /// Output file size in bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_file_size: Option<u64>,
+    /// Scale factor used for upscaling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scale_factor: Option<u32>,
+    /// Base64-encoded input image data (kept for preview/compare).
+    #[serde(skip_serializing)]
+    pub input_data: Option<String>,
 }
 
 /// Request for POST /api/v1/compare
@@ -631,6 +643,11 @@ impl WebServer {
                 _ if method == "GET"
                     && (path.starts_with("/api/v1/job/") || path.starts_with("/api/job/"))
                     && path.ends_with("/webhook") => self.handle_job_webhook_status(path),
+                _ if method == "GET"
+                    && (path.starts_with("/api/preview/") || path.starts_with("/api/v1/preview/")) => self.handle_preview(path),
+                _ if method == "GET"
+                    && (path.starts_with("/api/jobs/") || path.starts_with("/api/v1/jobs/"))
+                    && path.ends_with("/compare") => self.handle_job_compare(path),
                 _ if method == "GET" && (path.starts_with("/api/job/") || path.starts_with("/api/v1/job/")) => self.handle_job_status(path),
                 _ if method == "GET" && (path.starts_with("/api/result/") || path.starts_with("/api/v1/result/")) => self.handle_job_result(path),
                 _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
@@ -893,6 +910,10 @@ impl WebServer {
                             None
                         }
                     },
+                    input_file_size: Some(req.image_data.len() as u64),
+                    output_file_size: None,
+                    scale_factor: Some(job_scale),
+                    input_data: Some(req.image_data.clone()),
                 };
 
                 if let Ok(mut jobs) = self.jobs.lock() {
@@ -951,6 +972,8 @@ impl WebServer {
                         if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
                             match result {
                                 Ok(encoded) => {
+                                    job.output_file_size = general_purpose::STANDARD.decode(&encoded)
+                                        .ok().map(|b| b.len() as u64);
                                     job.status = JobStatus::Completed;
                                     job.result_url = Some(format!("/api/result/{}", job_id_clone));
                                     job.result_data = Some(encoded);
@@ -2330,6 +2353,157 @@ function renderEndpointMetrics(metrics){
         }
     }
     
+    /// GET /api/preview/:job_id — returns a downscaled PNG thumbnail (max 300px) of the
+    /// upscaled result for the given job.
+    fn handle_preview(&self, path: &str) -> String {
+        let job_id = path
+            .trim_start_matches("/api/v1/preview/")
+            .trim_start_matches("/api/preview/");
+
+        if let Ok(jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get(job_id) {
+                match &job.result_data {
+                    Some(data) => {
+                        let decoded = match general_purpose::STANDARD.decode(data) {
+                            Ok(d) => d,
+                            Err(e) => return self.error_response(500, &format!("Base64 decode error: {}", e)),
+                        };
+                        let img = match image::load_from_memory(&decoded) {
+                            Ok(i) => i,
+                            Err(e) => return self.error_response(500, &format!("Image decode error: {}", e)),
+                        };
+
+                        // Resize to fit within 300x300, preserving aspect ratio
+                        let (w, h) = (img.width(), img.height());
+                        let max_dim = 300u32;
+                        let (tw, th) = if w >= h {
+                            (max_dim, (max_dim as f64 * h as f64 / w as f64).round() as u32)
+                        } else {
+                            ((max_dim as f64 * w as f64 / h as f64).round() as u32, max_dim)
+                        };
+                        let thumbnail = img.resize_exact(tw.max(1), th.max(1), image::FilterType::Lanczos3);
+
+                        let mut buf = std::io::Cursor::new(Vec::new());
+                        if let Err(e) = thumbnail.write_to(&mut buf, ImageFormat::PNG) {
+                            return self.error_response(500, &format!("PNG encode error: {}", e));
+                        }
+                        let png_bytes = buf.into_inner();
+                        let b64 = general_purpose::STANDARD.encode(&png_bytes);
+                        let response = serde_json::json!({
+                            "success": true,
+                            "job_id": job_id,
+                            "preview_image": b64,
+                            "width": tw,
+                            "height": th,
+                        });
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                            response
+                        )
+                    }
+                    None => self.error_response(404, "Result not yet available"),
+                }
+            } else {
+                self.error_response(404, "Job not found")
+            }
+        } else {
+            self.error_response(500, "Failed to acquire job lock")
+        }
+    }
+
+    /// GET /api/jobs/:job_id/compare — returns a side-by-side comparison image
+    /// (original left, upscaled right, same height) as PNG.
+    fn handle_job_compare(&self, path: &str) -> String {
+        let inner = path
+            .trim_start_matches("/api/v1/jobs/")
+            .trim_start_matches("/api/jobs/");
+        let job_id = inner.trim_end_matches("/compare");
+
+        if let Ok(jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get(job_id) {
+                let result_b64 = match &job.result_data {
+                    Some(d) => d.clone(),
+                    None => return self.error_response(404, "Result not yet available"),
+                };
+                let input_b64 = match &job.input_data {
+                    Some(d) => d.clone(),
+                    None => return self.error_response(404, "Original input not available for this job"),
+                };
+
+                // Decode both images
+                let input_bytes = match general_purpose::STANDARD.decode(&input_b64) {
+                    Ok(b) => b,
+                    Err(e) => return self.error_response(500, &format!("Input decode error: {}", e)),
+                };
+                let result_bytes = match general_purpose::STANDARD.decode(&result_b64) {
+                    Ok(b) => b,
+                    Err(e) => return self.error_response(500, &format!("Result decode error: {}", e)),
+                };
+
+                let input_img = match image::load_from_memory(&input_bytes) {
+                    Ok(i) => i,
+                    Err(e) => return self.error_response(500, &format!("Input image error: {}", e)),
+                };
+                let result_img = match image::load_from_memory(&result_bytes) {
+                    Ok(i) => i,
+                    Err(e) => return self.error_response(500, &format!("Result image error: {}", e)),
+                };
+
+                // Scale both to the same height (use the upscaled image's height)
+                let target_h = result_img.height();
+                let left = if input_img.height() != target_h {
+                    let scale = target_h as f64 / input_img.height() as f64;
+                    let new_w = (input_img.width() as f64 * scale).round() as u32;
+                    input_img.resize_exact(new_w.max(1), target_h, image::FilterType::Lanczos3)
+                } else {
+                    input_img
+                };
+
+                // Create side-by-side canvas
+                let total_w = left.width() + result_img.width();
+                let mut canvas = image::DynamicImage::new_rgb8(total_w, target_h);
+
+                // Copy left (original)
+                for y in 0..target_h {
+                    for x in 0..left.width() {
+                        canvas.put_pixel(x, y, left.get_pixel(x, y));
+                    }
+                }
+                // Copy right (upscaled)
+                let offset_x = left.width();
+                for y in 0..target_h {
+                    for x in 0..result_img.width() {
+                        canvas.put_pixel(offset_x + x, y, result_img.get_pixel(x, y));
+                    }
+                }
+
+                let mut buf = std::io::Cursor::new(Vec::new());
+                if let Err(e) = canvas.write_to(&mut buf, ImageFormat::PNG) {
+                    return self.error_response(500, &format!("PNG encode error: {}", e));
+                }
+                let png_bytes = buf.into_inner();
+                let b64 = general_purpose::STANDARD.encode(&png_bytes);
+                let response = serde_json::json!({
+                    "success": true,
+                    "job_id": job_id,
+                    "compare_image": b64,
+                    "left": "original",
+                    "right": "upscaled",
+                    "width": total_w,
+                    "height": target_h,
+                });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    response
+                )
+            } else {
+                self.error_response(404, "Job not found")
+            }
+        } else {
+            self.error_response(500, "Failed to acquire job lock")
+        }
+    }
+
     /// Check rate limit
     fn check_rate_limit(&self, client_id: &str) -> bool {
         if self.config.rate_limit.is_none() {
