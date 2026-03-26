@@ -1,0 +1,104 @@
+# Prometheus alert rules for SRGAN-Rust
+# Load with: --rule-files=docs/alert-rules.yaml
+# or copy into your Alertmanager / Prometheus rules directory.
+
+groups:
+  - name: srgan_rust
+    interval: 1m
+    rules:
+
+      # ── Queue depth ────────────────────────────────────────────────────────
+      - alert: SrganQueueDepthHigh
+        expr: srgan_queue_depth > 100
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SRGAN job queue depth is high ({{ $value }} jobs)"
+          description: >
+            The srgan-rust job queue has been above 100 for more than 2 minutes.
+            Consider scaling up the number of workers or adding more instances.
+
+      - alert: SrganQueueDepthCritical
+        expr: srgan_queue_depth > 500
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SRGAN job queue depth is critical ({{ $value }} jobs)"
+          description: >
+            The srgan-rust job queue has exceeded 500 jobs.  New requests are
+            likely to time out.  Scale horizontally immediately.
+
+      # ── Error rate ────────────────────────────────────────────────────────
+      - alert: SrganErrorRateHigh
+        expr: >
+          rate(srgan_jobs_failed_total[5m])
+          /
+          (rate(srgan_jobs_completed_total[5m]) + rate(srgan_jobs_failed_total[5m]))
+          > 0.05
+        for: 3m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SRGAN error rate > 5% ({{ $value | humanizePercentage }})"
+          description: >
+            More than 5% of inference jobs are failing over the last 5 minutes.
+            Check logs for decode errors, OOM conditions, or model load failures.
+
+      - alert: SrganErrorRateCritical
+        expr: >
+          rate(srgan_jobs_failed_total[5m])
+          /
+          (rate(srgan_jobs_completed_total[5m]) + rate(srgan_jobs_failed_total[5m]))
+          > 0.20
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SRGAN error rate > 20% ({{ $value | humanizePercentage }})"
+          description: >
+            Over 20% of inference jobs are failing.  This is likely a systemic
+            issue (bad model, disk full, GPU OOM).  Page on-call immediately.
+
+      # ── p99 latency ───────────────────────────────────────────────────────
+      - alert: SrganP99LatencyHigh
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(srgan_inference_duration_seconds_bucket[5m])) by (le)
+          ) > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SRGAN p99 inference latency > 30s"
+          description: >
+            The 99th-percentile inference duration has been above 30 seconds for
+            5 minutes.  Users on the free tier (2 MP limit) should not see this;
+            investigate large-image jobs or resource contention.
+
+      - alert: SrganP99LatencyCritical
+        expr: >
+          histogram_quantile(0.99,
+            sum(rate(srgan_inference_duration_seconds_bucket[5m])) by (le)
+          ) > 120
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "SRGAN p99 inference latency > 120s"
+          description: >
+            The 99th-percentile inference duration exceeds 2 minutes.
+            Jobs are almost certainly timing out on the client side.
+
+      # ── No traffic ────────────────────────────────────────────────────────
+      - alert: SrganNoTraffic
+        expr: rate(srgan_jobs_completed_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "SRGAN has received no completed jobs in 10 minutes"
+          description: >
+            May indicate the server is down, the load balancer is misconfigured,
+            or there is genuinely no traffic.  Verify the /api/health endpoint.

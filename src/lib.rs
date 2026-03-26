@@ -20,7 +20,10 @@ extern crate smallvec;
 extern crate xz2;
 
 pub mod api;
+pub mod monitoring;
+pub mod preprocessing;
 pub mod storage;
+pub mod worker;
 pub mod aligned_crop;
 pub mod image_classifier;
 pub mod benchmarks;
