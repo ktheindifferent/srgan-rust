@@ -173,6 +173,12 @@ pub struct UpscaleRequest {
     /// Optional webhook to call when the job completes (async jobs only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_config: Option<WebhookConfig>,
+    /// Optional preprocessing pipeline toggles.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preprocessing: Option<crate::image_pipeline::PipelineConfig>,
+    /// Optional output format / quality / scale settings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<crate::output_options::OutputConfig>,
 }
 
 /// Request body for the `/api/v1/detect` endpoint.
@@ -2125,6 +2131,15 @@ function renderEndpointMetrics(metrics){
         img: image::DynamicImage,
     ) -> std::result::Result<UpscaleResponse, SrganError> {
         let start_time = SystemTime::now();
+
+        // ── Validate output options early ────────────────────────────────
+        let output_cfg = request.output.clone().unwrap_or_default();
+        output_cfg.validate()?;
+
+        // ── Run optional preprocessing pipeline ─────────────────────────
+        let pipeline_cfg = request.preprocessing.clone().unwrap_or_default();
+        let img = crate::image_pipeline::run_pipeline(img, &pipeline_cfg)?;
+
         let original_size = (img.width(), img.height());
         let network_factor = self.network.factor();
         let requested_factor = request.scale_factor.unwrap_or(network_factor);
@@ -2198,17 +2213,41 @@ function renderEndpointMetrics(metrics){
                 }
             }
         };
+        // ── Apply output scale (e.g. 2× or 3× from the 4× result) ──────
+        let upscaled = crate::output_options::apply_output_scale(
+            upscaled,
+            original_size.0,
+            original_size.1,
+            output_cfg.scale,
+        );
         let upscaled_size = (upscaled.width(), upscaled.height());
 
-        // Encode result to the requested format
-        let format = request.format.as_deref().unwrap_or("png");
-        let img_format = match format {
+        // Encode result to the requested format (prefer output config, fall back to legacy field)
+        let format = if request.output.is_some() {
+            output_cfg.effective_format().to_string()
+        } else {
+            request.format.as_deref().unwrap_or("png").to_string()
+        };
+        let quality = if request.output.is_some() {
+            output_cfg.quality
+        } else {
+            request.quality.unwrap_or(85)
+        };
+        let img_format = match format.as_str() {
             "jpeg" | "jpg" => ImageFormat::JPEG,
             _ => ImageFormat::PNG,
         };
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-        upscaled.write_to(&mut cursor, img_format)
-            .map_err(|e| SrganError::Image(e))?;
+        if format == "jpeg" {
+            let rgb = upscaled.to_rgb();
+            let (w, h) = rgb.dimensions();
+            image::jpeg::JPEGEncoder::new_with_quality(&mut cursor, quality)
+                .encode(rgb.as_ref(), w, h, image::ColorType::RGB(8))
+                .map_err(SrganError::Io)?;
+        } else {
+            upscaled.write_to(&mut cursor, img_format)
+                .map_err(|e| SrganError::Image(e))?;
+        }
         let encoded = general_purpose::STANDARD.encode(cursor.into_inner());
 
         let processing_time = start_time.elapsed()
@@ -2241,8 +2280,8 @@ function renderEndpointMetrics(metrics){
                 original_size,
                 upscaled_size,
                 processing_time_ms: processing_time,
-                format: format.into(),
-                model_used: format!("{}_{}x", effective_label, network_factor),
+                format: format.clone(),
+                model_used: std::format!("{}_{}x", effective_label, network_factor),
             },
         })
     }

@@ -57,6 +57,8 @@ pub mod validation;
 pub mod video;
 pub mod models;
 pub mod waifu2x;
+pub mod image_pipeline;
+pub mod output_options;
 pub mod web_server;
 pub mod web_server_improved;
 
