@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use clap::{App, Arg};
+use glob::glob;
 use image::GenericImage;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::{error, warn};
@@ -29,7 +30,7 @@ fn main() {
                 .short("i")
                 .takes_value(true)
                 .required(true)
-                .help("Input file or directory"),
+                .help("Input file, directory, or glob pattern (e.g. \"*.jpg\")"),
         )
         .arg(
             Arg::with_name("output")
@@ -113,7 +114,7 @@ fn run(matches: &clap::ArgMatches) -> Result<()> {
     std::fs::create_dir_all(output_path)
         .map_err(|e| SrganError::Io(e))?;
 
-    // Collect input files
+    // Collect input files (supports glob patterns like "*.jpg", "photos/**/*.png")
     let input_path = Path::new(input);
     let image_files = if input_path.is_file() {
         if is_supported_image(input_path) {
@@ -126,6 +127,35 @@ fn run(matches: &clap::ArgMatches) -> Result<()> {
         }
     } else if input_path.is_dir() {
         collect_image_files(input_path, "", recursive)?
+    } else if input.contains('*') || input.contains('?') || input.contains('[') {
+        // Treat as glob pattern
+        let mut files: Vec<PathBuf> = Vec::new();
+        match glob(input) {
+            Ok(paths) => {
+                for entry in paths {
+                    match entry {
+                        Ok(path) if path.is_file() && is_supported_image(&path) => {
+                            files.push(path);
+                        }
+                        Ok(_) => {} // skip non-image files
+                        Err(e) => warn!("Glob entry error: {}", e),
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(SrganError::InvalidInput(format!(
+                    "Invalid glob pattern '{}': {}",
+                    input, e
+                )));
+            }
+        }
+        if files.is_empty() {
+            return Err(SrganError::InvalidInput(format!(
+                "No image files matched the pattern: {}",
+                input
+            )));
+        }
+        files
     } else {
         return Err(SrganError::InvalidInput(format!(
             "Input path does not exist: {}",
@@ -146,7 +176,20 @@ fn run(matches: &clap::ArgMatches) -> Result<()> {
     );
 
     // Load network
-    let network = Arc::new(ThreadSafeNetwork::from_label(model_label, Some(scale))?);
+    let network = Arc::new(ThreadSafeNetwork::from_label(model_label, Some(scale)).map_err(|e| {
+        eprintln!("Error: Failed to load '{}' model weights.", model_label);
+        eprintln!();
+        eprintln!("The built-in models (srgan/waifu2x) ship with the binary.");
+        eprintln!("If you see this error, the binary may have been built incorrectly");
+        eprintln!("or model data is corrupt.");
+        eprintln!();
+        eprintln!("To rebuild with embedded weights:");
+        eprintln!("  cargo build --release --bin srgan-upscale");
+        eprintln!();
+        eprintln!("For custom models, use the main srgan-rust binary:");
+        eprintln!("  srgan-rust -c /path/to/model.rsr input.jpg output.png");
+        e
+    })?);
 
     // Progress bar
     let pb = ProgressBar::new(image_files.len() as u64);
