@@ -512,6 +512,8 @@ impl WebServer {
         info!("  GET  /api/v1/health          - Health check");
         info!("  GET  /api/models             - List available models");
         info!("  POST /api/v1/compare         - Multi-model PSNR/SSIM comparison");
+        info!("  GET  /dashboard              - Live processing dashboard (HTML)");
+        info!("  GET  /api/v1/dashboard/stream - SSE live stats stream");
         info!("  GET  /admin                  - Admin dashboard (HTML)");
         info!("  GET  /api/admin/stats        - Admin analytics (JSON)");
         info!("  GET  /api/admin/users        - User listing (JSON)");
@@ -1198,321 +1200,150 @@ impl WebServer {
   --green:#3fb950;--yellow:#d29922;--red:#f85149;
   --text:#c9d1d9;--muted:#8b949e;--r:8px;--font:ui-monospace,'Menlo',monospace}
 html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px}
-.shell{display:grid;grid-template-columns:200px 1fr;height:calc(100vh - 40px)}
-.sidebar{background:var(--bg2);border-right:1px solid var(--border);padding:1.25rem .9rem;
-  display:flex;flex-direction:column;gap:.35rem}
-.main{padding:1.5rem;overflow-y:auto}
-.logo{color:var(--accent);font-size:1rem;font-weight:700;margin-bottom:.9rem;letter-spacing:.03em}
-.nav{display:flex;align-items:center;gap:.5rem;padding:.42rem .65rem;border-radius:var(--r);
-  color:var(--muted);cursor:pointer;transition:all .15s;font-size:.86rem;user-select:none}
-.nav:hover,.nav.active{background:var(--bg3);color:var(--accent)}
-.page{display:none}.page.active{display:block}
-.section-title{font-size:1.2rem;color:var(--accent);font-weight:700;margin-bottom:1.1rem}
-.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.65rem;margin-bottom:1.4rem}
-.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:.85rem}
-.card-val{font-size:1.5rem;font-weight:700;color:var(--accent);line-height:1}
-.card-lbl{color:var(--muted);font-size:.68rem;margin-top:.28rem;text-transform:uppercase;letter-spacing:.05em}
-.card.g .card-val{color:var(--green)}.card.y .card-val{color:var(--yellow)}.card.r .card-val{color:var(--red)}
+.top-bar{background:var(--bg2);border-bottom:1px solid var(--border);padding:.55rem 1.2rem;
+  display:flex;align-items:center;gap:.7rem;font-size:.82rem}
+.pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+.pulse.off{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.wrap{max-width:1100px;margin:0 auto;padding:1.4rem 1.2rem}
+h1{font-size:1.15rem;color:var(--accent);font-weight:700;margin-bottom:1rem}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:.6rem;margin-bottom:1.3rem}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:.8rem}
+.card-val{font-size:1.6rem;font-weight:700;color:var(--accent);line-height:1}
+.card-lbl{color:var(--muted);font-size:.66rem;margin-top:.25rem;text-transform:uppercase;letter-spacing:.05em}
+.card.g .card-val{color:var(--green)}
+.card.y .card-val{color:var(--yellow)}
+.card.r .card-val{color:var(--red)}
+.util-bar{height:18px;background:var(--bg3);border-radius:4px;overflow:hidden;margin-bottom:1.3rem}
+.util-fill{height:100%;background:var(--accent);transition:width .4s ease;border-radius:4px}
+.section{font-size:.9rem;font-weight:600;margin-bottom:.6rem;color:var(--text)}
 .tbl-wrap{border:1px solid var(--border);border-radius:var(--r);overflow:auto;margin-bottom:1.2rem}
-table{width:100%;border-collapse:collapse;font-size:.81rem}
-thead th{background:var(--bg3);color:var(--muted);text-align:left;padding:.5rem .75rem;
-  border-bottom:1px solid var(--border);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
-tbody tr{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
-tbody tr:hover{background:var(--bg3)}tbody tr:last-child{border-bottom:none}
-td{padding:.45rem .75rem;vertical-align:middle;white-space:nowrap}
-.badge{display:inline-block;padding:.1rem .38rem;border-radius:4px;font-size:.7rem;font-weight:600}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+thead th{background:var(--bg3);color:var(--muted);text-align:left;padding:.45rem .7rem;
+  border-bottom:1px solid var(--border);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border)}
+tbody tr:last-child{border-bottom:none}
+td{padding:.4rem .7rem;vertical-align:middle;white-space:nowrap}
+.badge{display:inline-block;padding:.1rem .35rem;border-radius:4px;font-size:.68rem;font-weight:600}
 .bp{background:#21262d;color:var(--yellow);border:1px solid #9e6a03}
 .bpr{background:#21262d;color:var(--accent);border:1px solid #0f6ab6}
 .bc{background:#21262d;color:var(--green);border:1px solid #238636}
 .bf{background:#21262d;color:var(--red);border:1px solid #8b2121}
-.thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
-.tp{width:44px;height:44px;background:var(--bg3);border-radius:4px;border:1px solid var(--border);
-  display:inline-flex;align-items:center;justify-content:center;color:var(--muted);font-size:.6rem}
-.form-group{margin-bottom:.9rem}
-label{display:block;color:var(--muted);font-size:.78rem;margin-bottom:.35rem}
-input[type=text],select{width:100%;background:var(--bg2);border:1px solid var(--border);
-  border-radius:var(--r);padding:.45rem .65rem;color:var(--text);font-family:var(--font);font-size:.86rem}
-input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
-.btn{display:inline-block;padding:.42rem .9rem;border-radius:var(--r);font-family:var(--font);
-  font-size:.86rem;cursor:pointer;border:none;transition:opacity .15s}
-.btn-p{background:var(--accent);color:#000;font-weight:600}.btn-p:hover{opacity:.85}
-.btn-s{background:var(--bg3);color:var(--text);border:1px solid var(--border)}.btn-s:hover{border-color:var(--accent)}
-.btn:disabled{opacity:.45;cursor:not-allowed}
-.dropzone{border:2px dashed var(--border);border-radius:var(--r);padding:1.75rem;text-align:center;
-  cursor:pointer;transition:all .2s;color:var(--muted)}
-.dropzone.drag,.dropzone:hover{border-color:var(--accent);background:rgba(0,212,255,.04)}
-.api-bar{background:var(--bg2);border-bottom:1px solid var(--border);
-  padding:.5rem 1rem;display:flex;align-items:center;gap:.6rem;font-size:.8rem;height:40px}
-.api-bar input{flex:none;width:220px;font-size:.78rem;padding:.25rem .5rem;background:var(--bg);
-  border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--font)}
-.pulse{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
-@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
-.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100;align-items:center;justify-content:center}
-.overlay.open{display:flex}
-.modal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);
-  padding:1.4rem;max-width:620px;width:90vw;max-height:80vh;overflow-y:auto}
-.modal-title{font-size:1rem;color:var(--accent);margin-bottom:.9rem;font-weight:700}
-.close-x{float:right;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1}.close-x:hover{color:var(--text)}
-.sidebar-ft{margin-top:auto;padding-top:.9rem;border-top:1px solid var(--border)}
+.empty{padding:1.5rem;text-align:center;color:var(--muted)}
+.footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:1rem}
 </style>
 </head>
 <body>
-<div class="api-bar">
-  <span class="pulse"></span>
+<div class="top-bar">
+  <span class="pulse" id="sseIndicator"></span>
   <span style="color:var(--text);font-weight:600">SRGAN-Rust</span>
   <span style="color:var(--border)">|</span>
-  <label for="apiK" style="margin:0">API Key:</label>
-  <input type="text" id="apiK" placeholder="sk-…">
-  <button class="btn btn-s" onclick="saveKey()" style="padding:.2rem .6rem;font-size:.76rem">Save</button>
-  <span id="keySt" style="color:var(--green);font-size:.76rem"></span>
-  <span style="margin-left:auto;color:var(--muted);font-size:.76rem" id="refreshTime"></span>
+  <span style="color:var(--muted)">Live Processing Dashboard</span>
+  <span style="margin-left:auto;color:var(--muted);font-size:.74rem" id="lastUpdate">Connecting…</span>
 </div>
-<div class="shell">
-  <nav class="sidebar">
-    <div class="logo">&#9650; SRGAN</div>
-    <div class="nav active" id="nav-ov" onclick="nav('ov')">&#128202; Overview</div>
-    <div class="nav" id="nav-jobs" onclick="nav('jobs')">&#128736; Jobs</div>
-    <div class="nav" id="nav-sub" onclick="nav('sub')">&#128228; Submit Job</div>
-    <div class="sidebar-ft">
-      <div class="nav" onclick="location='/admin'" style="color:var(--muted)">&#128274; Admin</div>
-    </div>
-  </nav>
-  <main class="main">
-    <div class="page active" id="pg-ov">
-      <div class="section-title">Overview</div>
-      <div class="cards">
-        <div class="card"><div class="card-val" id="cPend">–</div><div class="card-lbl">Pending</div></div>
-        <div class="card"><div class="card-val" id="cProc">–</div><div class="card-lbl">Processing</div></div>
-        <div class="card g"><div class="card-val" id="cComp">–</div><div class="card-lbl">Completed</div></div>
-        <div class="card r"><div class="card-val" id="cFail">–</div><div class="card-lbl">Failed</div></div>
-        <div class="card"><div class="card-val" id="cCred">–</div><div class="card-lbl">Credits</div></div>
-        <div class="card y"><div class="card-val" id="cUp">–</div><div class="card-lbl">Uptime</div></div>
-        <div class="card"><div class="card-val" id="cMem">–</div><div class="card-lbl">RAM</div></div>
-        <div class="card"><div class="card-val" id="cLoad">–</div><div class="card-lbl">Load</div></div>
-      </div>
-      <div style="font-weight:600;margin-bottom:.65rem;font-size:.88rem">Recent Jobs</div>
-      <div class="tbl-wrap" id="recentTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
-    </div>
-    <div class="page" id="pg-jobs">
-      <div class="section-title">All Jobs</div>
-      <div class="tbl-wrap" id="allTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
-    </div>
-    <div class="page" id="pg-sub">
-      <div class="section-title">Submit Job</div>
-      <div style="max-width:500px">
-        <div id="dz" class="dropzone" onclick="document.getElementById('fi').click()">
-          <div style="font-size:1.8rem;margin-bottom:.4rem">&#128247;</div>
-          <div>Drag &amp; drop an image or <strong style="color:var(--accent)">browse</strong></div>
-          <div style="font-size:.75rem;margin-top:.3rem">PNG · JPG · WebP · max 50 MB</div>
-        </div>
-        <input type="file" id="fi" accept="image/*" style="display:none">
-        <div id="prevWrap" style="margin:.65rem 0;display:none">
-          <img id="prevImg" style="max-width:100%;max-height:180px;border-radius:var(--r);border:1px solid var(--border)">
-          <div id="prevName" style="font-size:.76rem;color:var(--muted);margin-top:.25rem"></div>
-        </div>
-        <div class="form-group">
-          <label>Model</label>
-          <select id="modelSel">
-            <option value="natural">Natural (photos)</option>
-            <option value="anime">Anime / illustration</option>
-            <option value="waifu2x">Waifu2x</option>
-            <option value="real-esrgan">Real-ESRGAN</option>
-          </select>
-        </div>
-        <button class="btn btn-p" id="subBtn" onclick="submitJob()" disabled>Submit Job</button>
-        <div id="subSt" style="margin-top:.65rem;font-size:.84rem"></div>
-      </div>
-    </div>
-  </main>
-</div>
-<div class="overlay" id="modal" onclick="if(event.target===this)this.classList.remove('open')">
-  <div class="modal">
-    <span class="close-x" onclick="document.getElementById('modal').classList.remove('open')">&#10005;</span>
-    <div class="modal-title" id="modalTtl">Job Detail</div>
-    <div id="modalBdy"></div>
+<div class="wrap">
+  <h1>Processing Dashboard</h1>
+
+  <div class="cards">
+    <div class="card"><div class="card-val" id="cPend">–</div><div class="card-lbl">Pending</div></div>
+    <div class="card"><div class="card-val" id="cProc">–</div><div class="card-lbl">Processing</div></div>
+    <div class="card g"><div class="card-val" id="cComp">–</div><div class="card-lbl">Completed</div></div>
+    <div class="card r"><div class="card-val" id="cFail">–</div><div class="card-lbl">Failed</div></div>
+    <div class="card"><div class="card-val" id="cTotal">–</div><div class="card-lbl">Total Jobs</div></div>
+    <div class="card y"><div class="card-val" id="cUp">–</div><div class="card-lbl">Uptime</div></div>
+    <div class="card"><div class="card-val" id="cImgs">–</div><div class="card-lbl">Processed</div></div>
   </div>
+
+  <div class="section">Worker Utilization: <span id="utilPct">0</span>%</div>
+  <div class="util-bar"><div class="util-fill" id="utilBar" style="width:0%"></div></div>
+
+  <div class="section">Active Jobs</div>
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr><th>Job ID</th><th>Status</th><th>Model</th><th>Created</th></tr></thead>
+      <tbody id="jobsBody"><tr><td colspan="4" class="empty">No active jobs</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="footer">Powered by Server-Sent Events — updates every second</div>
 </div>
+
 <script>
-var apiKey=localStorage.getItem('srgan_k')||'';
-var jobs=[];var thumbs={};var selFile=null;
-document.getElementById('apiK').value=apiKey;
-setupDz();
-setInterval(refresh,2000);
-refresh();
+(function(){
+  var es;
+  var retryDelay = 1000;
 
-function saveKey(){apiKey=document.getElementById('apiK').value.trim();localStorage.setItem('srgan_k',apiKey);var s=document.getElementById('keySt');s.textContent='Saved';setTimeout(function(){s.textContent=''},1500);}
+  function connect() {
+    es = new EventSource('/api/v1/dashboard/stream');
+    var indicator = document.getElementById('sseIndicator');
+    var lastUpdate = document.getElementById('lastUpdate');
 
-function hdrs(){var h={'Content-Type':'application/json'};if(apiKey)h['X-API-Key']=apiKey;return h;}
+    es.addEventListener('stats', function(e) {
+      var d = JSON.parse(e.data);
+      set('cPend', d.pending);
+      set('cProc', d.processing);
+      set('cComp', d.completed);
+      set('cFail', d.failed);
+      set('cTotal', d.total);
+      set('cImgs', d.images_processed);
+      set('cUp', fmtUp(d.uptime_secs || 0));
 
-function nav(p){
-  document.querySelectorAll('.page').forEach(function(e){e.classList.remove('active');});
-  document.querySelectorAll('.nav').forEach(function(e){e.classList.remove('active');});
-  document.getElementById('pg-'+p).classList.add('active');
-  document.getElementById('nav-'+p).classList.add('active');
-}
+      var pct = d.worker_utilization_pct || 0;
+      set('utilPct', pct.toFixed(1));
+      document.getElementById('utilBar').style.width = Math.min(pct, 100) + '%';
 
-function refresh(){
-  var h=hdrs();
-  Promise.all([
-    fetch('/api/v1/stats',{headers:h}).then(function(r){return r.ok?r.json():null;}),
-    fetch('/api/v1/jobs',{headers:h}).then(function(r){return r.ok?r.json():null;}),
-    fetch('/api/me',{headers:h}).then(function(r){return r.ok?r.json():null;}).catch(function(){return null;})
-  ]).then(function(res){
-    var stats=res[0];var jData=res[1];var me=res[2];
-    if(stats){
-      set('cPend',stats.jobs&&stats.jobs.pending!=null?stats.jobs.pending:'–');
-      set('cProc',stats.jobs&&stats.jobs.processing!=null?stats.jobs.processing:'–');
-      set('cComp',stats.jobs&&stats.jobs.completed!=null?stats.jobs.completed:'–');
-      set('cFail',stats.jobs&&stats.jobs.failed!=null?stats.jobs.failed:'–');
-      set('cUp',fmtUp(stats.uptime_secs||0));
-      set('cMem',(stats.system&&stats.system.mem_used_mb||0)+' MB');
-      set('cLoad',((stats.system&&stats.system.load_avg_1m)||0).toFixed(2));
-    }
-    if(me)set('cCred',me.credits_remaining!=null?me.credits_remaining:'–');
-    if(jData)jobs=jData.jobs||[];
-    renderTbls();
-    fetchThumbs();
-    document.getElementById('refreshTime').textContent='Updated '+new Date().toLocaleTimeString();
-  }).catch(function(){});
-}
+      indicator.classList.remove('off');
+      lastUpdate.textContent = 'Live — ' + new Date().toLocaleTimeString();
+      retryDelay = 1000;
+    });
 
-function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
+    es.addEventListener('jobs', function(e) {
+      var jobs = JSON.parse(e.data);
+      var tbody = document.getElementById('jobsBody');
+      if (!jobs.length) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">No active jobs</td></tr>';
+        return;
+      }
+      var html = '';
+      for (var i = 0; i < jobs.length; i++) {
+        var j = jobs[i];
+        var badge = j.status === 'processing'
+          ? '<span class="badge bpr">processing</span>'
+          : '<span class="badge bp">pending</span>';
+        var t = j.created_at ? new Date(j.created_at * 1000).toLocaleTimeString() : '–';
+        html += '<tr>'
+          + '<td><code style="font-size:.74rem">' + (j.id || '').substring(0, 8) + '…</code></td>'
+          + '<td>' + badge + '</td>'
+          + '<td>' + (j.model || '–') + '</td>'
+          + '<td>' + t + '</td>'
+          + '</tr>';
+      }
+      tbody.innerHTML = html;
+    });
 
-function fmtUp(s){
-  if(s<60)return s+'s';
-  if(s<3600)return Math.floor(s/60)+'m';
-  if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
-  return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
-}
+    es.onerror = function() {
+      indicator.classList.add('off');
+      lastUpdate.textContent = 'Disconnected — retrying…';
+      es.close();
+      setTimeout(connect, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, 10000);
+    };
+  }
 
-function badge(st){
-  var s=st||'';
-  if(s==='completed')return '<span class="badge bc">completed</span>';
-  if(s==='processing')return '<span class="badge bpr">processing</span>';
-  if(s.startsWith('failed'))return '<span class="badge bf">failed</span>';
-  return '<span class="badge bp">'+s+'</span>';
-}
+  function set(id, v) {
+    var e = document.getElementById(id);
+    if (e) e.textContent = v;
+  }
 
-function thumbCell(j){
-  if(thumbs[j.id])return '<img class="thumb" src="'+thumbs[j.id]+'" alt="">';
-  return '<div class="tp">'+(j.status==='completed'?'…':'')+'</div>';
-}
+  function fmtUp(s) {
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm ' + (s % 60) + 's';
+    if (s < 86400) return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+    return Math.floor(s / 86400) + 'd ' + Math.floor((s % 86400) / 3600) + 'h';
+  }
 
-function jobRow(j){
-  var dur=j.duration_secs!=null?j.duration_secs.toFixed(1)+'s':'–';
-  var t=new Date(j.created_at*1000).toLocaleTimeString();
-  return '<tr onclick="detail(\''+j.id+'\')">'
-    +'<td>'+thumbCell(j)+'</td>'
-    +'<td><code style="font-size:.76rem">'+j.id.slice(0,8)+'…</code></td>'
-    +'<td>'+badge(j.status)+'</td>'
-    +'<td>'+(j.model||'–')+'</td>'
-    +'<td>'+(j.input_size||'–')+'</td>'
-    +'<td>'+(j.output_size||'–')+'</td>'
-    +'<td>'+dur+'</td>'
-    +'<td>'+t+'</td>'
-    +'</tr>';
-}
-
-function tblHTML(list){
-  if(!list.length)return '<div style="padding:1.75rem;text-align:center;color:var(--muted)">No jobs yet</div>';
-  return '<table><thead><tr><th></th><th>Job ID</th><th>Status</th><th>Model</th><th>Input</th><th>Output</th><th>Dur.</th><th>Time</th></tr></thead>'
-    +'<tbody>'+list.map(jobRow).join('')+'</tbody></table>';
-}
-
-function renderTbls(){
-  var r=document.getElementById('recentTbl');if(r)r.innerHTML=tblHTML(jobs.slice(0,10));
-  var a=document.getElementById('allTbl');if(a)a.innerHTML=tblHTML(jobs);
-}
-
-function fetchThumbs(){
-  var need=jobs.filter(function(j){return j.status==='completed'&&!thumbs[j.id];}).slice(0,5);
-  need.forEach(function(j){
-    fetch('/api/v1/job/'+j.id,{headers:hdrs()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
-      if(d&&d.result_data){thumbs[j.id]='data:image/png;base64,'+d.result_data;renderTbls();}
-    }).catch(function(){});
-  });
-}
-
-function detail(id){
-  document.getElementById('modalTtl').textContent='Job: '+id;
-  document.getElementById('modalBdy').innerHTML='Loading…';
-  document.getElementById('modal').classList.add('open');
-  fetch('/api/v1/job/'+id,{headers:hdrs()}).then(function(r){return r.json();}).then(function(d){
-    var st='–';
-    if(d.status==='Completed'||d.status==='completed')st='completed';
-    else if(d.status==='Pending'||d.status==='pending')st='pending';
-    else if(d.status==='Processing'||d.status==='processing')st='processing';
-    else if(typeof d.status==='object'&&d.status!==null){
-      if(d.status.Completed!=null)st='completed';
-      else if(d.status.Pending!=null)st='pending';
-      else if(d.status.Processing!=null)st='processing';
-      else if(d.status.Failed!=null)st='failed: '+d.status.Failed;
-    }
-    var html='<table style="width:100%;font-size:.82rem">'
-      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Status</td><td>'+badge(st)+'</td></tr>'
-      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Model</td><td>'+(d.model||'–')+'</td></tr>'
-      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Input</td><td>'+(d.input_size||'–')+'</td></tr>'
-      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Output</td><td>'+(d.output_size||'–')+'</td></tr>'
-      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Created</td><td>'+new Date(d.created_at*1000).toLocaleString()+'</td></tr>'
-      +'</table>';
-    if(d.result_data){
-      var src='data:image/png;base64,'+d.result_data;
-      thumbs[id]=src;
-      html+='<img src="'+src+'" style="max-width:100%;border-radius:var(--r);margin-top:.9rem;display:block">'
-        +'<a href="'+src+'" download="result_'+id+'.png" class="btn btn-s" style="margin-top:.5rem;display:inline-block;text-decoration:none">&#8595; Download</a>';
-    }
-    if(d.error)html+='<div style="color:var(--red);margin-top:.65rem">'+d.error+'</div>';
-    document.getElementById('modalBdy').innerHTML=html;
-    renderTbls();
-  }).catch(function(){document.getElementById('modalBdy').innerHTML='<span style="color:var(--red)">Error loading job</span>';});
-}
-
-function setupDz(){
-  var dz=document.getElementById('dz');
-  var fi=document.getElementById('fi');
-  dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('drag');});
-  dz.addEventListener('dragleave',function(){dz.classList.remove('drag');});
-  dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('drag');if(e.dataTransfer.files[0])loadFile(e.dataTransfer.files[0]);});
-  fi.addEventListener('change',function(){if(fi.files[0])loadFile(fi.files[0]);});
-}
-
-function loadFile(f){
-  selFile=f;
-  var r=new FileReader();
-  r.onload=function(e){document.getElementById('prevImg').src=e.target.result;};
-  r.readAsDataURL(f);
-  document.getElementById('prevWrap').style.display='block';
-  document.getElementById('prevName').textContent=f.name+' ('+(f.size/1024).toFixed(1)+' KB)';
-  document.getElementById('subBtn').disabled=false;
-}
-
-function submitJob(){
-  if(!selFile)return;
-  var btn=document.getElementById('subBtn');
-  var st=document.getElementById('subSt');
-  btn.disabled=true;
-  st.textContent='Reading file…';
-  var r=new FileReader();
-  r.onload=function(e){
-    var b64=e.target.result;
-    if(b64.indexOf(',')>-1)b64=b64.split(',')[1];
-    var model=document.getElementById('modelSel').value;
-    st.textContent='Submitting…';
-    fetch('/api/v1/upscale/async',{
-      method:'POST',
-      headers:hdrs(),
-      body:JSON.stringify({image_data:b64,model:model})
-    }).then(function(res){
-      return res.json().then(function(d){return{ok:res.ok,d:d};});
-    }).then(function(r){
-      if(!r.ok){st.innerHTML='<span style="color:var(--red)">Error: '+(r.d.error||'Unknown')+'</span>';btn.disabled=false;return;}
-      st.innerHTML='<span style="color:var(--green)">Submitted! Job ID: <code>'+r.d.job_id+'</code></span>';
-      btn.disabled=false;
-      nav('jobs');
-    }).catch(function(e){st.innerHTML='<span style="color:var(--red)">'+e.message+'</span>';btn.disabled=false;});
-  };
-  r.readAsDataURL(selFile);
-}
+  connect();
+})();
 </script>
 </body>
 </html>"##;
