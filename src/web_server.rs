@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
 use std::net::SocketAddr;
 use std::io::Write;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose};
 use image::{ImageFormat, GenericImage};
 use log::{info, warn};
 use crate::error::SrganError;
@@ -294,7 +294,7 @@ impl WebServer {
                 }
 
                 // Decode base64 up-front so we can check dimensions
-                let image_data = match STANDARD.decode(&req.image_data) {
+                let image_data = match general_purpose::STANDARD.decode(&req.image_data) {
                     Ok(d) => d,
                     Err(e) => return self.error_response(400, &format!("Invalid base64: {}", e)),
                 };
@@ -377,7 +377,7 @@ impl WebServer {
                     
                     // Process image with thread-safe network, return base64-encoded result
                     let result: std::result::Result<String, SrganError> = (|| {
-                        let image_data = STANDARD.decode(&req_clone.image_data)
+                        let image_data = general_purpose::STANDARD.decode(&req_clone.image_data)
                             .map_err(|e| SrganError::InvalidInput(format!("Invalid base64: {}", e)))?;
                         let img = image::load_from_memory(&image_data)
                             .map_err(|e| SrganError::Image(e))?;
@@ -393,7 +393,7 @@ impl WebServer {
                         upscaled.write_to(&mut cursor, img_format)
                             .map_err(|e| SrganError::Image(e))?;
 
-                        Ok(STANDARD.encode(cursor.into_inner()))
+                        Ok(general_purpose::STANDARD.encode(cursor.into_inner()))
                     })();
 
                     // Update job with result
@@ -510,7 +510,7 @@ impl WebServer {
         let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
         upscaled.write_to(&mut cursor, img_format)
             .map_err(|e| SrganError::Image(e))?;
-        let encoded = STANDARD.encode(cursor.into_inner());
+        let encoded = general_purpose::STANDARD.encode(cursor.into_inner());
 
         let processing_time = start_time.elapsed()
             .map(|d| d.as_millis() as u64)
