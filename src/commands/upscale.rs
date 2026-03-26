@@ -10,6 +10,7 @@ use ndarray::{ArrayD, Axis, IxDyn};
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
+use image;
 
 const TILE_SIZE: usize = 256;
 const TILE_OVERLAP: usize = 32;
@@ -17,7 +18,15 @@ const LARGE_IMAGE_THRESHOLD: usize = 4_000_000; // 4 megapixels
 
 pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 	let factor = parse_factor(app_m);
-	let network = load_network(app_m, factor)?;
+
+	// Resolve the input path early so auto-detect can open the image for classification.
+	let input_path_str = app_m
+		.value_of("INPUT_FILE")
+		.ok_or_else(|| SrganError::InvalidParameter("No input file given".to_string()))?;
+	let input_path_buf = validation::validate_input_file(input_path_str)?;
+	validation::validate_image_extension(&input_path_buf)?;
+
+	let network = load_network(app_m, factor, &input_path_buf)?;
 
 	// GPU device selection
 	let device_label = if app_m.is_present("GPU") {
@@ -43,15 +52,10 @@ pub fn upscale(app_m: &ArgMatches) -> Result<()> {
 	let spinner = ProgressBar::new_spinner();
 	spinner.set_message(format!("Processing [{}]...", device_label));
 
-	let input_path = app_m
-		.value_of("INPUT_FILE")
-		.ok_or_else(|| SrganError::InvalidParameter("No input file given".to_string()))?;
 	let output_path = app_m
 		.value_of("OUTPUT_FILE")
 		.ok_or_else(|| SrganError::InvalidParameter("No output file given".to_string()))?;
 
-	let input_path_buf = validation::validate_input_file(input_path)?;
-	validation::validate_image_extension(&input_path_buf)?;
 	let output_path_buf = validation::validate_output_path(output_path)?;
 	validation::validate_factor(factor)?;
 
@@ -115,7 +119,7 @@ fn parse_factor(app_m: &ArgMatches) -> usize {
 		.unwrap_or(network::DEFAULT_FACTOR)
 }
 
-fn load_network(app_m: &ArgMatches, factor: usize) -> Result<UpscalingNetwork> {
+fn load_network(app_m: &ArgMatches, factor: usize, input_path: &Path) -> Result<UpscalingNetwork> {
 	if let Some(file_str) = app_m.value_of("CUSTOM") {
 		let param_path = validation::validate_input_file(file_str)?;
 		let mut param_file = File::open(&param_path)?;
@@ -124,6 +128,22 @@ fn load_network(app_m: &ArgMatches, factor: usize) -> Result<UpscalingNetwork> {
 		let network_desc = crate::network_from_bytes(&data)?;
 		UpscalingNetwork::new(network_desc, "custom trained neural net")
 			.map_err(|e| SrganError::Network(e))
+	} else if app_m.is_present("AUTO_DETECT") && app_m.value_of("PARAMETERS").is_none() {
+		// Auto-detect: open the image, classify it, pick the best model.
+		match image::open(input_path) {
+			Ok(img) => {
+				let image_type = crate::detection::detect_image_type(&img);
+				let label = crate::detection::recommended_model_for(&image_type);
+				info!("Auto-detected image type: {} → model: {}", image_type, label);
+				UpscalingNetwork::from_label(label, Some(factor))
+					.map_err(|e| SrganError::Network(e))
+			}
+			Err(e) => {
+				warn!("Auto-detect: could not open image for classification ({}); falling back to 'natural'", e);
+				UpscalingNetwork::from_label("natural", Some(factor))
+					.map_err(|e| SrganError::Network(e))
+			}
+		}
 	} else {
 		let param_type = app_m.value_of("PARAMETERS").unwrap_or("natural");
 		UpscalingNetwork::from_label(param_type, Some(factor))

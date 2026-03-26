@@ -10,6 +10,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.arg(build_output_file_arg())
 		.arg(build_parameters_arg())
 		.arg(build_custom_arg())
+		.arg(build_auto_detect_arg())
 		.arg(build_bilinear_factor_arg())
 		.arg(build_gpu_flag_arg())
 		.arg(build_format_arg())
@@ -88,6 +89,16 @@ fn build_custom_arg() -> Arg<'static, 'static> {
 		.value_name("PARAMETER_FILE")
 		.help("Sets a custom parameter file (.rsr) to use with the neural net")
 		.empty_values(false)
+}
+
+fn build_auto_detect_arg() -> Arg<'static, 'static> {
+	Arg::with_name("AUTO_DETECT")
+		.long("auto-detect")
+		.help(
+			"Auto-detect image type (photo/anime/illustration) and select the best model.\n\
+             Ignored when --parameters or --custom is also specified.",
+		)
+		.takes_value(false)
 }
 
 fn build_bilinear_factor_arg() -> Arg<'static, 'static> {

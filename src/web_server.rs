@@ -60,6 +60,10 @@ impl Default for ServerConfig {
     }
 }
 
+fn default_auto_detect() -> bool {
+    true
+}
+
 /// API request for image upscaling
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpscaleRequest {
@@ -76,6 +80,23 @@ pub struct UpscaleRequest {
     /// Waifu2x upscaling factor (1 or 2).
     /// Only used when `model` is `"waifu2x"` (ignored otherwise).
     pub waifu2x_scale: Option<u8>,
+    /// When `true` (default) and `model` is `None`, auto-detect the image type
+    /// and select the best model automatically.
+    #[serde(default = "default_auto_detect")]
+    pub auto_detect: bool,
+}
+
+/// Request body for the `/api/v1/detect` endpoint.
+#[derive(Debug, Deserialize)]
+pub struct DetectRequest {
+    pub image_data: String,  // Base64 encoded image
+}
+
+/// Response from the `/api/v1/detect` endpoint.
+#[derive(Debug, Serialize)]
+pub struct DetectResponse {
+    pub detected_type: String,
+    pub recommended_model: String,
 }
 
 /// API response for image upscaling
@@ -271,6 +292,7 @@ impl WebServer {
         info!("API endpoints:");
         info!("  POST /api/v1/upscale         - Synchronous image upscaling");
         info!("  POST /api/v1/upscale/async   - Asynchronous image upscaling");
+        info!("  POST /api/v1/detect          - Detect image type (photo/anime/illustration)");
         info!("  POST /api/v1/batch           - Batch upscaling (sync ≤10 images, else async)");
         info!("  GET  /api/v1/batch/{{id}}     - Poll async batch status");
         info!("  GET  /api/v1/job/{{id}}       - Check single-image job status");
@@ -342,6 +364,7 @@ impl WebServer {
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
                 ("POST", "/api/batch") | ("POST", "/api/v1/batch") => self.handle_batch(&request),
+                ("POST", "/api/v1/detect") => self.handle_detect(&request),
                 ("POST", "/api/v1/billing/checkout") => self.handle_billing_checkout(&request),
                 ("POST", "/api/v1/billing/webhook") => self.handle_billing_webhook(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
@@ -617,6 +640,38 @@ impl WebServer {
         }
     }
 
+    /// POST /api/v1/detect — classify image type without upscaling.
+    fn handle_detect(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+
+        let req: DetectRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        let image_data = match general_purpose::STANDARD.decode(&req.image_data) {
+            Ok(d) => d,
+            Err(e) => return self.error_response(400, &format!("Invalid base64: {}", e)),
+        };
+
+        let img = match image::load_from_memory(&image_data) {
+            Ok(img) => img,
+            Err(e) => return self.error_response(400, &format!("Invalid image: {}", e)),
+        };
+
+        let image_type = crate::detection::detect_image_type(&img);
+        let response = DetectResponse {
+            detected_type: image_type.as_str().to_string(),
+            recommended_model: crate::detection::recommended_model_for(&image_type).to_string(),
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            serde_json::to_string(&response)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        )
+    }
+
     /// Process image upscaling from a pre-decoded DynamicImage
     fn process_image_decoded(
         &self,
@@ -628,7 +683,16 @@ impl WebServer {
         let network_factor = self.network.factor();
         let requested_factor = request.scale_factor.unwrap_or(network_factor);
 
-        let effective_label = Self::resolve_model_label(&request);
+        // When auto_detect is enabled and no model is explicitly specified,
+        // detect the image type and pick the recommended model label.
+        let effective_label = if request.auto_detect && request.model.is_none() {
+            let image_type = crate::detection::detect_image_type(&img);
+            let label = crate::detection::recommended_model_for(&image_type);
+            log::info!("Auto-detected image type: {} → model: {}", image_type, label);
+            label.to_string()
+        } else {
+            Self::resolve_model_label(&request)
+        };
 
         if requested_factor != network_factor {
             warn!(
