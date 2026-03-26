@@ -911,7 +911,7 @@ fn build_models_subcommand() -> App<'static, 'static> {
 		.about("Manage pre-trained SRGAN models")
 		.subcommand(
 			SubCommand::with_name("list")
-				.about("List all available models"),
+				.about("List all available models (built-in + custom)"),
 		)
 		.subcommand(
 			SubCommand::with_name("download")
@@ -928,6 +928,65 @@ fn build_models_subcommand() -> App<'static, 'static> {
 						.short("d")
 						.long("dir")
 						.value_name("DIR"),
+				),
+		)
+		.subcommand(
+			SubCommand::with_name("add")
+				.about("Register a custom model in the plugin registry (~/.srgan/models/)")
+				.arg(
+					Arg::with_name("name")
+						.help("Short identifier for the model (e.g. myphoto4x)")
+						.short("n")
+						.long("name")
+						.value_name("NAME")
+						.required(true),
+				)
+				.arg(
+					Arg::with_name("display_name")
+						.help("Human-readable display name (defaults to <name> if omitted)")
+						.long("display-name")
+						.value_name("DISPLAY_NAME"),
+				)
+				.arg(
+					Arg::with_name("model_type")
+						.help("Model architecture type: esrgan, waifu2x, custom")
+						.short("t")
+						.long("type")
+						.value_name("TYPE")
+						.default_value("custom"),
+				)
+				.arg(
+					Arg::with_name("scale")
+						.help("Scale factor(s), comma-separated (e.g. 4 or 2,4)")
+						.short("s")
+						.long("scale")
+						.value_name("SCALE")
+						.default_value("4"),
+				)
+				.arg(
+					Arg::with_name("description")
+						.help("Optional description")
+						.long("desc")
+						.value_name("DESCRIPTION")
+						.default_value(""),
+				)
+				.arg(
+					Arg::with_name("weights")
+						.help("Absolute path to the model weights file")
+						.short("w")
+						.long("weights")
+						.value_name("PATH")
+						.required(true),
+				),
+		)
+		.subcommand(
+			SubCommand::with_name("remove")
+				.about("Remove a custom model from the registry")
+				.arg(
+					Arg::with_name("name")
+						.help("Name of the custom model to remove")
+						.required(true)
+						.index(1),
 				),
 		)
 }

@@ -438,68 +438,101 @@ impl WebServer {
         )
     }
     
-    /// Handle list models
+    /// Handle list models — includes built-in models plus any custom models
+    /// registered in the plugin registry (~/.srgan/models/).
     fn handle_list_models(&self) -> String {
+        // Built-in model list (static)
+        let mut models = vec![
+            serde_json::json!({
+                "name": "natural",
+                "display_name": "Natural (SRGAN)",
+                "description": "Neural net trained on natural photographs with L1 loss",
+                "architecture": "srgan",
+                "scale_factors": [4],
+                "recommended_for": ["photos", "general"],
+                "source": "built-in"
+            }),
+            serde_json::json!({
+                "name": "anime",
+                "display_name": "Anime (SRGAN)",
+                "description": "Neural net trained on animation images with L1 loss",
+                "architecture": "srgan",
+                "scale_factors": [4],
+                "recommended_for": ["anime", "illustrations", "cartoons"],
+                "source": "built-in"
+            }),
+            serde_json::json!({
+                "name": "waifu2x",
+                "display_name": "Waifu2x",
+                "description": "Waifu2x-style model for anime/illustration upscaling with configurable noise reduction (noise_level 0–3, scale 1×/2×)",
+                "architecture": "waifu2x",
+                "scale_factors": [1, 2],
+                "recommended_for": ["anime", "illustrations", "photos"],
+                "parameters": {
+                    "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
+                    "waifu2x_scale": "1 or 2 (default 2)"
+                },
+                "variants": crate::waifu2x::WAIFU2X_LABELS,
+                "source": "built-in"
+            }),
+            serde_json::json!({
+                "name": "real-esrgan",
+                "display_name": "Real-ESRGAN ×4",
+                "description": "Real-ESRGAN ×4 for general photos — trained on synthetic real-world degradations (JPEG artifacts, Gaussian noise, blur). Best for compressed or noisy source images.",
+                "architecture": "real-esrgan",
+                "scale_factors": [4],
+                "recommended_for": ["photos", "compressed", "noisy", "real-world"],
+                "source": "built-in"
+            }),
+            serde_json::json!({
+                "name": "real-esrgan-anime",
+                "display_name": "Real-ESRGAN Anime ×4",
+                "description": "Real-ESRGAN ×4 optimised for anime and illustration content — uses the anime-specific degradation pipeline for sharper line art.",
+                "architecture": "real-esrgan",
+                "scale_factors": [4],
+                "recommended_for": ["anime", "illustrations", "cartoons", "line-art"],
+                "source": "built-in"
+            }),
+            serde_json::json!({
+                "name": "real-esrgan-x2",
+                "display_name": "Real-ESRGAN ×2",
+                "description": "Real-ESRGAN ×2 for general photos — lower memory usage than the ×4 variant; ideal when only a moderate resolution boost is needed.",
+                "architecture": "real-esrgan",
+                "scale_factors": [2],
+                "recommended_for": ["photos", "general", "low-memory"],
+                "source": "built-in"
+            }),
+            serde_json::json!({
+                "name": "bilinear",
+                "display_name": "Bilinear",
+                "description": "Bilinear interpolation (no neural network)",
+                "architecture": "bilinear",
+                "scale_factors": [2, 4],
+                "recommended_for": ["general", "quick-preview"],
+                "source": "built-in"
+            }),
+        ];
+
+        // Append custom models from the plugin registry
+        if let Ok(registry) = crate::model_registry::ModelRegistry::load() {
+            for entry in registry.custom_models() {
+                models.push(serde_json::json!({
+                    "name": entry.name,
+                    "display_name": entry.display_name,
+                    "description": entry.description,
+                    "architecture": entry.model_type.as_str(),
+                    "scale_factors": entry.scale_factors,
+                    "weight_path": entry.weight_path,
+                    "source": "custom"
+                }));
+            }
+        }
+
         let response = serde_json::json!({
-            "models": [
-                {
-                    "name": "natural",
-                    "description": "Neural net trained on natural photographs with L1 loss",
-                    "architecture": "srgan",
-                    "scale_factor": 4,
-                    "recommended_for": ["photos", "general"]
-                },
-                {
-                    "name": "anime",
-                    "description": "Neural net trained on animation images with L1 loss",
-                    "architecture": "srgan",
-                    "scale_factor": 4,
-                    "recommended_for": ["anime", "illustrations", "cartoons"]
-                },
-                {
-                    "name": "waifu2x",
-                    "description": "Waifu2x-style model for anime/illustration upscaling with configurable noise reduction (noise_level 0–3, scale 1×/2×)",
-                    "architecture": "waifu2x",
-                    "scale_factor": 4,
-                    "recommended_for": ["anime", "illustrations", "photos"],
-                    "parameters": {
-                        "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
-                        "waifu2x_scale": "1 or 2 (default 2)"
-                    },
-                    "variants": crate::waifu2x::WAIFU2X_LABELS
-                },
-                {
-                    "name": "real-esrgan",
-                    "description": "Real-ESRGAN ×4 for general photos — trained on synthetic real-world degradations (JPEG artifacts, Gaussian noise, blur). Best for compressed or noisy source images.",
-                    "architecture": "real-esrgan",
-                    "scale_factor": 4,
-                    "recommended_for": ["photos", "compressed", "noisy", "real-world"]
-                },
-                {
-                    "name": "real-esrgan-anime",
-                    "description": "Real-ESRGAN ×4 optimised for anime and illustration content — uses the anime-specific degradation pipeline for sharper line art.",
-                    "architecture": "real-esrgan",
-                    "scale_factor": 4,
-                    "recommended_for": ["anime", "illustrations", "cartoons", "line-art"]
-                },
-                {
-                    "name": "real-esrgan-x2",
-                    "description": "Real-ESRGAN ×2 for general photos — lower memory usage than the ×4 variant; ideal when only a moderate resolution boost is needed.",
-                    "architecture": "real-esrgan",
-                    "scale_factor": 2,
-                    "recommended_for": ["photos", "general", "low-memory"]
-                },
-                {
-                    "name": "bilinear",
-                    "description": "Bilinear interpolation (no neural network)",
-                    "architecture": "bilinear",
-                    "scale_factor": 4,
-                    "recommended_for": ["general", "quick-preview"]
-                }
-            ],
+            "models": models,
             "default": "natural",
         });
-        
+
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
             response
