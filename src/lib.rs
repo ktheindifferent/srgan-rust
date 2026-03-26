@@ -19,6 +19,8 @@ extern crate serde;
 extern crate smallvec;
 extern crate xz2;
 
+pub mod api;
+pub mod storage;
 pub mod aligned_crop;
 pub mod benchmarks;
 pub mod cli;
@@ -38,6 +40,7 @@ pub mod model_manager;
 pub mod network;
 pub mod parallel;
 pub mod psnr;
+pub mod ssim;
 pub mod profiling;
 pub mod thread_safe_network;
 pub mod thread_safety_tests;
@@ -219,6 +222,41 @@ pub fn read(file: &mut File) -> ImageResult<ArrayD<f32>> {
 pub fn save(image: ArrayD<f32>, file: &mut File) -> ImageResult<()> {
 	stdout().flush().ok();
 	data_to_image(image.subview(Axis(0), 0)).write_to(file, ImageFormat::PNG)
+}
+
+/// Save tensor of shape [1, H, W, 3] with explicit format and JPEG quality control.
+///
+/// Supported formats: "png", "jpeg"/"jpg", "webp" (falls back to PNG if unsupported).
+/// `quality` is used for JPEG (1–100).
+pub fn save_with_format(
+	image: ArrayD<f32>,
+	file: &mut File,
+	format: &str,
+	quality: u8,
+) -> error::Result<()> {
+	stdout().flush().ok();
+	let img = data_to_image(image.subview(Axis(0), 0));
+	match format.to_lowercase().as_str() {
+		"jpeg" | "jpg" => {
+			let rgb = img.to_rgb();
+			let (w, h) = rgb.dimensions();
+			image::jpeg::JPEGEncoder::new_with_quality(file, quality)
+				.encode(rgb.as_ref(), w, h, image::ColorType::RGB(8))
+				.map_err(error::SrganError::Io)
+		}
+		"png" => img
+			.write_to(file, ImageFormat::PNG)
+			.map_err(error::SrganError::Image),
+		"webp" => {
+			// image 0.19 does not support WebP encoding; fall back to PNG
+			log::warn!("WebP output not supported in this build, saving as PNG");
+			img.write_to(file, ImageFormat::PNG)
+				.map_err(error::SrganError::Image)
+		}
+		_ => img
+			.write_to(file, ImageFormat::PNG)
+			.map_err(error::SrganError::Image),
+	}
 }
 
 /// Takes an image tensor of shape [1, H, W, 3] and returns one of shape [1, H/factor, W/factor, 3].

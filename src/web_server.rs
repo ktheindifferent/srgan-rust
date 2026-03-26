@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
@@ -10,6 +11,22 @@ use image::{ImageFormat, GenericImage};
 use log::{info, warn};
 use crate::error::SrganError;
 use crate::thread_safe_network::ThreadSafeNetwork;
+use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, SubscriptionTier};
+use crate::api::middleware::TierRateLimiter;
+use crate::storage::S3Config;
+
+fn format_uptime(secs: u64) -> String {
+    let days = secs / 86400;
+    let hours = (secs % 86400) / 3600;
+    let mins = (secs % 3600) / 60;
+    if days > 0 {
+        format!("{}d {}h {}m", days, hours, mins)
+    } else if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m {}s", mins, secs % 60)
+    }
+}
 
 /// Web server configuration
 #[derive(Debug, Clone)]
@@ -57,7 +74,8 @@ pub struct UpscaleRequest {
 #[derive(Debug, Serialize)]
 pub struct UpscaleResponse {
     pub success: bool,
-    pub image_data: Option<String>,  // Base64 encoded result
+    pub image_data: Option<String>,  // Base64 encoded result (None when s3_url is set)
+    pub s3_url: Option<String>,      // Presigned S3 URL (set when S3 is configured)
     pub error: Option<String>,
     pub metadata: ResponseMetadata,
 }
@@ -152,6 +170,16 @@ pub struct WebServer {
     jobs: Arc<Mutex<HashMap<String, JobInfo>>>,
     batch_jobs: Arc<Mutex<HashMap<String, BatchJobInfo>>>,
     rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// Per-tier rate limiter (task 3)
+    tier_rate_limiter: Arc<TierRateLimiter>,
+    /// Billing database: API key → user account (task 1)
+    billing_db: Arc<Mutex<BillingDb>>,
+    /// S3 storage config loaded from env vars (task 2)
+    s3_config: Option<S3Config>,
+    /// Server start time for uptime reporting (task 4)
+    server_start_time: SystemTime,
+    /// Total images successfully processed (task 4)
+    images_processed: Arc<AtomicU64>,
 }
 
 /// Cached result
@@ -208,6 +236,8 @@ impl WebServer {
         
         let rate_limit = config.rate_limit.unwrap_or(60);
         
+        let s3_config = S3Config::from_env();
+
         Ok(Self {
             config,
             network: Arc::new(network),
@@ -215,6 +245,11 @@ impl WebServer {
             jobs: Arc::new(Mutex::new(HashMap::new())),
             batch_jobs: Arc::new(Mutex::new(HashMap::new())),
             rate_limiter: Arc::new(Mutex::new(RateLimiter::new(rate_limit))),
+            tier_rate_limiter: Arc::new(TierRateLimiter::new()),
+            billing_db: Arc::new(Mutex::new(BillingDb::new())),
+            s3_config,
+            server_start_time: SystemTime::now(),
+            images_processed: Arc::new(AtomicU64::new(0)),
         })
     }
     
@@ -295,9 +330,13 @@ impl WebServer {
             let response = match (method, path) {
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") => self.handle_list_models(),
+                ("GET", "/dashboard") => self.handle_dashboard(),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
                 ("POST", "/api/batch") | ("POST", "/api/v1/batch") => self.handle_batch(&request),
+                ("POST", "/api/v1/billing/checkout") => self.handle_billing_checkout(&request),
+                ("POST", "/api/v1/billing/webhook") => self.handle_billing_webhook(&request),
+                ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 _ if method == "GET" && (path.starts_with("/api/job/") || path.starts_with("/api/v1/job/")) => self.handle_job_status(path),
                 _ if method == "GET" && (path.starts_with("/api/result/") || path.starts_with("/api/v1/result/")) => self.handle_job_result(path),
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
@@ -350,8 +389,9 @@ impl WebServer {
 
         match serde_json::from_str::<UpscaleRequest>(&body) {
             Ok(req) => {
-                if !self.check_rate_limit("client") {
-                    return self.error_response(429, "Rate limit exceeded");
+                let (allowed, rl_headers) = self.tier_rate_limit_check(request);
+                if !allowed {
+                    return self.rate_limit_response(&rl_headers, 3600);
                 }
 
                 // Decode base64 up-front so we can check dimensions
@@ -586,9 +626,27 @@ impl WebServer {
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
 
+        self.images_processed.fetch_add(1, Ordering::Relaxed);
+
+        // Try to upload to S3 if configured; fall back to base64 on failure
+        let (image_data_field, s3_url_field) = if let Some(ref cfg) = self.s3_config {
+            let key = format!("results/{}.png", self.generate_job_id());
+            let raw = general_purpose::STANDARD.decode(&encoded).unwrap_or_default();
+            match crate::storage::upload_result(cfg, &key, &raw, "image/png") {
+                Ok(presigned) => (None, Some(presigned)),
+                Err(e) => {
+                    warn!("S3 upload failed, falling back to base64: {}", e);
+                    (Some(encoded), None)
+                }
+            }
+        } else {
+            (Some(encoded), None)
+        };
+
         Ok(UpscaleResponse {
             success: true,
-            image_data: Some(encoded),
+            image_data: image_data_field,
+            s3_url: s3_url_field,
             error: None,
             metadata: ResponseMetadata {
                 original_size,
@@ -876,6 +934,247 @@ impl WebServer {
         } else {
             self.error_response(500, "Failed to acquire batch lock")
         }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// Extract the value of a named HTTP header from a raw request string.
+    fn extract_header(&self, request: &str, header_name: &str) -> Option<String> {
+        let prefix_lc = format!("{}: ", header_name.to_lowercase());
+        for line in request.lines() {
+            let line_lc = line.to_lowercase();
+            if line_lc.starts_with(&prefix_lc) {
+                return Some(line[prefix_lc.len()..].trim().to_string());
+            }
+        }
+        None
+    }
+
+    /// Resolve the tier for an API key (creates a free account on first use).
+    fn tier_for_key(&self, api_key: &str) -> SubscriptionTier {
+        if let Ok(mut db) = self.billing_db.lock() {
+            db.get_or_create_free(api_key).tier.clone()
+        } else {
+            SubscriptionTier::Free
+        }
+    }
+
+    /// Rate-limit check using the tier-aware limiter.
+    /// Returns the HTTP headers string and whether the request is allowed.
+    fn tier_rate_limit_check(&self, request: &str) -> (bool, String) {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_else(|| "anonymous".to_string());
+        let tier = self.tier_for_key(&api_key);
+        let result = self.tier_rate_limiter.check(&api_key, &tier);
+        let headers = result.headers();
+        (result.allowed, headers)
+    }
+
+    /// Build a 429 response with rate-limit headers.
+    fn rate_limit_response(&self, rl_headers: &str, retry_after: u64) -> String {
+        let body = serde_json::json!({
+            "error": "Rate limit exceeded",
+            "retry_after_seconds": retry_after,
+        });
+        format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\n{}Retry-After: {}\r\n\r\n{}",
+            rl_headers, retry_after, body
+        )
+    }
+
+    // ── Billing handlers ──────────────────────────────────────────────────────
+
+    /// POST /api/v1/billing/checkout — create Stripe checkout session
+    fn handle_billing_checkout(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+        let checkout_req: CheckoutRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        let stripe_key = match std::env::var("STRIPE_SECRET_KEY") {
+            Ok(k) => k,
+            Err(_) => return self.error_response(500, "Stripe not configured (STRIPE_SECRET_KEY missing)"),
+        };
+
+        match crate::api::billing::create_checkout_session(&checkout_req, &stripe_key) {
+            Ok(session) => format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                serde_json::to_string(&session)
+                    .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+            ),
+            Err(e) => self.error_response(502, &format!("Stripe error: {}", e)),
+        }
+    }
+
+    /// POST /api/v1/billing/webhook — handle Stripe webhook events
+    fn handle_billing_webhook(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+        let signature = self
+            .extract_header(request, "stripe-signature")
+            .unwrap_or_default();
+
+        let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+
+        match crate::api::billing::handle_stripe_webhook(
+            &body,
+            &webhook_secret,
+            &signature,
+            &self.billing_db,
+        ) {
+            Ok(msg) => {
+                let response = serde_json::json!({ "received": true, "result": msg });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    response
+                )
+            }
+            Err(e) => self.error_response(400, &e),
+        }
+    }
+
+    /// GET /api/v1/billing/status — subscription tier and credits remaining
+    fn handle_billing_status(&self, request: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        let status = if let Ok(mut db) = self.billing_db.lock() {
+            let account = db.get_or_create_free(&api_key);
+            BillingStatus {
+                tier: account.tier.as_str().to_string(),
+                credits_remaining: account.credits_remaining,
+                credits_reset_at: account.credits_reset_at,
+            }
+        } else {
+            return self.error_response(500, "Failed to acquire billing lock");
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            serde_json::to_string(&status)
+                .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        )
+    }
+
+    // ── Dashboard handler ─────────────────────────────────────────────────────
+
+    /// GET /dashboard — HTML health dashboard
+    fn handle_dashboard(&self) -> String {
+        let uptime_secs = SystemTime::now()
+            .duration_since(self.server_start_time)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let images_processed = self.images_processed.load(Ordering::Relaxed);
+
+        // Count jobs by status
+        let (queued, processing, completed, failed) =
+            if let Ok(jobs) = self.jobs.lock() {
+                let mut q = 0u64; let mut p = 0u64; let mut c = 0u64; let mut f = 0u64;
+                for job in jobs.values() {
+                    match &job.status {
+                        JobStatus::Pending    => q += 1,
+                        JobStatus::Processing => p += 1,
+                        JobStatus::Completed  => c += 1,
+                        JobStatus::Failed(_)  => f += 1,
+                    }
+                }
+                (q, p, c, f)
+            } else {
+                (0, 0, 0, 0)
+            };
+
+        let (credits_issued, credits_consumed) =
+            if let Ok(db) = self.billing_db.lock() {
+                let (i, c) = db.totals_today();
+                (i as u64, c as u64)
+            } else {
+                (0, 0)
+            };
+
+        let load_avg = sys_info::loadavg().map(|la| la.one).unwrap_or(0.0);
+        let mem_total_mb = sys_info::mem_info().map(|m| m.total / 1024).unwrap_or(0);
+        let mem_free_mb  = sys_info::mem_info().map(|m| m.free  / 1024).unwrap_or(0);
+        let mem_used_mb  = mem_total_mb.saturating_sub(mem_free_mb);
+
+        let model_name = self.network.display();
+        let model_factor = self.network.factor();
+        let s3_status = if self.s3_config.is_some() { "configured" } else { "disabled" };
+        let uptime_str = format_uptime(uptime_secs);
+
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="refresh" content="30">
+  <title>SRGAN-Rust Dashboard</title>
+  <style>
+    body  {{ font-family: monospace; background:#1a1a2e; color:#e0e0e0; padding:2rem; margin:0; }}
+    h1    {{ color:#00d4ff; margin-bottom:0.25rem; }}
+    h2    {{ color:#7ec8e3; border-bottom:1px solid #333; padding-bottom:0.3rem; margin-top:2rem; }}
+    .meta {{ color:#888; font-size:0.85rem; margin-bottom:1.5rem; }}
+    .grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:1rem; margin:1rem 0; }}
+    .card {{ background:#16213e; border:1px solid #0f3460; border-radius:8px; padding:1rem; }}
+    .stat {{ font-size:1.8rem; color:#00d4ff; font-weight:bold; }}
+    .label{{ color:#888; font-size:0.75rem; margin-top:0.25rem; }}
+    .ok   {{ color:#4caf50; }} .warn {{ color:#ff9800; }}
+    .badge{{ display:inline-block; padding:0.15rem 0.5rem; border-radius:4px;
+             background:#0f3460; color:#00d4ff; font-size:0.8rem; }}
+  </style>
+</head>
+<body>
+  <h1>SRGAN-Rust Dashboard</h1>
+  <p class="meta">
+    Model: <span class="ok">{model_name} {model_factor}x</span> &nbsp;|&nbsp;
+    Uptime: <strong>{uptime_str}</strong> &nbsp;|&nbsp;
+    Version: <span class="badge">0.2.0</span> &nbsp;|&nbsp;
+    S3: <span class="{s3_class}">{s3_status}</span>
+  </p>
+
+  <h2>Job Queue</h2>
+  <div class="grid">
+    <div class="card"><div class="stat">{queued}</div><div class="label">Queued</div></div>
+    <div class="card"><div class="stat">{processing}</div><div class="label">Processing</div></div>
+    <div class="card"><div class="stat">{completed}</div><div class="label">Completed</div></div>
+    <div class="card"><div class="stat">{failed}</div><div class="label">Failed</div></div>
+    <div class="card"><div class="stat">{images_processed}</div><div class="label">Total Processed</div></div>
+  </div>
+
+  <h2>Credits (Today)</h2>
+  <div class="grid">
+    <div class="card"><div class="stat">{credits_issued}</div><div class="label">Issued</div></div>
+    <div class="card"><div class="stat">{credits_consumed}</div><div class="label">Consumed</div></div>
+  </div>
+
+  <h2>System</h2>
+  <div class="grid">
+    <div class="card"><div class="stat">{load_avg:.2}</div><div class="label">Load Avg (1m)</div></div>
+    <div class="card"><div class="stat">{mem_used_mb} MB</div><div class="label">RAM Used</div></div>
+    <div class="card"><div class="stat">{mem_total_mb} MB</div><div class="label">RAM Total</div></div>
+  </div>
+</body>
+</html>"#,
+            model_name = model_name,
+            model_factor = model_factor,
+            uptime_str = uptime_str,
+            s3_class = if self.s3_config.is_some() { "ok" } else { "warn" },
+            s3_status = s3_status,
+            queued = queued,
+            processing = processing,
+            completed = completed,
+            failed = failed,
+            images_processed = images_processed,
+            credits_issued = credits_issued,
+            credits_consumed = credits_consumed,
+            load_avg = load_avg,
+            mem_used_mb = mem_used_mb,
+            mem_total_mb = mem_total_mb,
+        );
+
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n{}", html)
     }
 
     /// Start cache cleanup thread
