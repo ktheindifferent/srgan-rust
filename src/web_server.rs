@@ -14,7 +14,6 @@ use crate::thread_safe_network::ThreadSafeNetwork;
 use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, SubscriptionTier};
 use crate::api::middleware::TierRateLimiter;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
-use crate::api::org::{OrgDb, AddMemberRequest, CreateOrgRequest};
 use crate::storage::S3Config;
 
 // ── Request metrics ──────────────────────────────────────────────────────────
@@ -1855,7 +1854,6 @@ function renderEndpointMetrics(metrics){
         normalised
     }
 
-    /// Handle not found
     // ── Organization endpoints ────────────────────────────────────────────────
 
     /// POST /api/orgs — create a new organization.
@@ -4061,70 +4059,6 @@ setInterval(refreshAll, 5000);
         });
     }
 
-    // ── Multi-tenant org handlers ────────────────────────────────────────────
-
-    /// POST /api/orgs — create a new organization.
-    ///
-    /// Body: `{ "name": "Acme Corp" }`
-    /// Requires a valid API key (the caller becomes the org owner).
-    fn handle_create_org(&self, request: &str) -> String {
-        let api_key = match self.extract_header(request, "x-api-key") {
-            Some(k) if !k.is_empty() => k,
-            _ => return self.error_response(401, "Missing x-api-key header"),
-        };
-
-        let body = self.extract_body(request);
-        let req: serde_json::Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => return self.error_response(400, "Invalid JSON body"),
-        };
-
-        let name = match req.get("name").and_then(|v| v.as_str()) {
-            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
-            _ => return self.error_response(400, "Missing required field: name"),
-        };
-
-        let mut db = match self.org_db.lock() {
-            Ok(g) => g,
-            Err(_) => return self.error_response(500, "Internal lock error"),
-        };
-
-        match db.create_org(name, api_key) {
-            Ok(org) => {
-                let body = serde_json::to_string(&org).unwrap_or_default();
-                format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{}", body)
-            }
-            Err(e) => self.error_response(400, &e),
-        }
-    }
-
-    /// GET /api/orgs — retrieve the org for the authenticated user.
-    ///
-    /// Returns the organization the caller belongs to, or 404 if none.
-    fn handle_get_org_by_query(&self, request: &str) -> String {
-        let api_key = match self.extract_header(request, "x-api-key") {
-            Some(k) if !k.is_empty() => k,
-            _ => return self.error_response(401, "Missing x-api-key header"),
-        };
-
-        let db = match self.org_db.lock() {
-            Ok(g) => g,
-            Err(_) => return self.error_response(500, "Internal lock error"),
-        };
-
-        let org_id = match db.user_org_id(&api_key) {
-            Some(id) => id.clone(),
-            None => return self.error_response(404, "No organization found for this API key"),
-        };
-
-        match db.get_org(&org_id) {
-            Some(org) => {
-                let body = serde_json::to_string(org).unwrap_or_default();
-                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}", body)
-            }
-            None => self.error_response(404, "Organization not found"),
-        }
-    }
 }
 
 #[cfg(test)]
