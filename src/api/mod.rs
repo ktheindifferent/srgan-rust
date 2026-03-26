@@ -13,6 +13,7 @@ pub mod auth;
 pub mod billing;
 pub mod jobs;
 pub mod middleware;
+pub mod org;
 pub mod rate_limit;
 pub mod upscale;
 
@@ -26,3 +27,4 @@ pub use upscale::{
     WebhookConfig, WebhookDeliveryState,
 };
 pub use jobs::{JobFilter, JobListResponse, list_jobs};
+pub use org::{OrgDb, Organization, OrgUsageResponse, CreateOrgRequest, AddMemberRequest};

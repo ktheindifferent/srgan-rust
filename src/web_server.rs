@@ -14,6 +14,7 @@ use crate::thread_safe_network::ThreadSafeNetwork;
 use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, SubscriptionTier};
 use crate::api::middleware::TierRateLimiter;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
+use crate::api::org::{OrgDb, AddMemberRequest, CreateOrgRequest};
 use crate::storage::S3Config;
 
 // ── Request metrics ──────────────────────────────────────────────────────────
@@ -297,6 +298,9 @@ pub struct JobInfo {
     /// Webhook delivery state (present when a webhook_config was supplied).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_delivery: Option<WebhookDeliveryState>,
+    /// Organization ID if this job was submitted by an org member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub org_id: Option<String>,
 }
 
 /// Request for POST /api/v1/compare
@@ -376,6 +380,8 @@ pub struct WebServer {
     images_processed: Arc<AtomicU64>,
     /// Per-endpoint request metrics (admin dashboard)
     request_metrics: Arc<Mutex<RequestMetrics>>,
+    /// Multi-tenant organization database
+    org_db: Arc<Mutex<crate::api::org::OrgDb>>,
 }
 
 /// Cached result
@@ -447,6 +453,7 @@ impl WebServer {
             server_start_time: SystemTime::now(),
             images_processed: Arc::new(AtomicU64::new(0)),
             request_metrics: Arc::new(Mutex::new(RequestMetrics::new())),
+            org_db: Arc::new(Mutex::new(crate::api::org::OrgDb::new())),
         })
     }
     
@@ -585,7 +592,7 @@ impl WebServer {
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
                 ("GET", "/api/v1/stats") => self.handle_stats(),
-                ("GET", "/api/v1/jobs") | ("GET", "/api/jobs") => self.handle_jobs(),
+                ("GET", "/api/v1/jobs") | ("GET", "/api/jobs") => self.handle_jobs(&request),
                 ("GET", "/dashboard") => self.handle_dashboard(),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
@@ -597,6 +604,19 @@ impl WebServer {
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
+                // Organization endpoints
+                ("POST", "/api/orgs") | ("POST", "/api/v1/orgs") => self.handle_create_org(&request),
+                _ if method == "GET"
+                    && (path.starts_with("/api/orgs/") || path.starts_with("/api/v1/orgs/"))
+                    && path.ends_with("/usage") => self.handle_org_usage(&request, path),
+                _ if method == "POST"
+                    && (path.starts_with("/api/orgs/") || path.starts_with("/api/v1/orgs/"))
+                    && path.ends_with("/members") => self.handle_org_add_member(&request, path),
+                _ if method == "DELETE"
+                    && (path.starts_with("/api/orgs/") || path.starts_with("/api/v1/orgs/"))
+                    && path.contains("/members/") => self.handle_org_remove_member(&request, path),
+                _ if method == "GET"
+                    && (path.starts_with("/api/orgs/") || path.starts_with("/api/v1/orgs/")) => self.handle_get_org(&request, path),
                 _ if method == "GET"
                     && (path.starts_with("/api/v1/job/") || path.starts_with("/api/job/"))
                     && path.ends_with("/webhook") => self.handle_job_webhook_status(path),
@@ -755,6 +775,14 @@ impl WebServer {
                     return self.rate_limit_response(&rl_headers, 3600);
                 }
 
+                // Deduct credit (org pool or personal)
+                let api_key = self
+                    .extract_header(request, "x-api-key")
+                    .unwrap_or_default();
+                if !api_key.is_empty() && !self.consume_credit_for_user(&api_key) {
+                    return self.error_response(402, "No credits remaining");
+                }
+
                 // Decode base64 up-front so we can check dimensions
                 let image_data = match general_purpose::STANDARD.decode(&req.image_data) {
                     Ok(d) => d,
@@ -793,6 +821,14 @@ impl WebServer {
         
         match serde_json::from_str::<UpscaleRequest>(&body) {
             Ok(req) => {
+                // Deduct credit (org pool or personal)
+                let api_key_for_credit = self
+                    .extract_header(request, "x-api-key")
+                    .unwrap_or_default();
+                if !api_key_for_credit.is_empty() && !self.consume_credit_for_user(&api_key_for_credit) {
+                    return self.error_response(402, "No credits remaining");
+                }
+
                 // Generate job ID
                 let job_id = self.generate_job_id();
 
@@ -836,6 +872,15 @@ impl WebServer {
                     input_size: job_input_size,
                     output_size: job_output_size,
                     webhook_delivery: webhook_config.as_ref().map(|_| WebhookDeliveryState::default()),
+                    org_id: {
+                        let api_key = self.extract_header(request, "x-api-key")
+                            .unwrap_or_default();
+                        if let Ok(db) = self.org_db.lock() {
+                            db.user_org_id(&api_key).cloned()
+                        } else {
+                            None
+                        }
+                    },
                 };
 
                 if let Ok(mut jobs) = self.jobs.lock() {
@@ -1811,14 +1856,186 @@ function renderEndpointMetrics(metrics){
     }
 
     /// Handle not found
+    // ── Organization endpoints ────────────────────────────────────────────────
+
+    /// POST /api/orgs — create a new organization.
+    fn handle_create_org(&self, request: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_default();
+        if api_key.is_empty() {
+            return self.error_response(401, "Missing X-Api-Key header");
+        }
+
+        let body = self.extract_body(request);
+        let req: crate::api::org::CreateOrgRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        match self.org_db.lock() {
+            Ok(mut db) => match db.create_org(req.name, api_key) {
+                Ok(org) => {
+                    let json = serde_json::to_string(&org).unwrap_or_default();
+                    format!(
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                        json
+                    )
+                }
+                Err(e) => self.error_response(400, &e),
+            },
+            Err(_) => self.error_response(500, "Internal error"),
+        }
+    }
+
+    /// GET /api/orgs/:id — get org details. Requires membership.
+    fn handle_get_org(&self, request: &str, path: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_default();
+        let org_id = Self::extract_path_segment(path, "orgs");
+        if org_id.is_empty() {
+            return self.error_response(400, "Missing org ID");
+        }
+
+        match self.org_db.lock() {
+            Ok(db) => {
+                if !db.is_member(&org_id, &api_key) {
+                    return self.error_response(403, "Not a member of this organization");
+                }
+                match db.get_org(&org_id) {
+                    Some(org) => {
+                        let members = db.list_members(&org_id);
+                        let json = serde_json::json!({
+                            "id": org.id,
+                            "name": org.name,
+                            "owner_user_id": org.owner_user_id,
+                            "created_at": org.created_at,
+                            "credit_pool": org.credit_pool,
+                            "members": members,
+                        });
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            json
+                        )
+                    }
+                    None => self.error_response(404, "Organization not found"),
+                }
+            }
+            Err(_) => self.error_response(500, "Internal error"),
+        }
+    }
+
+    /// POST /api/orgs/:id/members — add a member.
+    fn handle_org_add_member(&self, request: &str, path: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_default();
+        let org_id = Self::extract_path_segment(path, "orgs");
+        if org_id.is_empty() {
+            return self.error_response(400, "Missing org ID");
+        }
+
+        let body = self.extract_body(request);
+        let req: crate::api::org::AddMemberRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        match self.org_db.lock() {
+            Ok(mut db) => match db.add_member(&org_id, &api_key, req.user_id) {
+                Ok(()) => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    serde_json::json!({"ok": true})
+                ),
+                Err(e) => self.error_response(400, &e),
+            },
+            Err(_) => self.error_response(500, "Internal error"),
+        }
+    }
+
+    /// DELETE /api/orgs/:id/members/:user_id — remove a member.
+    fn handle_org_remove_member(&self, request: &str, path: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_default();
+
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let (org_id, target_user_id) = if let Some(orgs_idx) = segments.iter().position(|&s| s == "orgs") {
+            if orgs_idx + 3 < segments.len() && segments[orgs_idx + 2] == "members" {
+                (segments[orgs_idx + 1].to_string(), segments[orgs_idx + 3].to_string())
+            } else {
+                return self.error_response(400, "Invalid path");
+            }
+        } else {
+            return self.error_response(400, "Invalid path");
+        };
+
+        match self.org_db.lock() {
+            Ok(mut db) => match db.remove_member(&org_id, &api_key, &target_user_id) {
+                Ok(()) => format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                    serde_json::json!({"ok": true})
+                ),
+                Err(e) => self.error_response(400, &e),
+            },
+            Err(_) => self.error_response(500, "Internal error"),
+        }
+    }
+
+    /// GET /api/orgs/:id/usage — credit usage breakdown by member this month.
+    fn handle_org_usage(&self, request: &str, path: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_default();
+        let base = path.trim_end_matches("/usage");
+        let org_id = Self::extract_path_segment(base, "orgs");
+        if org_id.is_empty() {
+            return self.error_response(400, "Missing org ID");
+        }
+
+        match self.org_db.lock() {
+            Ok(db) => {
+                if !db.is_member(&org_id, &api_key) {
+                    return self.error_response(403, "Not a member of this organization");
+                }
+                match db.usage_this_month(&org_id) {
+                    Some(usage) => {
+                        let json = serde_json::to_string(&usage).unwrap_or_default();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            json
+                        )
+                    }
+                    None => self.error_response(404, "Organization not found"),
+                }
+            }
+            Err(_) => self.error_response(500, "Internal error"),
+        }
+    }
+
+    /// Extract the segment after a named path component.
+    fn extract_path_segment(path: &str, key: &str) -> String {
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if let Some(idx) = segments.iter().position(|&s| s == key) {
+            if idx + 1 < segments.len() {
+                return segments[idx + 1].to_string();
+            }
+        }
+        String::new()
+    }
+
     fn handle_not_found(&self) -> String {
         self.error_response(404, "Not found")
     }
-    
+
     /// Generate error response
     fn error_response(&self, status: u16, message: &str) -> String {
         let status_text = match status {
             400 => "Bad Request",
+            401 => "Unauthorized",
+            402 => "Payment Required",
+            403 => "Forbidden",
             404 => "Not Found",
             429 => "Too Many Requests",
             500 => "Internal Server Error",
@@ -2451,6 +2668,21 @@ function renderEndpointMetrics(metrics){
         None
     }
 
+    /// Extract a query parameter from the request line (e.g. `GET /path?key=val HTTP/1.1`).
+    fn extract_query_param(&self, request: &str, param: &str) -> Option<String> {
+        let first_line = request.lines().next()?;
+        let url = first_line.split_whitespace().nth(1)?;
+        let query = url.split('?').nth(1)?;
+        for pair in query.split('&') {
+            if let Some((k, v)) = pair.split_once('=') {
+                if k == param {
+                    return Some(v.to_string());
+                }
+            }
+        }
+        None
+    }
+
     /// Resolve the tier for an API key (creates a free account on first use).
     fn tier_for_key(&self, api_key: &str) -> SubscriptionTier {
         if let Ok(mut db) = self.billing_db.lock() {
@@ -2458,6 +2690,23 @@ function renderEndpointMetrics(metrics){
         } else {
             SubscriptionTier::Free
         }
+    }
+
+    /// Consume a credit for a job. If the user is in an org, deducts from the
+    /// org credit pool; otherwise deducts from personal credits. Returns true
+    /// if a credit was available and consumed.
+    fn consume_credit_for_user(&self, api_key: &str) -> bool {
+        // Check if user belongs to an org
+        if let Ok(mut org_db) = self.org_db.lock() {
+            if let Some(org_id) = org_db.user_org_id(api_key).cloned() {
+                return org_db.consume_org_credit(&org_id, api_key);
+            }
+        }
+        // Fall through to personal credits
+        if let Ok(mut db) = self.billing_db.lock() {
+            return db.consume_credit(api_key);
+        }
+        false
     }
 
     /// Rate-limit check using the tier-aware limiter.
@@ -2631,11 +2880,23 @@ function renderEndpointMetrics(metrics){
         )
     }
 
-    /// GET /api/v1/jobs — list recent jobs (newest first, up to 100)
-    fn handle_jobs(&self) -> String {
+    /// GET /api/v1/jobs — list recent jobs (newest first, up to 100).
+    /// Supports `?org_id=xxx` query parameter to filter by organization.
+    fn handle_jobs(&self, request: &str) -> String {
+        // Extract org_id query param from the request line
+        let org_id_filter = self.extract_query_param(request, "org_id");
+
         let jobs_snapshot: Vec<serde_json::Value> =
             if let Ok(jobs) = self.jobs.lock() {
-                let mut list: Vec<&JobInfo> = jobs.values().collect();
+                let mut list: Vec<&JobInfo> = jobs.values()
+                    .filter(|j| {
+                        if let Some(ref filter_org) = org_id_filter {
+                            j.org_id.as_deref() == Some(filter_org.as_str())
+                        } else {
+                            true
+                        }
+                    })
+                    .collect();
                 list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
                 list.truncate(100);
                 list.iter().map(|j| {
@@ -2662,6 +2923,7 @@ function renderEndpointMetrics(metrics){
                         "result_url": j.result_url,
                         "error": j.error,
                         "webhook_delivery": j.webhook_delivery,
+                        "org_id": j.org_id,
                     })
                 }).collect()
             } else {
@@ -3797,6 +4059,71 @@ setInterval(refreshAll, 5000);
                 }
             }
         });
+    }
+
+    // ── Multi-tenant org handlers ────────────────────────────────────────────
+
+    /// POST /api/orgs — create a new organization.
+    ///
+    /// Body: `{ "name": "Acme Corp" }`
+    /// Requires a valid API key (the caller becomes the org owner).
+    fn handle_create_org(&self, request: &str) -> String {
+        let api_key = match self.extract_header(request, "x-api-key") {
+            Some(k) if !k.is_empty() => k,
+            _ => return self.error_response(401, "Missing x-api-key header"),
+        };
+
+        let body = self.extract_body(request);
+        let req: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => return self.error_response(400, "Invalid JSON body"),
+        };
+
+        let name = match req.get("name").and_then(|v| v.as_str()) {
+            Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+            _ => return self.error_response(400, "Missing required field: name"),
+        };
+
+        let mut db = match self.org_db.lock() {
+            Ok(g) => g,
+            Err(_) => return self.error_response(500, "Internal lock error"),
+        };
+
+        match db.create_org(name, api_key) {
+            Ok(org) => {
+                let body = serde_json::to_string(&org).unwrap_or_default();
+                format!("HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{}", body)
+            }
+            Err(e) => self.error_response(400, &e),
+        }
+    }
+
+    /// GET /api/orgs — retrieve the org for the authenticated user.
+    ///
+    /// Returns the organization the caller belongs to, or 404 if none.
+    fn handle_get_org_by_query(&self, request: &str) -> String {
+        let api_key = match self.extract_header(request, "x-api-key") {
+            Some(k) if !k.is_empty() => k,
+            _ => return self.error_response(401, "Missing x-api-key header"),
+        };
+
+        let db = match self.org_db.lock() {
+            Ok(g) => g,
+            Err(_) => return self.error_response(500, "Internal lock error"),
+        };
+
+        let org_id = match db.user_org_id(&api_key) {
+            Some(id) => id.clone(),
+            None => return self.error_response(404, "No organization found for this API key"),
+        };
+
+        match db.get_org(&org_id) {
+            Some(org) => {
+                let body = serde_json::to_string(org).unwrap_or_default();
+                format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}", body)
+            }
+            None => self.error_response(404, "Organization not found"),
+        }
     }
 }
 
