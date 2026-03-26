@@ -54,11 +54,29 @@ fn build_output_file_arg() -> Arg<'static, 'static> {
 
 fn build_parameters_arg() -> Arg<'static, 'static> {
 	Arg::with_name("PARAMETERS")
-		.help("Sets which built-in parameters to use with the neural net. Default: natural")
+		.help(
+			"Sets which built-in parameters to use with the neural net. Default: natural\n\
+             Values: natural, anime, bilinear, waifu2x\n\
+             Waifu2x variants (noise-level + scale): waifu2x-noise{0..3}-scale{1,2}\n\
+             Examples: waifu2x, waifu2x-noise1-scale2, waifu2x-noise3-scale1",
+		)
 		.short("p")
 		.long("parameters")
 		.value_name("PARAMETERS")
-		.possible_values(&["natural", "anime", "bilinear"])
+		.possible_values(&[
+			"natural",
+			"anime",
+			"bilinear",
+			"waifu2x",
+			"waifu2x-noise0-scale1",
+			"waifu2x-noise0-scale2",
+			"waifu2x-noise1-scale1",
+			"waifu2x-noise1-scale2",
+			"waifu2x-noise2-scale1",
+			"waifu2x-noise2-scale2",
+			"waifu2x-noise3-scale1",
+			"waifu2x-noise3-scale2",
+		])
 		.empty_values(false)
 }
 

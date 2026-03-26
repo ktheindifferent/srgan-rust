@@ -6,3 +6,4 @@ mod integration_tests;
 mod model_converter_tests;
 mod video_tests;
 mod web_server_tests;
+mod waifu2x_tests;

@@ -227,6 +227,54 @@ impl LossType {
 	}
 }
 
+/// Waifu2x-specific configuration options.
+///
+/// Waifu2x supports noise reduction (levels 0–3) and two scale factors.
+/// These options are passed alongside the model label `"waifu2x"` and map
+/// to the label variants used by `UpscalingNetwork::from_label` /
+/// `ThreadSafeNetwork::from_label`.
+#[derive(Debug, Clone)]
+pub struct Waifu2xConfig {
+    /// Noise-reduction level (0 = none, 1 = light, 2 = medium, 3 = aggressive).
+    pub noise_level: u8,
+    /// Upscaling factor (1 or 2).
+    pub scale: u8,
+}
+
+impl Default for Waifu2xConfig {
+    fn default() -> Self {
+        Self {
+            noise_level: 1,
+            scale: 2,
+        }
+    }
+}
+
+impl Waifu2xConfig {
+    pub fn new(noise_level: u8, scale: u8) -> Result<Self> {
+        if noise_level > 3 {
+            return Err(SrganError::InvalidParameter(format!(
+                "Waifu2x noise_level must be 0–3, got {}",
+                noise_level
+            )));
+        }
+        if scale != 1 && scale != 2 {
+            return Err(SrganError::InvalidParameter(format!(
+                "Waifu2x scale must be 1 or 2, got {}",
+                scale
+            )));
+        }
+        Ok(Self { noise_level, scale })
+    }
+
+    /// Return the model-label string understood by `from_label`.
+    ///
+    /// Examples: `"waifu2x-noise1-scale2"`, `"waifu2x-noise0-scale1"`.
+    pub fn model_label(&self) -> String {
+        format!("waifu2x-noise{}-scale{}", self.noise_level, self.scale)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ValidationConfig {
 	pub folder: Option<String>,

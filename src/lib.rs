@@ -320,7 +320,12 @@ impl UpscalingNetwork {
 			.map_err(|e| crate::error::SrganError::Network(e))
 	}
 
-	/// Accepts labels: [natural, natural_L1, natural_rgb, anime, anime_L1, bilinear]
+	/// Accepts labels: [natural, natural_L1, natural_rgb, anime, anime_L1, bilinear,
+	///                   waifu2x, waifu2x-noise{0..3}-scale{1,2}]
+	///
+	/// Waifu2x labels (`"waifu2x"` and `"waifu2x-noise{N}-scale{M}"`) currently
+	/// fall back to the built-in anime model.
+	/// TODO: replace with real waifu2x weights once weight conversion is implemented.
 	pub fn from_label(label: &str, bilinear_factor: Option<usize>) -> ::std::result::Result<Self, String> {
 		match label {
 			"natural" => {
@@ -356,6 +361,28 @@ impl UpscalingNetwork {
 				parameters: Vec::new(),
 				display: "bilinear interpolation".into(),
 			}),
+			// Waifu2x: bare label or parameterised label (noise level + scale).
+			// TODO: Load dedicated waifu2x weights when weight-conversion pipeline
+			//       (ncnn/ONNX → .rsr) is ready.  For now, the anime model is the
+			//       best available approximation for anime/illustration inputs.
+			label if label == "waifu2x" || label.starts_with("waifu2x-") => {
+				let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
+				let display = format!(
+					"waifu2x ({}; backed by built-in anime model — TODO: real waifu2x weights)",
+					label
+				);
+				Ok(UpscalingNetwork {
+					graph: inference_sr_net(
+						desc.factor as usize,
+						desc.width,
+						desc.log_depth,
+						desc.global_node_factor as usize,
+					)
+					.map_err(|e| format!("{}", e))?,
+					parameters: desc.parameters,
+					display,
+				})
+			},
 			_ => Err(format!("Unsupported network type. Could not parse: {}", label)),
 		}
 	}

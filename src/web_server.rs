@@ -67,7 +67,15 @@ pub struct UpscaleRequest {
     pub scale_factor: Option<u32>,
     pub format: Option<String>,
     pub quality: Option<u8>,
+    /// Model label: `"natural"`, `"anime"`, `"bilinear"`,
+    /// `"waifu2x"`, or `"waifu2x-noise{0..3}-scale{1,2}"`.
     pub model: Option<String>,
+    /// Waifu2x noise-reduction level (0–3).
+    /// Only used when `model` is `"waifu2x"` (ignored otherwise).
+    pub waifu2x_noise_level: Option<u8>,
+    /// Waifu2x upscaling factor (1 or 2).
+    /// Only used when `model` is `"waifu2x"` (ignored otherwise).
+    pub waifu2x_scale: Option<u8>,
 }
 
 /// API response for image upscaling
@@ -589,6 +597,26 @@ impl WebServer {
         }
     }
     
+    /// Resolve the effective model label from an `UpscaleRequest`.
+    ///
+    /// When `model` is `"waifu2x"`, the `waifu2x_noise_level` and
+    /// `waifu2x_scale` fields are used to build the canonical label
+    /// (e.g. `"waifu2x-noise1-scale2"`).
+    fn resolve_model_label(request: &UpscaleRequest) -> String {
+        match request.model.as_deref() {
+            Some("waifu2x") => {
+                let noise = request.waifu2x_noise_level.unwrap_or(1).min(3);
+                let scale = match request.waifu2x_scale.unwrap_or(2) {
+                    1 => 1u8,
+                    _ => 2u8,
+                };
+                format!("waifu2x-noise{}-scale{}", noise, scale)
+            }
+            Some(label) => label.to_string(),
+            None => "natural".to_string(),
+        }
+    }
+
     /// Process image upscaling from a pre-decoded DynamicImage
     fn process_image_decoded(
         &self,
@@ -599,6 +627,8 @@ impl WebServer {
         let original_size = (img.width(), img.height());
         let network_factor = self.network.factor();
         let requested_factor = request.scale_factor.unwrap_or(network_factor);
+
+        let effective_label = Self::resolve_model_label(&request);
 
         if requested_factor != network_factor {
             warn!(
@@ -653,11 +683,7 @@ impl WebServer {
                 upscaled_size,
                 processing_time_ms: processing_time,
                 format: format.into(),
-                model_used: format!(
-                    "srgan_{}_{}x",
-                    request.model.as_deref().unwrap_or("natural"),
-                    network_factor
-                ),
+                model_used: format!("{}_{}x", effective_label, network_factor),
             },
         })
     }

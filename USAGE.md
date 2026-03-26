@@ -50,6 +50,14 @@ srgan-rust -p anime input.png output.png
 # For bilinear upscaling (no neural network)
 srgan-rust -p bilinear input.png output.png
 
+# Waifu2x — anime/illustration optimised (default: noise-level 1, 2× scale)
+srgan-rust -p waifu2x input.png output.png
+
+# Waifu2x with explicit noise level and scale
+srgan-rust -p waifu2x-noise2-scale2 input.png output.png   # heavy denoising, 2×
+srgan-rust -p waifu2x-noise0-scale1 input.png output.png   # denoise only, no upscale
+srgan-rust -p waifu2x-noise3-scale2 input.png output.png   # aggressive denoising, 2×
+
 # Using a custom trained model
 srgan-rust -c my_model.rsr input.png output.png
 ```
@@ -73,7 +81,12 @@ srgan-rust [OPTIONS] <INPUT_FILE> <OUTPUT_FILE>
 ```
 
 **Options:**
-- `-p, --parameters <PARAMETERS>`: Choose pre-trained model [natural, anime, bilinear] (default: natural)
+- `-p, --parameters <PARAMETERS>`: Choose pre-trained model (default: natural)
+  - `natural` — general photo upscaling
+  - `anime` — anime/illustration optimised
+  - `bilinear` — plain bilinear interpolation (no neural network)
+  - `waifu2x` — waifu2x with default options (noise-level 1, 2× scale)
+  - `waifu2x-noise{0..3}-scale{1,2}` — waifu2x with explicit noise level (0=none, 3=aggressive) and scale factor (1=denoise-only, 2=2×)
 - `-c, --custom <PARAMETER_FILE>`: Use custom trained parameters file (.rsr)
 - `-f, --factor <FACTOR>`: Integer upscaling factor (default: 4)
 
@@ -286,11 +299,40 @@ srgan-rust -c portrait_model.rsr portrait.jpg portrait_hd.png
 
 ### Anime/Artwork
 ```bash
-# Anime upscaling
+# Anime upscaling (anime model)
 srgan-rust -p anime anime_360p.png anime_1440p.png
+
+# Waifu2x — noise-reduced anime upscaling
+srgan-rust -p waifu2x anime_360p.png anime_waifu2x.png
+
+# Waifu2x with aggressive denoising (level 3) and 2× scale
+srgan-rust -p waifu2x-noise3-scale2 noisy_anime.png anime_clean.png
 
 # Pixel art (use nearest neighbor for best results)
 srgan-rust -p bilinear -f 8 pixel_art.png pixel_art_8x.png
+```
+
+### Waifu2x via REST API
+
+When using the web-server (`srgan-rust server`), pass waifu2x options in the
+JSON request body:
+
+```bash
+# Short form — waifu2x with defaults (noise 1, 2× scale)
+curl -s -X POST http://localhost:8080/api/v1/upscale \
+  -H 'Content-Type: application/json' \
+  -d '{"image_data":"<base64>","model":"waifu2x"}' | jq .metadata.model_used
+
+# Explicit parameterised label
+curl -s -X POST http://localhost:8080/api/v1/upscale \
+  -H 'Content-Type: application/json' \
+  -d '{"image_data":"<base64>","model":"waifu2x-noise2-scale2"}' | jq .
+
+# Using waifu2x_noise_level / waifu2x_scale helper fields
+# (equivalent to model="waifu2x-noise2-scale2")
+curl -s -X POST http://localhost:8080/api/v1/upscale \
+  -H 'Content-Type: application/json' \
+  -d '{"image_data":"<base64>","model":"waifu2x","waifu2x_noise_level":2,"waifu2x_scale":2}' | jq .
 ```
 
 ### Batch Processing

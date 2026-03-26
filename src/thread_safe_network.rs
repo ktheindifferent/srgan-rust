@@ -110,6 +110,11 @@ impl ThreadSafeNetwork {
         })
     }
 
+    /// Like `new`, but accepts a pre-formatted display `String`.
+    fn new_with_display(desc: NetworkDescription, display: &str) -> Result<Self> {
+        Self::new(desc, display)
+    }
+
     /// Create network from built-in natural model
     pub fn load_builtin_natural() -> Result<Self> {
         let data = crate::L1_SRGB_NATURAL_PARAMS;
@@ -143,7 +148,15 @@ impl ThreadSafeNetwork {
         Self::new(desc, "custom network")
     }
 
-    /// Load network from label
+    /// Load network from label.
+    ///
+    /// Supported labels:
+    /// - `"natural"` — built-in natural-image model
+    /// - `"anime"`   — built-in anime/illustration model
+    /// - `"bilinear"` — bilinear interpolation (no neural network)
+    /// - `"waifu2x"` or `"waifu2x-noise{N}-scale{M}"` — waifu2x variant;
+    ///   currently falls back to the anime model.
+    ///   TODO: load real waifu2x weights once weight conversion is ready.
     pub fn from_label(label: &str, bilinear_factor: Option<usize>) -> Result<Self> {
         match label {
             "natural" => Self::load_builtin_natural(),
@@ -151,6 +164,18 @@ impl ThreadSafeNetwork {
             "bilinear" => {
                 // Bilinear needs special handling
                 Self::new_bilinear(bilinear_factor.unwrap_or(4))
+            },
+            label if label == "waifu2x" || label.starts_with("waifu2x-") => {
+                // TODO: load dedicated waifu2x weights (ncnn/ONNX → .rsr) when
+                //       weight-conversion pipeline is implemented.
+                let data = crate::L1_SRGB_ANIME_PARAMS;
+                let desc = crate::network_from_bytes(data)
+                    .map_err(|e| SrganError::Network(e))?;
+                let display = format!(
+                    "waifu2x ({}; backed by built-in anime model — TODO: real waifu2x weights)",
+                    label
+                );
+                Self::new_with_display(desc, &display)
             },
             _ => Err(SrganError::Network(format!("Unsupported network type: {}", label))),
         }

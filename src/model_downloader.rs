@@ -82,6 +82,49 @@ pub const REMOTE_MODELS: &[RemoteModel] = &[
         url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/2x.rsr",
         sha256: "0000000000000000000000000000000000000000000000000000000000000000",
     },
+    // ── Waifu2x models ──────────────────────────────────────────────────────
+    // TODO: The canonical waifu2x weights use the ncnn-vulkan or caffe format,
+    //       which is incompatible with the native .rsr format.  These entries
+    //       use stub placeholder URLs/checksums.  To enable real inference,
+    //       either:
+    //         (a) Convert the waifu2x-ncnn-vulkan ONNX weights to .rsr via
+    //             `srgan-rust convert-model`, or
+    //         (b) Implement a separate waifu2x inference backend.
+    //       Until then, the label falls back to the built-in anime model for
+    //       noise-reduction passes (good enough for most anime/illustration use
+    //       cases at noise_level 1–2).
+    RemoteModel {
+        name: "waifu2x-noise1-scale2",
+        description: "Waifu2x anime/illustration model: noise-level 1, 2× scale (stub — falls back to built-in anime model).",
+        filename: "waifu2x_noise1_scale2.rsr",
+        scale_factor: 2,
+        url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/waifu2x_noise1_scale2.rsr",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    },
+    RemoteModel {
+        name: "waifu2x-noise2-scale2",
+        description: "Waifu2x anime/illustration model: noise-level 2, 2× scale (stub — falls back to built-in anime model).",
+        filename: "waifu2x_noise2_scale2.rsr",
+        scale_factor: 2,
+        url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/waifu2x_noise2_scale2.rsr",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    },
+    RemoteModel {
+        name: "waifu2x-noise0-scale1",
+        description: "Waifu2x anime/illustration model: noise-level 0, 1× scale — denoise only, no upscale (stub).",
+        filename: "waifu2x_noise0_scale1.rsr",
+        scale_factor: 1,
+        url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/waifu2x_noise0_scale1.rsr",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    },
+    RemoteModel {
+        name: "waifu2x-noise3-scale2",
+        description: "Waifu2x anime/illustration model: noise-level 3, 2× scale (stub — falls back to built-in anime model).",
+        filename: "waifu2x_noise3_scale2.rsr",
+        scale_factor: 2,
+        url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/waifu2x_noise3_scale2.rsr",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    },
 ];
 
 // ── Backwards-compat type alias ───────────────────────────────────────────────
