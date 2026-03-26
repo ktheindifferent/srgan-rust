@@ -32,7 +32,7 @@ use onnx::OnnxParser;
 use keras::KerasParser;
 #[cfg(not(feature = "keras-support"))]
 use keras_simple::KerasParser;
-use common::{WeightExtractor, TensorData, convert_nhwc_to_nchw, tensor_statistics};
+use common::{WeightExtractor, convert_nhwc_to_nchw, tensor_statistics};
 
 /// Supported model formats for conversion
 #[derive(Debug, Clone, Copy)]

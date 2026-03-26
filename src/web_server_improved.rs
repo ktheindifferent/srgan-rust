@@ -1,21 +1,17 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH, Duration, Instant};
-use std::thread;
-use std::net::SocketAddr;
-use std::io::Write;
+use std::time::{SystemTime, Duration, Instant};
 use base64::{Engine as _, engine::general_purpose};
 use image::{ImageFormat, GenericImage};
 use serde::{Serialize, Deserialize};
 use dashmap::DashMap;
-use tracing::{info, warn, error, debug, span, Level};
-use metrics::{counter, histogram, gauge};
+use tracing::{info, warn, debug, span, Level};
 
 use crate::error::{Result, SrganError};
 use crate::error_recovery::{
     CircuitBreaker, EnhancedError, ErrorAggregator, ErrorContext,
-    RetryConfig, RetryExecutor, RecoveryStrategy
+    RetryConfig, RetryExecutor
 };
 use crate::logging::{OperationLogger, PerformanceTracker};
 use crate::thread_safe_network::ThreadSafeNetwork;
@@ -224,7 +220,7 @@ impl EnhancedWebServer {
             })?
         };
         
-        let rate_limit = config.rate_limit.unwrap_or(60);
+        let _rate_limit = config.rate_limit.unwrap_or(60);
         
         // Initialize circuit breaker
         let circuit_breaker = Arc::new(CircuitBreaker::new(
@@ -382,8 +378,8 @@ impl EnhancedWebServer {
         image_data: Vec<u8>,
         request: EnhancedUpscaleRequest,
     ) -> Result<(Vec<u8>, ResponseMetadata)> {
-        let retry_executor = RetryExecutor::new(self.config.retry_config.clone());
-        let mut context = ErrorContext::new("image_processing");
+        let _retry_executor = RetryExecutor::new(self.config.retry_config.clone());
+        let _context = ErrorContext::new("image_processing");
         
         // Load image
         let img = image::load_from_memory(&image_data)

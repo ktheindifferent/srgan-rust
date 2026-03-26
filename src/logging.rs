@@ -1,4 +1,3 @@
-use std::path::Path;
 use tracing::{Level, Subscriber};
 use tracing_subscriber::{
     fmt::{self, format::FmtSpan},
@@ -11,7 +10,7 @@ use tracing_appender::{non_blocking, rolling};
 use std::sync::Arc;
 use dashmap::DashMap;
 use std::time::{Duration, Instant};
-use metrics::{counter, histogram, gauge, describe_counter, describe_histogram, describe_gauge};
+use metrics::{describe_counter, describe_histogram, describe_gauge};
 
 /// Logging configuration
 #[derive(Debug, Clone)]

@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::api::upscale::{JobRecord, JobStatus, PriorityJobQueue};
+use crate::api::upscale::{JobRecord, PriorityJobQueue};
 
 /// Query parameters for GET /api/v1/jobs
 #[derive(Debug, Default, Deserialize)]

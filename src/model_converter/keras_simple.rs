@@ -2,10 +2,10 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::fs::File;
 use std::io::Read;
-use log::{info, warn, debug};
+use log::{info, warn};
 
 use crate::error::SrganError;
-use crate::model_converter::common::{TensorData, DataType, WeightExtractor, ModelInfo, validate_tensor_data};
+use crate::model_converter::common::{TensorData, WeightExtractor, ModelInfo};
 
 /// Simplified Keras parser without HDF5 dependency
 /// This implementation provides the structure but would need HDF5 library for actual parsing

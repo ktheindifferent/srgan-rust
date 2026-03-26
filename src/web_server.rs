@@ -419,7 +419,41 @@ impl WebServer {
     /// Handle list models
     fn handle_list_models(&self) -> String {
         let response = serde_json::json!({
-            "models": ["natural", "anime", "custom"],
+            "models": [
+                {
+                    "name": "natural",
+                    "description": "Neural net trained on natural photographs with L1 loss",
+                    "architecture": "srgan",
+                    "scale_factor": 4,
+                    "recommended_for": ["photos", "general"]
+                },
+                {
+                    "name": "anime",
+                    "description": "Neural net trained on animation images with L1 loss",
+                    "architecture": "srgan",
+                    "scale_factor": 4,
+                    "recommended_for": ["anime", "illustrations", "cartoons"]
+                },
+                {
+                    "name": "waifu2x",
+                    "description": "Waifu2x-style model for anime/illustration upscaling with configurable noise reduction (noise_level 0–3, scale 1×/2×)",
+                    "architecture": "waifu2x",
+                    "scale_factor": 4,
+                    "recommended_for": ["anime", "illustrations", "photos"],
+                    "parameters": {
+                        "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
+                        "waifu2x_scale": "1 or 2 (default 2)"
+                    },
+                    "variants": crate::waifu2x::WAIFU2X_LABELS
+                },
+                {
+                    "name": "bilinear",
+                    "description": "Bilinear interpolation (no neural network)",
+                    "architecture": "bilinear",
+                    "scale_factor": 4,
+                    "recommended_for": ["general", "quick-preview"]
+                }
+            ],
             "default": "natural",
         });
         
@@ -1406,6 +1440,26 @@ impl WebServer {
     <div class="card"><div class="stat">{load_avg:.2}</div><div class="label">Load Avg (1m)</div></div>
     <div class="card"><div class="stat">{mem_used_mb} MB</div><div class="label">RAM Used</div></div>
     <div class="card"><div class="stat">{mem_total_mb} MB</div><div class="label">RAM Total</div></div>
+  </div>
+
+  <h2>Supported Models</h2>
+  <div class="grid">
+    <div class="card">
+      <div class="label" style="font-size:0.9rem;color:#00d4ff">natural</div>
+      <div class="label">Photos &amp; general (×4)</div>
+    </div>
+    <div class="card">
+      <div class="label" style="font-size:0.9rem;color:#00d4ff">anime</div>
+      <div class="label">Anime / illustrations (×4)</div>
+    </div>
+    <div class="card">
+      <div class="label" style="font-size:0.9rem;color:#00d4ff">waifu2x</div>
+      <div class="label">Anime/illustration + noise reduction<br>noise 0–3 · scale ×1/×2</div>
+    </div>
+    <div class="card">
+      <div class="label" style="font-size:0.9rem;color:#00d4ff">bilinear</div>
+      <div class="label">Bilinear interpolation (no NN)</div>
+    </div>
   </div>
 </body>
 </html>"#,

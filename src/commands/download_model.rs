@@ -1,7 +1,7 @@
 use clap::ArgMatches;
 use log::info;
 
-use crate::error::{Result, SrganError};
+use crate::error::Result;
 use crate::model_downloader;
 
 /// `srgan-rust download-model` command

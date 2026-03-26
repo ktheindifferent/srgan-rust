@@ -2,11 +2,10 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
-use std::convert::TryInto;
-use log::{info, warn, debug};
+use log::{info, warn};
 
 use crate::error::SrganError;
-use crate::model_converter::common::{TensorData, DataType, WeightExtractor, ModelInfo, validate_tensor_data, tensor_statistics};
+use crate::model_converter::common::{TensorData, DataType, WeightExtractor, ModelInfo};
 
 /// Simplified ONNX parser without protobuf dependency
 /// This implementation provides the structure but would need protobuf library for actual parsing

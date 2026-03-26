@@ -1,6 +1,6 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, AtomicBool, Ordering};
-use std::sync::{Mutex, RwLock, Arc};
+use std::sync::{Mutex, RwLock};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use std::fs::File;
@@ -9,7 +9,6 @@ use chrono::Local;
 use log::{info, warn, error};
 use std::ptr;
 use std::cell::Cell;
-use std::panic::Location;
 
 #[cfg(debug_assertions)]
 use std::collections::HashSet;

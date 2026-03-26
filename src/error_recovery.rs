@@ -1,11 +1,10 @@
-use std::error::Error as StdError;
 use std::fmt;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{error, warn, info, debug};
+use tracing::{error, warn, info};
 
 /// Enhanced error type with backtrace support and categorization
 #[derive(Debug, Error)]

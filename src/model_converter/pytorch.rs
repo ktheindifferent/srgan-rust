@@ -1,9 +1,9 @@
-use std::collections::{HashMap, BTreeMap};
+use std::collections::HashMap;
 use std::convert::TryInto;
-use std::io::{Read, Cursor, Seek, SeekFrom};
+use std::io::{Read, Cursor};
 use std::path::Path;
 use std::fs::File;
-use log::{info, warn, debug, trace};
+use log::{info, warn, debug};
 use serde_pickle::{DeOptions, HashableValue, Value};
 use num_traits::ToPrimitive;
 use zip::ZipArchive;
@@ -763,7 +763,6 @@ impl PyTorchParser {
 }
 
 // Re-export for compatibility
-pub use PyTorchParser as Parser;
 
 #[cfg(test)]
 mod tests {

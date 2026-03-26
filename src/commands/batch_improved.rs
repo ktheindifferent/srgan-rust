@@ -11,7 +11,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, error, info, warn, span, Level};
@@ -232,7 +232,7 @@ fn process_single_image_with_retry(
     retry_config: &RetryConfig,
     circuit_breaker: &Arc<CircuitBreaker>,
     error_aggregator: &Arc<ErrorAggregator>,
-    performance_tracker: &Arc<PerformanceTracker>,
+    _performance_tracker: &Arc<PerformanceTracker>,
 ) {
     increment_gauge("srgan_active_jobs", 1.0);
     
@@ -266,11 +266,11 @@ fn process_single_image_with_retry(
     }
     
     // Process with retry logic and circuit breaker
-    let mut context = ErrorContext::new("image_upscale")
+    let _context = ErrorContext::new("image_upscale")
         .with_file(image_path.to_path_buf())
         .with_attempts(retry_config.max_attempts);
     
-    let retry_executor = RetryExecutor::new(retry_config.clone());
+    let _retry_executor = RetryExecutor::new(retry_config.clone());
     
     let process_result = tokio::runtime::Handle::current().block_on(async {
         circuit_breaker.call(|| {
@@ -308,7 +308,7 @@ fn process_image_internal(
     output_path: &Path,
     network: &Arc<ThreadSafeNetwork>,
 ) -> Result<()> {
-    use image::{DynamicImage, ImageFormat};
+    
     
     // Load the image
     let img = image::open(input_path)
@@ -368,7 +368,7 @@ fn parse_factor(app_m: &ArgMatches) -> Option<usize> {
         .and_then(|s| s.parse::<usize>().ok())
 }
 
-fn load_network(app_m: &ArgMatches, factor: Option<usize>) -> Result<ThreadSafeNetwork> {
+fn load_network(app_m: &ArgMatches, _factor: Option<usize>) -> Result<ThreadSafeNetwork> {
     let network_type = app_m.value_of("NETWORK").unwrap_or("natural");
     
     match network_type {
