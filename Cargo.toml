@@ -74,6 +74,10 @@ quickcheck = "1.0"
 [target.'cfg(loom)'.dev-dependencies]
 loom = { version = "0.7", features = ["checkpoint"] }
 
+[[bin]]
+name = "srgan-upscale"
+path = "src/bin/upscale.rs"
+
 [[bench]]
 name = "thread_safety_bench"
 harness = false
