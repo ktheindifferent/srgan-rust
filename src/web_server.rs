@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH, Duration};
 use std::thread;
 use std::net::SocketAddr;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use base64::{Engine as _, engine::general_purpose};
 use image::{ImageFormat, GenericImage};
 use log::{info, warn};
@@ -364,26 +364,58 @@ impl WebServer {
                     continue;
                 }
             };
-            
-            // Read request (simplified)
-            let mut buffer = [0; 1024];
-            let _ = stream.read(&mut buffer);
-            
-            // Parse request line
-            let request = String::from_utf8_lossy(&buffer);
+
+            // Set a generous read timeout so large uploads don't block forever
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
+
+            // Read the full HTTP request: headers via BufReader on a cloned fd,
+            // then body up to Content-Length (max_file_size cap).
+            let request: String = match stream.try_clone() {
+                Err(_) => continue,
+                Ok(cloned) => {
+                    let mut rdr = BufReader::new(cloned);
+                    let mut head = String::with_capacity(4096);
+                    loop {
+                        let mut line = String::new();
+                        match rdr.read_line(&mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {
+                                let eoh = line == "\r\n";
+                                head.push_str(&line);
+                                if eoh { break; }
+                            }
+                        }
+                    }
+                    let cl: usize = head.lines()
+                        .find(|l| l.to_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.splitn(2, ':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0)
+                        .min(self.config.max_file_size);
+                    if cl > 0 {
+                        let mut body = vec![0u8; cl];
+                        let _ = rdr.read_exact(&mut body);
+                        format!("{}\r\n{}", head, String::from_utf8_lossy(&body))
+                    } else {
+                        head
+                    }
+                }
+            };
+
             let lines: Vec<&str> = request.lines().collect();
-            
+
             if lines.is_empty() {
                 continue;
             }
-            
+
             let parts: Vec<&str> = lines[0].split_whitespace().collect();
             if parts.len() < 2 {
                 continue;
             }
-            
+
             let method = parts[0];
-            let path = parts[1];
+            // Strip query string from path for routing
+            let path = parts[1].split('?').next().unwrap_or(parts[1]);
             
             // SSE stream endpoint: takes ownership of `stream` and writes events
             // directly, bypassing the normal single-string response path.
@@ -398,10 +430,14 @@ impl WebServer {
 
             // Route request
             let response = match (method, path) {
+                ("GET", "/") => self.handle_root_dashboard(),
+                ("GET", "/admin") => self.handle_admin_panel(),
+                ("GET", "/api/me") => self.handle_api_me(&request),
+                ("GET", "/api/admin/users") => self.handle_admin_users(&request),
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
                 ("GET", "/api/v1/stats") => self.handle_stats(),
-                ("GET", "/api/v1/jobs") => self.handle_jobs(),
+                ("GET", "/api/v1/jobs") | ("GET", "/api/jobs") => self.handle_jobs(),
                 ("GET", "/dashboard") => self.handle_dashboard(),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
                 ("POST", "/api/upscale/async") | ("POST", "/api/v1/upscale/async") => self.handle_upscale_async(&request),
@@ -853,6 +889,601 @@ impl WebServer {
         });
         format!(
             "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\n\r\n{}",
+            response
+        )
+    }
+
+    // ── New dashboard / admin endpoints ──────────────────────────────────────
+
+    /// GET / — main web dashboard (SPA; all data fetched via JS)
+    fn handle_root_dashboard(&self) -> String {
+        let html = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRGAN-Rust</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--accent:#00d4ff;
+  --green:#3fb950;--yellow:#d29922;--red:#f85149;
+  --text:#c9d1d9;--muted:#8b949e;--r:8px;--font:ui-monospace,'Menlo',monospace}
+html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px}
+.shell{display:grid;grid-template-columns:200px 1fr;height:calc(100vh - 40px)}
+.sidebar{background:var(--bg2);border-right:1px solid var(--border);padding:1.25rem .9rem;
+  display:flex;flex-direction:column;gap:.35rem}
+.main{padding:1.5rem;overflow-y:auto}
+.logo{color:var(--accent);font-size:1rem;font-weight:700;margin-bottom:.9rem;letter-spacing:.03em}
+.nav{display:flex;align-items:center;gap:.5rem;padding:.42rem .65rem;border-radius:var(--r);
+  color:var(--muted);cursor:pointer;transition:all .15s;font-size:.86rem;user-select:none}
+.nav:hover,.nav.active{background:var(--bg3);color:var(--accent)}
+.page{display:none}.page.active{display:block}
+.section-title{font-size:1.2rem;color:var(--accent);font-weight:700;margin-bottom:1.1rem}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.65rem;margin-bottom:1.4rem}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:.85rem}
+.card-val{font-size:1.5rem;font-weight:700;color:var(--accent);line-height:1}
+.card-lbl{color:var(--muted);font-size:.68rem;margin-top:.28rem;text-transform:uppercase;letter-spacing:.05em}
+.card.g .card-val{color:var(--green)}.card.y .card-val{color:var(--yellow)}.card.r .card-val{color:var(--red)}
+.tbl-wrap{border:1px solid var(--border);border-radius:var(--r);overflow:auto;margin-bottom:1.2rem}
+table{width:100%;border-collapse:collapse;font-size:.81rem}
+thead th{background:var(--bg3);color:var(--muted);text-align:left;padding:.5rem .75rem;
+  border-bottom:1px solid var(--border);font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+tbody tr:hover{background:var(--bg3)}tbody tr:last-child{border-bottom:none}
+td{padding:.45rem .75rem;vertical-align:middle;white-space:nowrap}
+.badge{display:inline-block;padding:.1rem .38rem;border-radius:4px;font-size:.7rem;font-weight:600}
+.bp{background:#21262d;color:var(--yellow);border:1px solid #9e6a03}
+.bpr{background:#21262d;color:var(--accent);border:1px solid #0f6ab6}
+.bc{background:#21262d;color:var(--green);border:1px solid #238636}
+.bf{background:#21262d;color:var(--red);border:1px solid #8b2121}
+.thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;border:1px solid var(--border)}
+.tp{width:44px;height:44px;background:var(--bg3);border-radius:4px;border:1px solid var(--border);
+  display:inline-flex;align-items:center;justify-content:center;color:var(--muted);font-size:.6rem}
+.form-group{margin-bottom:.9rem}
+label{display:block;color:var(--muted);font-size:.78rem;margin-bottom:.35rem}
+input[type=text],select{width:100%;background:var(--bg2);border:1px solid var(--border);
+  border-radius:var(--r);padding:.45rem .65rem;color:var(--text);font-family:var(--font);font-size:.86rem}
+input[type=text]:focus,select:focus{outline:none;border-color:var(--accent)}
+.btn{display:inline-block;padding:.42rem .9rem;border-radius:var(--r);font-family:var(--font);
+  font-size:.86rem;cursor:pointer;border:none;transition:opacity .15s}
+.btn-p{background:var(--accent);color:#000;font-weight:600}.btn-p:hover{opacity:.85}
+.btn-s{background:var(--bg3);color:var(--text);border:1px solid var(--border)}.btn-s:hover{border-color:var(--accent)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.dropzone{border:2px dashed var(--border);border-radius:var(--r);padding:1.75rem;text-align:center;
+  cursor:pointer;transition:all .2s;color:var(--muted)}
+.dropzone.drag,.dropzone:hover{border-color:var(--accent);background:rgba(0,212,255,.04)}
+.api-bar{background:var(--bg2);border-bottom:1px solid var(--border);
+  padding:.5rem 1rem;display:flex;align-items:center;gap:.6rem;font-size:.8rem;height:40px}
+.api-bar input{flex:none;width:220px;font-size:.78rem;padding:.25rem .5rem;background:var(--bg);
+  border:1px solid var(--border);border-radius:4px;color:var(--text);font-family:var(--font)}
+.pulse{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:100;align-items:center;justify-content:center}
+.overlay.open{display:flex}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);
+  padding:1.4rem;max-width:620px;width:90vw;max-height:80vh;overflow-y:auto}
+.modal-title{font-size:1rem;color:var(--accent);margin-bottom:.9rem;font-weight:700}
+.close-x{float:right;cursor:pointer;color:var(--muted);font-size:1.1rem;line-height:1}.close-x:hover{color:var(--text)}
+.sidebar-ft{margin-top:auto;padding-top:.9rem;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+<div class="api-bar">
+  <span class="pulse"></span>
+  <span style="color:var(--text);font-weight:600">SRGAN-Rust</span>
+  <span style="color:var(--border)">|</span>
+  <label for="apiK" style="margin:0">API Key:</label>
+  <input type="text" id="apiK" placeholder="sk-…">
+  <button class="btn btn-s" onclick="saveKey()" style="padding:.2rem .6rem;font-size:.76rem">Save</button>
+  <span id="keySt" style="color:var(--green);font-size:.76rem"></span>
+  <span style="margin-left:auto;color:var(--muted);font-size:.76rem" id="refreshTime"></span>
+</div>
+<div class="shell">
+  <nav class="sidebar">
+    <div class="logo">&#9650; SRGAN</div>
+    <div class="nav active" id="nav-ov" onclick="nav('ov')">&#128202; Overview</div>
+    <div class="nav" id="nav-jobs" onclick="nav('jobs')">&#128736; Jobs</div>
+    <div class="nav" id="nav-sub" onclick="nav('sub')">&#128228; Submit Job</div>
+    <div class="sidebar-ft">
+      <div class="nav" onclick="location='/admin'" style="color:var(--muted)">&#128274; Admin</div>
+    </div>
+  </nav>
+  <main class="main">
+    <div class="page active" id="pg-ov">
+      <div class="section-title">Overview</div>
+      <div class="cards">
+        <div class="card"><div class="card-val" id="cPend">–</div><div class="card-lbl">Pending</div></div>
+        <div class="card"><div class="card-val" id="cProc">–</div><div class="card-lbl">Processing</div></div>
+        <div class="card g"><div class="card-val" id="cComp">–</div><div class="card-lbl">Completed</div></div>
+        <div class="card r"><div class="card-val" id="cFail">–</div><div class="card-lbl">Failed</div></div>
+        <div class="card"><div class="card-val" id="cCred">–</div><div class="card-lbl">Credits</div></div>
+        <div class="card y"><div class="card-val" id="cUp">–</div><div class="card-lbl">Uptime</div></div>
+        <div class="card"><div class="card-val" id="cMem">–</div><div class="card-lbl">RAM</div></div>
+        <div class="card"><div class="card-val" id="cLoad">–</div><div class="card-lbl">Load</div></div>
+      </div>
+      <div style="font-weight:600;margin-bottom:.65rem;font-size:.88rem">Recent Jobs</div>
+      <div class="tbl-wrap" id="recentTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    </div>
+    <div class="page" id="pg-jobs">
+      <div class="section-title">All Jobs</div>
+      <div class="tbl-wrap" id="allTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    </div>
+    <div class="page" id="pg-sub">
+      <div class="section-title">Submit Job</div>
+      <div style="max-width:500px">
+        <div id="dz" class="dropzone" onclick="document.getElementById('fi').click()">
+          <div style="font-size:1.8rem;margin-bottom:.4rem">&#128247;</div>
+          <div>Drag &amp; drop an image or <strong style="color:var(--accent)">browse</strong></div>
+          <div style="font-size:.75rem;margin-top:.3rem">PNG · JPG · WebP · max 50 MB</div>
+        </div>
+        <input type="file" id="fi" accept="image/*" style="display:none">
+        <div id="prevWrap" style="margin:.65rem 0;display:none">
+          <img id="prevImg" style="max-width:100%;max-height:180px;border-radius:var(--r);border:1px solid var(--border)">
+          <div id="prevName" style="font-size:.76rem;color:var(--muted);margin-top:.25rem"></div>
+        </div>
+        <div class="form-group">
+          <label>Model</label>
+          <select id="modelSel">
+            <option value="natural">Natural (photos)</option>
+            <option value="anime">Anime / illustration</option>
+            <option value="waifu2x">Waifu2x</option>
+            <option value="real-esrgan">Real-ESRGAN</option>
+          </select>
+        </div>
+        <button class="btn btn-p" id="subBtn" onclick="submitJob()" disabled>Submit Job</button>
+        <div id="subSt" style="margin-top:.65rem;font-size:.84rem"></div>
+      </div>
+    </div>
+  </main>
+</div>
+<div class="overlay" id="modal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="modal">
+    <span class="close-x" onclick="document.getElementById('modal').classList.remove('open')">&#10005;</span>
+    <div class="modal-title" id="modalTtl">Job Detail</div>
+    <div id="modalBdy"></div>
+  </div>
+</div>
+<script>
+var apiKey=localStorage.getItem('srgan_k')||'';
+var jobs=[];var thumbs={};var selFile=null;
+document.getElementById('apiK').value=apiKey;
+setupDz();
+setInterval(refresh,2000);
+refresh();
+
+function saveKey(){apiKey=document.getElementById('apiK').value.trim();localStorage.setItem('srgan_k',apiKey);var s=document.getElementById('keySt');s.textContent='Saved';setTimeout(function(){s.textContent=''},1500);}
+
+function hdrs(){var h={'Content-Type':'application/json'};if(apiKey)h['X-API-Key']=apiKey;return h;}
+
+function nav(p){
+  document.querySelectorAll('.page').forEach(function(e){e.classList.remove('active');});
+  document.querySelectorAll('.nav').forEach(function(e){e.classList.remove('active');});
+  document.getElementById('pg-'+p).classList.add('active');
+  document.getElementById('nav-'+p).classList.add('active');
+}
+
+function refresh(){
+  var h=hdrs();
+  Promise.all([
+    fetch('/api/v1/stats',{headers:h}).then(function(r){return r.ok?r.json():null;}),
+    fetch('/api/v1/jobs',{headers:h}).then(function(r){return r.ok?r.json():null;}),
+    fetch('/api/me',{headers:h}).then(function(r){return r.ok?r.json():null;}).catch(function(){return null;})
+  ]).then(function(res){
+    var stats=res[0];var jData=res[1];var me=res[2];
+    if(stats){
+      set('cPend',stats.jobs&&stats.jobs.pending!=null?stats.jobs.pending:'–');
+      set('cProc',stats.jobs&&stats.jobs.processing!=null?stats.jobs.processing:'–');
+      set('cComp',stats.jobs&&stats.jobs.completed!=null?stats.jobs.completed:'–');
+      set('cFail',stats.jobs&&stats.jobs.failed!=null?stats.jobs.failed:'–');
+      set('cUp',fmtUp(stats.uptime_secs||0));
+      set('cMem',(stats.system&&stats.system.mem_used_mb||0)+' MB');
+      set('cLoad',((stats.system&&stats.system.load_avg_1m)||0).toFixed(2));
+    }
+    if(me)set('cCred',me.credits_remaining!=null?me.credits_remaining:'–');
+    if(jData)jobs=jData.jobs||[];
+    renderTbls();
+    fetchThumbs();
+    document.getElementById('refreshTime').textContent='Updated '+new Date().toLocaleTimeString();
+  }).catch(function(){});
+}
+
+function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
+
+function fmtUp(s){
+  if(s<60)return s+'s';
+  if(s<3600)return Math.floor(s/60)+'m';
+  if(s<86400)return Math.floor(s/3600)+'h '+Math.floor((s%3600)/60)+'m';
+  return Math.floor(s/86400)+'d '+Math.floor((s%86400)/3600)+'h';
+}
+
+function badge(st){
+  var s=st||'';
+  if(s==='completed')return '<span class="badge bc">completed</span>';
+  if(s==='processing')return '<span class="badge bpr">processing</span>';
+  if(s.startsWith('failed'))return '<span class="badge bf">failed</span>';
+  return '<span class="badge bp">'+s+'</span>';
+}
+
+function thumbCell(j){
+  if(thumbs[j.id])return '<img class="thumb" src="'+thumbs[j.id]+'" alt="">';
+  return '<div class="tp">'+(j.status==='completed'?'…':'')+'</div>';
+}
+
+function jobRow(j){
+  var dur=j.duration_secs!=null?j.duration_secs.toFixed(1)+'s':'–';
+  var t=new Date(j.created_at*1000).toLocaleTimeString();
+  return '<tr onclick="detail(\''+j.id+'\')">'
+    +'<td>'+thumbCell(j)+'</td>'
+    +'<td><code style="font-size:.76rem">'+j.id.slice(0,8)+'…</code></td>'
+    +'<td>'+badge(j.status)+'</td>'
+    +'<td>'+(j.model||'–')+'</td>'
+    +'<td>'+(j.input_size||'–')+'</td>'
+    +'<td>'+(j.output_size||'–')+'</td>'
+    +'<td>'+dur+'</td>'
+    +'<td>'+t+'</td>'
+    +'</tr>';
+}
+
+function tblHTML(list){
+  if(!list.length)return '<div style="padding:1.75rem;text-align:center;color:var(--muted)">No jobs yet</div>';
+  return '<table><thead><tr><th></th><th>Job ID</th><th>Status</th><th>Model</th><th>Input</th><th>Output</th><th>Dur.</th><th>Time</th></tr></thead>'
+    +'<tbody>'+list.map(jobRow).join('')+'</tbody></table>';
+}
+
+function renderTbls(){
+  var r=document.getElementById('recentTbl');if(r)r.innerHTML=tblHTML(jobs.slice(0,10));
+  var a=document.getElementById('allTbl');if(a)a.innerHTML=tblHTML(jobs);
+}
+
+function fetchThumbs(){
+  var need=jobs.filter(function(j){return j.status==='completed'&&!thumbs[j.id];}).slice(0,5);
+  need.forEach(function(j){
+    fetch('/api/v1/job/'+j.id,{headers:hdrs()}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+      if(d&&d.result_data){thumbs[j.id]='data:image/png;base64,'+d.result_data;renderTbls();}
+    }).catch(function(){});
+  });
+}
+
+function detail(id){
+  document.getElementById('modalTtl').textContent='Job: '+id;
+  document.getElementById('modalBdy').innerHTML='Loading…';
+  document.getElementById('modal').classList.add('open');
+  fetch('/api/v1/job/'+id,{headers:hdrs()}).then(function(r){return r.json();}).then(function(d){
+    var st='–';
+    if(d.status==='Completed'||d.status==='completed')st='completed';
+    else if(d.status==='Pending'||d.status==='pending')st='pending';
+    else if(d.status==='Processing'||d.status==='processing')st='processing';
+    else if(typeof d.status==='object'&&d.status!==null){
+      if(d.status.Completed!=null)st='completed';
+      else if(d.status.Pending!=null)st='pending';
+      else if(d.status.Processing!=null)st='processing';
+      else if(d.status.Failed!=null)st='failed: '+d.status.Failed;
+    }
+    var html='<table style="width:100%;font-size:.82rem">'
+      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Status</td><td>'+badge(st)+'</td></tr>'
+      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Model</td><td>'+(d.model||'–')+'</td></tr>'
+      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Input</td><td>'+(d.input_size||'–')+'</td></tr>'
+      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Output</td><td>'+(d.output_size||'–')+'</td></tr>'
+      +'<tr><td style="color:var(--muted);padding:.28rem .45rem">Created</td><td>'+new Date(d.created_at*1000).toLocaleString()+'</td></tr>'
+      +'</table>';
+    if(d.result_data){
+      var src='data:image/png;base64,'+d.result_data;
+      thumbs[id]=src;
+      html+='<img src="'+src+'" style="max-width:100%;border-radius:var(--r);margin-top:.9rem;display:block">'
+        +'<a href="'+src+'" download="result_'+id+'.png" class="btn btn-s" style="margin-top:.5rem;display:inline-block;text-decoration:none">&#8595; Download</a>';
+    }
+    if(d.error)html+='<div style="color:var(--red);margin-top:.65rem">'+d.error+'</div>';
+    document.getElementById('modalBdy').innerHTML=html;
+    renderTbls();
+  }).catch(function(){document.getElementById('modalBdy').innerHTML='<span style="color:var(--red)">Error loading job</span>';});
+}
+
+function setupDz(){
+  var dz=document.getElementById('dz');
+  var fi=document.getElementById('fi');
+  dz.addEventListener('dragover',function(e){e.preventDefault();dz.classList.add('drag');});
+  dz.addEventListener('dragleave',function(){dz.classList.remove('drag');});
+  dz.addEventListener('drop',function(e){e.preventDefault();dz.classList.remove('drag');if(e.dataTransfer.files[0])loadFile(e.dataTransfer.files[0]);});
+  fi.addEventListener('change',function(){if(fi.files[0])loadFile(fi.files[0]);});
+}
+
+function loadFile(f){
+  selFile=f;
+  var r=new FileReader();
+  r.onload=function(e){document.getElementById('prevImg').src=e.target.result;};
+  r.readAsDataURL(f);
+  document.getElementById('prevWrap').style.display='block';
+  document.getElementById('prevName').textContent=f.name+' ('+(f.size/1024).toFixed(1)+' KB)';
+  document.getElementById('subBtn').disabled=false;
+}
+
+function submitJob(){
+  if(!selFile)return;
+  var btn=document.getElementById('subBtn');
+  var st=document.getElementById('subSt');
+  btn.disabled=true;
+  st.textContent='Reading file…';
+  var r=new FileReader();
+  r.onload=function(e){
+    var b64=e.target.result;
+    if(b64.indexOf(',')>-1)b64=b64.split(',')[1];
+    var model=document.getElementById('modelSel').value;
+    st.textContent='Submitting…';
+    fetch('/api/v1/upscale/async',{
+      method:'POST',
+      headers:hdrs(),
+      body:JSON.stringify({image_data:b64,model:model})
+    }).then(function(res){
+      return res.json().then(function(d){return{ok:res.ok,d:d};});
+    }).then(function(r){
+      if(!r.ok){st.innerHTML='<span style="color:var(--red)">Error: '+(r.d.error||'Unknown')+'</span>';btn.disabled=false;return;}
+      st.innerHTML='<span style="color:var(--green)">Submitted! Job ID: <code>'+r.d.job_id+'</code></span>';
+      btn.disabled=false;
+      nav('jobs');
+    }).catch(function(e){st.innerHTML='<span style="color:var(--red)">'+e.message+'</span>';btn.disabled=false;});
+  };
+  r.readAsDataURL(selFile);
+}
+</script>
+</body>
+</html>"##;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET /admin — admin panel SPA (protected by SRGAN_ADMIN_SECRET bearer token)
+    fn handle_admin_panel(&self) -> String {
+        let html = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRGAN Admin</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--accent:#00d4ff;
+  --green:#3fb950;--yellow:#d29922;--red:#f85149;
+  --text:#c9d1d9;--muted:#8b949e;--r:8px;--font:ui-monospace,'Menlo',monospace}
+body{font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px;min-height:100vh}
+.hdr{background:var(--bg2);border-bottom:1px solid var(--border);padding:.7rem 1.4rem;
+  display:flex;align-items:center;gap:.9rem}
+.hdr h1{font-size:.95rem;color:var(--accent);font-weight:700}
+a.back{color:var(--muted);text-decoration:none;font-size:.85rem}.a.back:hover{color:var(--text)}
+.main{padding:1.4rem}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:.65rem;margin-bottom:1.3rem}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:.85rem}
+.card-val{font-size:1.5rem;font-weight:700;color:var(--accent);line-height:1}
+.card-lbl{color:var(--muted);font-size:.68rem;margin-top:.28rem;text-transform:uppercase;letter-spacing:.05em}
+.card.g .card-val{color:var(--green)}.card.y .card-val{color:var(--yellow)}
+.tbl-wrap{border:1px solid var(--border);border-radius:var(--r);overflow:auto;margin-bottom:1.3rem}
+table{width:100%;border-collapse:collapse;font-size:.81rem}
+thead th{background:var(--bg3);color:var(--muted);text-align:left;padding:.5rem .75rem;
+  border-bottom:1px solid var(--border);font-size:.68rem;text-transform:uppercase;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border)}tbody tr:last-child{border-bottom:none}
+td{padding:.45rem .75rem;white-space:nowrap}
+.badge{display:inline-block;padding:.1rem .38rem;border-radius:4px;font-size:.7rem;font-weight:600}
+.tier-free{background:#21262d;color:var(--muted);border:1px solid var(--border)}
+.tier-pro{background:#21262d;color:var(--accent);border:1px solid #0f6ab6}
+.tier-enterprise{background:#21262d;color:var(--yellow);border:1px solid #9e6a03}
+.bc{background:#21262d;color:var(--green);border:1px solid #238636}
+.bp{background:#21262d;color:var(--yellow);border:1px solid #9e6a03}
+.bpr{background:#21262d;color:var(--accent);border:1px solid #0f6ab6}
+.bf{background:#21262d;color:var(--red);border:1px solid #8b2121}
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:calc(100vh - 48px)}
+.login-box{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:1.8rem;width:300px}
+.login-box h2{color:var(--accent);font-size:1rem;margin-bottom:1.1rem}
+input[type=password]{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);
+  padding:.45rem .65rem;color:var(--text);font-family:var(--font);margin-bottom:.65rem;font-size:.88rem}
+.btn{display:inline-block;padding:.42rem .9rem;border-radius:var(--r);font-family:var(--font);
+  font-size:.86rem;cursor:pointer;border:none;width:100%}
+.btn-p{background:var(--accent);color:#000;font-weight:600}.btn-p:hover{opacity:.85}
+#errMsg{color:var(--red);font-size:.8rem;margin-top:.45rem}
+.sec-ttl{font-size:.95rem;font-weight:600;color:var(--text);margin:1.2rem 0 .65rem}
+</style>
+</head>
+<body>
+<div class="hdr">
+  <a href="/" class="back">&#8592; Dashboard</a>
+  <h1>&#128274; Admin Panel</h1>
+  <span style="margin-left:auto;font-size:.78rem;color:var(--muted)" id="adminSt"></span>
+  <button id="logoutBtn" class="btn" style="width:auto;padding:.25rem .65rem;font-size:.78rem;background:var(--bg3);color:var(--muted);border:1px solid var(--border);display:none" onclick="logout()">Logout</button>
+</div>
+<div id="loginView" class="login-wrap">
+  <div class="login-box">
+    <h2>Admin Login</h2>
+    <input type="password" id="tokInp" placeholder="Admin secret (SRGAN_ADMIN_SECRET)" onkeydown="if(event.key==='Enter')login()">
+    <button class="btn btn-p" onclick="login()">Sign In</button>
+    <div id="errMsg"></div>
+  </div>
+</div>
+<div id="adminView" style="display:none">
+  <div class="main">
+    <div class="sec-ttl">System Metrics</div>
+    <div class="cards">
+      <div class="card"><div class="card-val" id="mUp">–</div><div class="card-lbl">Uptime</div></div>
+      <div class="card"><div class="card-val" id="mMem">–</div><div class="card-lbl">RAM Used</div></div>
+      <div class="card"><div class="card-val" id="mLoad">–</div><div class="card-lbl">Load</div></div>
+      <div class="card g"><div class="card-val" id="mComp">–</div><div class="card-lbl">Completed</div></div>
+      <div class="card"><div class="card-val" id="mTotal">–</div><div class="card-lbl">Total Jobs</div></div>
+      <div class="card y"><div class="card-val" id="mUsers">–</div><div class="card-lbl">Users</div></div>
+    </div>
+    <div class="sec-ttl">Users</div>
+    <div class="tbl-wrap" id="usersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    <div class="sec-ttl">Recent Jobs</div>
+    <div class="tbl-wrap" id="jobsTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+  </div>
+</div>
+<script>
+var tok=sessionStorage.getItem('srgan_admin')||'';
+if(tok)init();
+
+function login(){tok=document.getElementById('tokInp').value.trim();init();}
+
+function logout(){
+  tok='';sessionStorage.removeItem('srgan_admin');
+  document.getElementById('adminView').style.display='none';
+  document.getElementById('loginView').style.display='flex';
+  document.getElementById('logoutBtn').style.display='none';
+  document.getElementById('adminSt').textContent='';
+}
+
+function init(){
+  document.getElementById('errMsg').textContent='';
+  fetch('/api/admin/users',{headers:{Authorization:'Bearer '+tok}}).then(function(r){
+    if(r.status===401){document.getElementById('errMsg').textContent='Invalid admin token';tok='';return;}
+    if(!r.ok)throw new Error(r.statusText);
+    return r.json();
+  }).then(function(d){
+    if(!d)return;
+    sessionStorage.setItem('srgan_admin',tok);
+    document.getElementById('loginView').style.display='none';
+    document.getElementById('adminView').style.display='block';
+    document.getElementById('logoutBtn').style.display='inline-block';
+    document.getElementById('adminSt').textContent='Authenticated';
+    renderUsers(d.users||[]);
+    refresh();
+    setInterval(refresh,5000);
+  }).catch(function(e){document.getElementById('errMsg').textContent='Error: '+e.message;});
+}
+
+function refresh(){
+  var h={Authorization:'Bearer '+tok};
+  Promise.all([
+    fetch('/api/admin/users',{headers:h}).then(function(r){return r.ok?r.json():null;}),
+    fetch('/api/v1/stats',{headers:h}).then(function(r){return r.ok?r.json():null;}),
+    fetch('/api/v1/jobs',{headers:h}).then(function(r){return r.ok?r.json():null;})
+  ]).then(function(res){
+    if(res[0])renderUsers(res[0].users||[]);
+    if(res[1])renderMetrics(res[1]);
+    if(res[2])renderJobs(res[2].jobs||[]);
+  }).catch(function(){});
+}
+
+function set(id,v){var e=document.getElementById(id);if(e)e.textContent=v;}
+
+function fmtUp(s){
+  if(s<60)return s+'s';if(s<3600)return Math.floor(s/60)+'m';
+  if(s<86400)return Math.floor(s/3600)+'h';return Math.floor(s/86400)+'d';
+}
+
+function renderMetrics(s){
+  set('mUp',fmtUp(s.uptime_secs||0));
+  set('mMem',(s.system&&s.system.mem_used_mb||0)+' MB');
+  set('mLoad',((s.system&&s.system.load_avg_1m)||0).toFixed(2));
+  set('mComp',s.jobs&&s.jobs.completed!=null?s.jobs.completed:'–');
+  set('mTotal',s.jobs&&s.jobs.total!=null?s.jobs.total:'–');
+}
+
+function renderUsers(users){
+  set('mUsers',users.length);
+  if(!users.length){document.getElementById('usersTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No users yet</div>';return;}
+  var html='<table><thead><tr><th>API Key</th><th>Tier</th><th>Credits Left</th><th>Issued Today</th><th>Consumed Today</th></tr></thead><tbody>';
+  users.forEach(function(u){
+    html+='<tr>'
+      +'<td><code>'+u.user_id.slice(0,24)+(u.user_id.length>24?'…':'')+'</code></td>'
+      +'<td><span class="badge tier-'+u.tier+'">'+u.tier+'</span></td>'
+      +'<td>'+u.credits_remaining+'</td>'
+      +'<td>'+u.credits_issued_today+'</td>'
+      +'<td>'+u.credits_consumed_today+'</td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('usersTbl').innerHTML=html;
+}
+
+function jobBadge(st){
+  var s=st||'';
+  if(s==='completed')return '<span class="badge bc">completed</span>';
+  if(s==='processing')return '<span class="badge bpr">processing</span>';
+  if(s.startsWith('failed'))return '<span class="badge bf">failed</span>';
+  return '<span class="badge bp">'+s+'</span>';
+}
+
+function renderJobs(jobs){
+  if(!jobs.length){document.getElementById('jobsTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No jobs yet</div>';return;}
+  var html='<table><thead><tr><th>Job ID</th><th>Status</th><th>Model</th><th>Input</th><th>Output</th><th>Duration</th><th>Time</th></tr></thead><tbody>';
+  jobs.forEach(function(j){
+    var dur=j.duration_secs!=null?j.duration_secs.toFixed(1)+'s':'–';
+    html+='<tr>'
+      +'<td><code>'+j.id.slice(0,12)+'…</code></td>'
+      +'<td>'+jobBadge(j.status)+'</td>'
+      +'<td>'+(j.model||'–')+'</td>'
+      +'<td>'+(j.input_size||'–')+'</td>'
+      +'<td>'+(j.output_size||'–')+'</td>'
+      +'<td>'+dur+'</td>'
+      +'<td>'+new Date(j.created_at*1000).toLocaleTimeString()+'</td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('jobsTbl').innerHTML=html;
+}
+</script>
+</body>
+</html>"##;
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET /api/me — current user profile and credit balance
+    fn handle_api_me(&self, request: &str) -> String {
+        let api_key = self
+            .extract_header(request, "x-api-key")
+            .unwrap_or_else(|| "anonymous".to_string());
+
+        let status = if let Ok(mut db) = self.billing_db.lock() {
+            let account = db.get_or_create_free(&api_key);
+            serde_json::json!({
+                "user_id": account.user_id,
+                "tier": account.tier.as_str(),
+                "credits_remaining": account.credits_remaining,
+                "credits_reset_at": account.credits_reset_at,
+                "credits_issued_today": account.credits_issued_today,
+                "credits_consumed_today": account.credits_consumed_today,
+            })
+        } else {
+            return self.error_response(500, "Internal error");
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+            status
+        )
+    }
+
+    /// Returns true when the request carries a valid admin bearer token.
+    fn verify_admin_token(&self, request: &str) -> bool {
+        let secret = std::env::var("SRGAN_ADMIN_SECRET")
+            .unwrap_or_else(|_| "srgan-admin".to_string());
+        if let Some(auth) = self.extract_header(request, "authorization") {
+            if let Some(token) = auth.trim().strip_prefix("Bearer ") {
+                return token.trim() == secret;
+            }
+        }
+        false
+    }
+
+    /// GET /api/admin/users — list all users (requires admin bearer token)
+    fn handle_admin_users(&self, request: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n\r\n{}",
+                serde_json::json!({"error": "Unauthorized"})
+            );
+        }
+
+        let users = if let Ok(db) = self.billing_db.lock() {
+            db.all_users_snapshot()
+        } else {
+            vec![]
+        };
+
+        let response = serde_json::json!({ "users": users, "count": users.len() });
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
             response
         )
     }

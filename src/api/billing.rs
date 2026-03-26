@@ -115,6 +115,18 @@ impl BillingDb {
         false
     }
 
+    /// Snapshot of all user accounts (for admin panel)
+    pub fn all_users_snapshot(&self) -> Vec<serde_json::Value> {
+        self.users.values().map(|u| serde_json::json!({
+            "user_id": u.user_id,
+            "tier": u.tier.as_str(),
+            "credits_remaining": u.credits_remaining,
+            "credits_reset_at": u.credits_reset_at,
+            "credits_issued_today": u.credits_issued_today,
+            "credits_consumed_today": u.credits_consumed_today,
+        })).collect()
+    }
+
     /// Totals across all users (for dashboard)
     pub fn totals_today(&self) -> (u32, u32) {
         let issued = self.users.values().map(|u| u.credits_issued_today).sum();
