@@ -11,6 +11,22 @@ pub enum SubscriptionTier {
     Enterprise,
 }
 
+/// Account status — determines whether a key can process images.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AccountStatus {
+    Active,
+    Suspended,
+}
+
+impl AccountStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AccountStatus::Active => "active",
+            AccountStatus::Suspended => "suspended",
+        }
+    }
+}
+
 impl SubscriptionTier {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -26,6 +42,7 @@ impl SubscriptionTier {
 pub struct UserAccount {
     pub user_id: String,
     pub tier: SubscriptionTier,
+    pub status: AccountStatus,
     pub credits_remaining: u32,
     pub credits_reset_at: u64,
     pub credits_issued_today: u32,
@@ -37,8 +54,9 @@ impl UserAccount {
         Self {
             user_id,
             tier: SubscriptionTier::Free,
+            status: AccountStatus::Active,
             credits_remaining: 10,
-            credits_reset_at: next_hour_epoch(),
+            credits_reset_at: next_day_epoch(),
             credits_issued_today: 10,
             credits_consumed_today: 0,
         }
@@ -97,9 +115,28 @@ impl BillingDb {
         }
     }
 
+    /// Set the account status for a user (active / suspended).
+    pub fn set_status(&mut self, user_id: &str, status: AccountStatus) {
+        if let Some(user) = self.users.get_mut(user_id) {
+            user.status = status;
+        }
+    }
+
+    /// Returns true if the account is active (not suspended).
+    pub fn is_active(&self, user_id: &str) -> bool {
+        self.users
+            .get(user_id)
+            .map(|u| u.status == AccountStatus::Active)
+            .unwrap_or(true) // unknown users treated as active (will be auto-created as Free)
+    }
+
     /// Deduct one credit. Returns false if no credits remain (Enterprise never fails).
     pub fn consume_credit(&mut self, user_id: &str) -> bool {
         if let Some(user) = self.users.get_mut(user_id) {
+            // Suspended accounts cannot process images
+            if user.status == AccountStatus::Suspended {
+                return false;
+            }
             if matches!(user.tier, SubscriptionTier::Enterprise) {
                 user.credits_consumed_today += 1;
                 return true;
@@ -117,14 +154,19 @@ impl BillingDb {
 
     /// Snapshot of all user accounts (for admin panel)
     pub fn all_users_snapshot(&self) -> Vec<serde_json::Value> {
-        self.users.values().map(|u| serde_json::json!({
-            "user_id": u.user_id,
-            "tier": u.tier.as_str(),
-            "credits_remaining": u.credits_remaining,
-            "credits_reset_at": u.credits_reset_at,
-            "credits_issued_today": u.credits_issued_today,
-            "credits_consumed_today": u.credits_consumed_today,
-        })).collect()
+        self.users.values().map(|u| {
+            let plan = crate::billing::plans::plan_for(u.tier.as_str());
+            serde_json::json!({
+                "user_id": u.user_id,
+                "tier": u.tier.as_str(),
+                "status": u.status.as_str(),
+                "credits_remaining": u.credits_remaining,
+                "daily_quota": if plan.daily_quota == u32::MAX { "unlimited".to_string() } else { plan.daily_quota.to_string() },
+                "credits_reset_at": u.credits_reset_at,
+                "credits_issued_today": u.credits_issued_today,
+                "credits_consumed_today": u.credits_consumed_today,
+            })
+        }).collect()
     }
 
     /// Totals across all users (for dashboard)
@@ -140,16 +182,21 @@ impl BillingDb {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        self.users.values().map(|u| serde_json::json!({
-            "user_id": u.user_id,
-            "tier": u.tier.as_str(),
-            "credits_remaining": u.credits_remaining,
-            "credits_reset_at": u.credits_reset_at,
-            "credits_issued_today": u.credits_issued_today,
-            "credits_consumed_today": u.credits_consumed_today,
-            "total_jobs": u.credits_consumed_today,
-            "last_active": u.credits_reset_at.min(now),
-        })).collect()
+        self.users.values().map(|u| {
+            let plan = crate::billing::plans::plan_for(u.tier.as_str());
+            serde_json::json!({
+                "user_id": u.user_id,
+                "tier": u.tier.as_str(),
+                "status": u.status.as_str(),
+                "credits_remaining": u.credits_remaining,
+                "daily_quota": if plan.daily_quota == u32::MAX { "unlimited".to_string() } else { plan.daily_quota.to_string() },
+                "credits_reset_at": u.credits_reset_at,
+                "credits_issued_today": u.credits_issued_today,
+                "credits_consumed_today": u.credits_consumed_today,
+                "total_jobs": u.credits_consumed_today,
+                "last_active": u.credits_reset_at.min(now),
+            })
+        }).collect()
     }
 
     /// Credit usage grouped by tier.
@@ -198,13 +245,13 @@ impl BillingDb {
     }
 }
 
-fn next_hour_epoch() -> u64 {
+fn next_day_epoch() -> u64 {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let hour_start = now - (now % 3600);
-    hour_start + 3600
+    let day_start = now - (now % 86400);
+    day_start + 86400
 }
 
 // ── API response types ────────────────────────────────────────────────────────
@@ -303,24 +350,47 @@ pub fn handle_stripe_webhook(
             if !user_id.is_empty() {
                 if let Ok(mut db_guard) = db.lock() {
                     db_guard.upgrade_to_pro(&user_id);
+                    db_guard.set_status(&user_id, AccountStatus::Active);
                 }
             }
             Ok("payment_processed".to_string())
         }
+        "invoice.payment_failed" => {
+            let user_id = extract_user_id_from_webhook(&event);
+            if !user_id.is_empty() {
+                if let Ok(mut db_guard) = db.lock() {
+                    db_guard.set_status(&user_id, AccountStatus::Suspended);
+                }
+            }
+            Ok("key_suspended".to_string())
+        }
         "customer.subscription.deleted" => {
-            let user_id = event["data"]["object"]["metadata"]["user_id"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
+            let user_id = extract_user_id_from_webhook(&event);
             if !user_id.is_empty() {
                 if let Ok(mut db_guard) = db.lock() {
                     db_guard.downgrade_to_free(&user_id);
+                    db_guard.set_status(&user_id, AccountStatus::Active);
                 }
             }
             Ok("subscription_cancelled".to_string())
         }
         other => Ok(format!("unhandled_event:{}", other)),
     }
+}
+
+/// Extract user ID from a webhook event, trying multiple paths.
+fn extract_user_id_from_webhook(event: &serde_json::Value) -> String {
+    if let Some(id) = event["data"]["object"]["client_reference_id"].as_str() {
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    if let Some(id) = event["data"]["object"]["metadata"]["user_id"].as_str() {
+        if !id.is_empty() {
+            return id.to_string();
+        }
+    }
+    String::new()
 }
 
 /// Verify a Stripe webhook signature header using HMAC-SHA256.

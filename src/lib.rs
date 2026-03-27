@@ -20,6 +20,7 @@ extern crate smallvec;
 extern crate xz2;
 
 pub mod api;
+pub mod billing;
 pub mod checkpoint;
 pub mod monitoring;
 pub mod preprocessing;

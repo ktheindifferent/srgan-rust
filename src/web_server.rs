@@ -514,6 +514,7 @@ impl WebServer {
         info!("  POST /api/v1/compare         - Multi-model PSNR/SSIM comparison");
         info!("  GET  /dashboard              - Live processing dashboard (HTML)");
         info!("  GET  /api/v1/dashboard/stream - SSE live stats stream");
+        info!("  GET  /preview                - WASM browser preview (HTML)");
         info!("  GET  /admin                  - Admin dashboard (HTML)");
         info!("  GET  /api/admin/stats        - Admin analytics (JSON)");
         info!("  GET  /api/admin/users        - User listing (JSON)");
@@ -631,6 +632,7 @@ impl WebServer {
             let response = match (method, path) {
                 ("GET", "/") => self.handle_public_ui(),
                 ("GET", "/demo") => self.handle_demo_page(),
+                ("GET", "/preview") => self.handle_wasm_preview_page(),
                 ("GET", "/dashboard") => self.handle_root_dashboard(),
                 ("GET", "/admin") => self.handle_admin_panel(),
                 ("GET", "/api/me") => self.handle_api_me(&request),
@@ -647,7 +649,9 @@ impl WebServer {
                 ("POST", "/api/v1/detect") => self.handle_detect(&request),
                 ("POST", "/api/v1/billing/checkout") => self.handle_billing_checkout(&request),
                 ("POST", "/api/v1/billing/webhook") => self.handle_billing_webhook(&request),
+                ("POST", "/webhooks/stripe") => self.handle_stripe_webhook_v2(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
+                ("GET", "/api/v1/admin/keys") => self.handle_admin_keys(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
                 // Registration & API key management
@@ -685,6 +689,7 @@ impl WebServer {
                 _ if method == "GET" && (path.starts_with("/api/result/") || path.starts_with("/api/v1/result/")) => self.handle_job_result(path),
                 _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
+                _ if method == "GET" && path.starts_with("/preview/pkg/") => self.handle_wasm_pkg_file(path),
                 _ => self.handle_not_found(),
             };
 
@@ -1186,6 +1191,64 @@ impl WebServer {
         )
     }
 
+    /// GET /preview — WASM browser preview page (bilinear upscaling in-browser)
+    fn handle_wasm_preview_page(&self) -> String {
+        const HTML: &str = include_str!("../wasm/index.html");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            HTML.len(), HTML
+        )
+    }
+
+    /// GET /preview/pkg/* — serve WASM package files (JS glue, .wasm binary)
+    fn handle_wasm_pkg_file(&self, path: &str) -> String {
+        let relative = path.trim_start_matches("/preview/pkg/");
+        // Sanitise: reject path traversal
+        if relative.contains("..") || relative.contains('/') {
+            return self.handle_not_found();
+        }
+
+        let pkg_dir = std::path::Path::new("wasm/pkg");
+        let file_path = pkg_dir.join(relative);
+
+        match std::fs::read(&file_path) {
+            Ok(contents) => {
+                let content_type = if relative.ends_with(".js") {
+                    "application/javascript"
+                } else if relative.ends_with(".wasm") {
+                    "application/wasm"
+                } else if relative.ends_with(".d.ts") {
+                    "application/typescript"
+                } else {
+                    "application/octet-stream"
+                };
+
+                // For .wasm files we need binary response; use base64-free approach
+                // by returning raw bytes via the HTTP text (works since we write_all as bytes)
+                if relative.ends_with(".wasm") {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: public, max-age=3600\r\n\r\n",
+                        content_type, contents.len()
+                    );
+                    // We need to return String but .wasm is binary. Use Latin-1 mapping.
+                    let mut result = header;
+                    // Safety: each byte maps to a valid char in 0..=255
+                    for &b in &contents {
+                        result.push(b as char);
+                    }
+                    result
+                } else {
+                    let text = String::from_utf8_lossy(&contents);
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {}; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: public, max-age=3600\r\n\r\n{}",
+                        content_type, contents.len(), text
+                    )
+                }
+            }
+            Err(_) => self.handle_not_found(),
+        }
+    }
+
     // ── Dashboard / admin endpoints ──────────────────────────────────────────
 
     /// GET /dashboard — internal dashboard (SPA; all data fetched via JS)
@@ -1440,6 +1503,8 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bord
       <div class="card"><div class="card-val" id="cPro">–</div><div class="card-lbl">Pro consumed</div></div>
       <div class="card"><div class="card-val" id="cEnt">–</div><div class="card-lbl">Enterprise consumed</div></div>
     </div>
+    <div class="sec-ttl">API Key Rate Limits</div>
+    <div class="tbl-wrap" id="keysTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Top Users by Job Count</div>
     <div class="tbl-wrap" id="topUsersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Users</div>
@@ -3178,6 +3243,78 @@ function renderEndpointMetrics(metrics){
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
             serde_json::to_string(&status)
                 .unwrap_or_else(|e| format!("{{\"error\":\"{}\"}}", e))
+        )
+    }
+
+    /// POST /webhooks/stripe — Stripe webhook endpoint using billing::stripe module
+    fn handle_stripe_webhook_v2(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+        let signature = self
+            .extract_header(request, "stripe-signature")
+            .unwrap_or_default();
+
+        let webhook_secret = std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default();
+        if webhook_secret.is_empty() {
+            return self.error_response(500, "STRIPE_WEBHOOK_SECRET not configured");
+        }
+
+        match crate::billing::stripe::handle_webhook(
+            &body,
+            &signature,
+            &webhook_secret,
+            &self.billing_db,
+        ) {
+            Ok(action) => {
+                let msg = match &action {
+                    crate::billing::stripe::WebhookAction::Provisioned(id) =>
+                        format!("provisioned:{}", id),
+                    crate::billing::stripe::WebhookAction::Suspended(id) =>
+                        format!("suspended:{}", id),
+                    crate::billing::stripe::WebhookAction::Revoked(id) =>
+                        format!("revoked:{}", id),
+                    crate::billing::stripe::WebhookAction::Ignored(reason) =>
+                        format!("ignored:{}", reason),
+                };
+                let response = serde_json::json!({ "received": true, "result": msg });
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    response
+                )
+            }
+            Err(e) => self.error_response(400, &e),
+        }
+    }
+
+    /// GET /api/v1/admin/keys — admin dashboard showing all API keys with plan, usage, quota, status
+    fn handle_admin_keys(&self, request: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return self.error_response(401, "Unauthorized");
+        }
+
+        let keys = if let Ok(db) = self.billing_db.lock() {
+            db.all_users_snapshot()
+                .into_iter()
+                .map(|mut entry| {
+                    // Mask the key_id: show first 8 chars + "..."
+                    if let Some(uid) = entry["user_id"].as_str() {
+                        let masked = if uid.len() > 8 {
+                            format!("{}...", &uid[..8])
+                        } else {
+                            uid.to_string()
+                        };
+                        entry["key_id"] = serde_json::Value::String(masked);
+                    }
+                    entry
+                })
+                .collect::<Vec<_>>()
+        } else {
+            return self.error_response(500, "Failed to acquire billing lock");
+        };
+
+        let body = serde_json::json!({ "keys": keys });
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            body
         )
     }
 

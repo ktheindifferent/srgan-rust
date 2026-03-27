@@ -1,0 +1,10 @@
+{
+  "name": "srgan-wasm-preview",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "wasm-pack build --target web --out-dir pkg",
+    "build:release": "wasm-pack build --target web --out-dir pkg --release",
+    "clean": "rm -rf pkg"
+  }
+}
