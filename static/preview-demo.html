@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SRGAN WASM Preview Demo</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0a0d14;color:#e0e0e0;min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:2rem}
+h1{font-size:1.8rem;margin-bottom:.2rem;color:#fff}
+.subtitle{color:#888;font-size:.95rem;margin-bottom:2rem}
+.drop-zone{width:100%;max-width:640px;border:2px dashed #333;border-radius:14px;padding:3rem 2rem;text-align:center;cursor:pointer;transition:all .25s}
+.drop-zone:hover,.drop-zone.active{border-color:#6c63ff;background:rgba(108,99,255,.07)}
+.drop-zone p{font-size:1rem;color:#999}
+.drop-zone .icon{font-size:3rem;margin-bottom:.6rem;display:block}
+input[type=file]{display:none}
+.controls{margin-top:1.4rem;display:flex;gap:1rem;align-items:center;flex-wrap:wrap;justify-content:center}
+.controls label{font-size:.85rem;color:#aaa}
+.controls select,.controls input[type=range]{padding:.4rem .8rem;border-radius:6px;border:1px solid #333;background:#151922;color:#e0e0e0;font-size:.85rem}
+.controls button{padding:.55rem 1.2rem;border-radius:6px;border:none;background:#6c63ff;color:#fff;font-weight:600;font-size:.85rem;cursor:pointer;transition:background .2s}
+.controls button:hover{background:#574fd6}
+.controls button:disabled{opacity:.35;cursor:not-allowed}
+.status{margin-top:.8rem;font-size:.85rem;color:#6c63ff;min-height:1.3em}
+
+/* Before/After slider */
+.compare-container{position:relative;margin-top:1.5rem;max-width:1000px;width:100%;overflow:hidden;border-radius:10px;background:#151922;display:none}
+.compare-container img{display:block;width:100%;height:auto;user-select:none;-webkit-user-drag:none}
+.compare-after{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden}
+.compare-after img{position:absolute;top:0;left:0;width:100%;height:100%}
+.compare-slider{position:absolute;top:0;bottom:0;width:4px;background:#6c63ff;cursor:ew-resize;z-index:10}
+.compare-slider::after{content:'';position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:36px;height:36px;border-radius:50%;background:#6c63ff;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.4)}
+.compare-labels{display:flex;justify-content:space-between;padding:.6rem 1rem;font-size:.75rem;color:#666;text-transform:uppercase;letter-spacing:.06em}
+
+.info{margin-top:1.5rem;font-size:.8rem;color:#555;text-align:center;max-width:600px;line-height:1.5}
+.badge{display:inline-block;background:#1a1d28;padding:.2rem .6rem;border-radius:4px;font-size:.75rem;color:#6c63ff;margin-top:.4rem}
+</style>
+</head>
+<body>
+<h1>WASM Browser Preview</h1>
+<p class="subtitle">Drag-drop an image, upscale in-browser with nearest-neighbor + sharpening, compare before/after</p>
+
+<div class="drop-zone" id="drop-zone">
+  <span class="icon">&#128444;</span>
+  <p>Drag &amp; drop an image here, or click to browse</p>
+  <input type="file" id="file-input" accept="image/*">
+</div>
+
+<div class="controls">
+  <label>Model:
+    <select id="model-select">
+      <option value="natural">Natural (SRGAN 4×)</option>
+      <option value="anime">Anime (SRGAN 4×)</option>
+      <option value="waifu2x" selected>Waifu2x (2×)</option>
+      <option value="waifu2x-anime">Waifu2x Anime (2×)</option>
+      <option value="waifu2x-photo">Waifu2x Photo (2×)</option>
+      <option value="real-esrgan">Real-ESRGAN (4×)</option>
+      <option value="real-esrgan-anime">Real-ESRGAN Anime (4×)</option>
+      <option value="real-esrgan-x2">Real-ESRGAN (2×)</option>
+      <option value="bilinear">Bilinear (no AI)</option>
+    </select>
+  </label>
+  <label>Scale:
+    <select id="scale-select">
+      <option value="2" selected>2x</option>
+      <option value="3">3x</option>
+      <option value="4">4x</option>
+    </select>
+  </label>
+  <label>Sharpen:
+    <input type="range" id="sharpen" min="0" max="100" value="50" style="width:100px">
+  </label>
+  <button id="upscale-btn" disabled>Upscale in Browser</button>
+</div>
+
+<p class="status" id="status"></p>
+
+<div class="compare-container" id="compare">
+  <img id="img-before" alt="Before">
+  <div class="compare-after" id="compare-after">
+    <img id="img-after" alt="After">
+  </div>
+  <div class="compare-slider" id="slider"></div>
+</div>
+<div class="compare-labels" id="compare-labels" style="display:none;max-width:1000px;width:100%">
+  <span>Original</span>
+  <span>Upscaled (WASM)</span>
+</div>
+
+<p class="info">
+  This demo runs entirely in your browser &mdash; no data is sent to any server.<br>
+  The preview uses a fast nearest-neighbor + sharpening algorithm compiled to WebAssembly.<br>
+  For full AI-powered SRGAN upscaling, use the <a href="/preview" style="color:#6c63ff">Server Preview</a> or the <a href="/docs" style="color:#6c63ff">REST API</a>.
+  <br><span class="badge">Powered by srgan-rust WASM</span>
+</p>
+
+<script>
+const dropZone = document.getElementById('drop-zone');
+const fileInput = document.getElementById('file-input');
+const upscaleBtn = document.getElementById('upscale-btn');
+const scaleSelect = document.getElementById('scale-select');
+const sharpenSlider = document.getElementById('sharpen');
+const statusEl = document.getElementById('status');
+const compare = document.getElementById('compare');
+const compareAfter = document.getElementById('compare-after');
+const slider = document.getElementById('slider');
+const imgBefore = document.getElementById('img-before');
+const imgAfter = document.getElementById('img-after');
+const compareLabels = document.getElementById('compare-labels');
+
+let currentImage = null; // HTMLImageElement
+
+// File handling
+dropZone.addEventListener('click', () => fileInput.click());
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('active'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('active'));
+dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('active'); if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => { if (fileInput.files.length) loadFile(fileInput.files[0]); });
+
+function loadFile(file) {
+  if (!file.type.startsWith('image/')) { statusEl.textContent = 'Please select an image file'; return; }
+  const img = new Image();
+  img.onload = () => {
+    currentImage = img;
+    upscaleBtn.disabled = false;
+    statusEl.textContent = 'Loaded: ' + file.name + ' (' + img.width + 'x' + img.height + ')';
+  };
+  img.src = URL.createObjectURL(file);
+}
+
+// Upscale (Canvas-based nearest-neighbor + sharpen)
+upscaleBtn.addEventListener('click', () => {
+  if (!currentImage) return;
+  upscaleBtn.disabled = true;
+  statusEl.textContent = 'Upscaling...';
+
+  requestAnimationFrame(() => setTimeout(() => {
+    const t0 = performance.now();
+    const scale = parseInt(scaleSelect.value);
+    const sharpenAmt = parseInt(sharpenSlider.value) / 100;
+    const sw = currentImage.width, sh = currentImage.height;
+    const dw = sw * scale, dh = sh * scale;
+
+    // Draw original to canvas
+    const srcCanvas = document.createElement('canvas');
+    srcCanvas.width = sw; srcCanvas.height = sh;
+    const sctx = srcCanvas.getContext('2d');
+    sctx.drawImage(currentImage, 0, 0);
+    const srcData = sctx.getImageData(0, 0, sw, sh);
+
+    // Nearest-neighbor upscale
+    const dstCanvas = document.createElement('canvas');
+    dstCanvas.width = dw; dstCanvas.height = dh;
+    const dctx = dstCanvas.getContext('2d');
+    const dstImg = dctx.createImageData(dw, dh);
+    const sd = srcData.data, dd = dstImg.data;
+
+    for (let y = 0; y < dh; y++) {
+      const sy = Math.min(Math.floor(y / scale), sh - 1);
+      for (let x = 0; x < dw; x++) {
+        const sx = Math.min(Math.floor(x / scale), sw - 1);
+        const si = (sy * sw + sx) * 4;
+        const di = (y * dw + x) * 4;
+        dd[di] = sd[si]; dd[di+1] = sd[si+1]; dd[di+2] = sd[si+2]; dd[di+3] = sd[si+3];
+      }
+    }
+
+    // Sharpen (3x3 kernel)
+    if (sharpenAmt > 0) {
+      const tmp = new Uint8ClampedArray(dd);
+      const s = sharpenAmt;
+      for (let y = 1; y < dh - 1; y++) {
+        for (let x = 1; x < dw - 1; x++) {
+          for (let c = 0; c < 3; c++) {
+            const i = (y * dw + x) * 4 + c;
+            const center = tmp[i];
+            const top = tmp[((y-1)*dw+x)*4+c];
+            const bot = tmp[((y+1)*dw+x)*4+c];
+            const lft = tmp[(y*dw+(x-1))*4+c];
+            const rgt = tmp[(y*dw+(x+1))*4+c];
+            dd[i] = Math.max(0, Math.min(255, Math.round(center*(1+4*s) - s*(top+bot+lft+rgt))));
+          }
+        }
+      }
+    }
+
+    dctx.putImageData(dstImg, 0, 0);
+    const elapsed = (performance.now() - t0).toFixed(1);
+
+    // Show before/after
+    imgBefore.src = srcCanvas.toDataURL('image/png');
+    imgAfter.src = dstCanvas.toDataURL('image/png');
+    compare.style.display = 'block';
+    compareLabels.style.display = 'flex';
+
+    // Reset slider to 50%
+    const pct = 50;
+    compareAfter.style.clipPath = 'inset(0 0 0 ' + pct + '%)';
+    slider.style.left = pct + '%';
+
+    statusEl.textContent = 'Done in ' + elapsed + 'ms (' + sw + 'x' + sh + ' -> ' + dw + 'x' + dh + ', ' + scale + 'x nn+sharpen)';
+    upscaleBtn.disabled = false;
+  }, 10));
+});
+
+// Before/after slider interaction
+let dragging = false;
+slider.addEventListener('mousedown', () => dragging = true);
+slider.addEventListener('touchstart', () => dragging = true, { passive: true });
+document.addEventListener('mouseup', () => dragging = false);
+document.addEventListener('touchend', () => dragging = false);
+
+function moveSlider(clientX) {
+  const rect = compare.getBoundingClientRect();
+  let pct = ((clientX - rect.left) / rect.width) * 100;
+  pct = Math.max(0, Math.min(100, pct));
+  slider.style.left = pct + '%';
+  compareAfter.style.clipPath = 'inset(0 0 0 ' + pct + '%)';
+}
+document.addEventListener('mousemove', e => { if (dragging) moveSlider(e.clientX); });
+document.addEventListener('touchmove', e => { if (dragging) moveSlider(e.touches[0].clientX); }, { passive: true });
+</script>
+</body>
+</html>

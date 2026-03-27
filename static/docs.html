@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SRGAN API Documentation</title>
+<style>
+:root{--bg:#0a0d14;--surface:#111520;--card:#161b28;--border:#1e2436;--text:#d0d4dc;--muted:#6b7280;--accent:#6c63ff;--accent2:#8b5cf6;--green:#22c55e;--blue:#3b82f6}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.6}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* Nav */
+nav{background:var(--surface);border-bottom:1px solid var(--border);padding:1rem 2rem;display:flex;align-items:center;gap:2rem;position:sticky;top:0;z-index:100}
+nav .logo{font-weight:700;font-size:1.1rem;color:#fff}
+nav a{color:var(--muted);font-size:.9rem}
+nav a:hover{color:#fff}
+
+/* Container */
+.container{max-width:960px;margin:0 auto;padding:2rem 1.5rem}
+
+/* Sections */
+section{margin-bottom:3rem}
+h2{font-size:1.5rem;color:#fff;margin-bottom:1rem;padding-bottom:.5rem;border-bottom:1px solid var(--border)}
+h3{font-size:1.1rem;color:#fff;margin:1.5rem 0 .5rem}
+
+/* Endpoint table */
+table{width:100%;border-collapse:collapse;font-size:.88rem}
+th{text-align:left;padding:.6rem .8rem;background:var(--card);color:var(--muted);font-weight:600;text-transform:uppercase;font-size:.75rem;letter-spacing:.05em}
+td{padding:.6rem .8rem;border-bottom:1px solid var(--border)}
+.method{font-weight:700;font-size:.8rem;padding:.15rem .5rem;border-radius:4px;display:inline-block;min-width:52px;text-align:center}
+.method-get{background:rgba(34,197,94,.12);color:var(--green)}
+.method-post{background:rgba(99,102,241,.12);color:var(--accent)}
+.method-delete{background:rgba(239,68,68,.12);color:#ef4444}
+code{background:var(--card);padding:.15rem .4rem;border-radius:3px;font-size:.85rem;font-family:'SF Mono',Monaco,Consolas,monospace}
+pre{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:1rem 1.2rem;overflow-x:auto;font-size:.82rem;line-height:1.5;font-family:'SF Mono',Monaco,Consolas,monospace;margin:.8rem 0}
+pre .comment{color:var(--muted)}
+pre .string{color:var(--green)}
+pre .keyword{color:var(--accent2)}
+
+/* Auth note */
+.note{background:var(--card);border-left:3px solid var(--accent);padding:.8rem 1rem;border-radius:0 6px 6px 0;font-size:.85rem;margin:1rem 0;color:var(--muted)}
+.note strong{color:var(--text)}
+</style>
+</head>
+<body>
+<nav>
+  <span class="logo">SRGAN API</span>
+  <a href="/">Home</a>
+  <a href="/docs">Docs</a>
+  <a href="/demo">Demo</a>
+  <a href="/wasm-demo">WASM Preview</a>
+  <a href="/api/v1/health">Status</a>
+</nav>
+
+<div class="container">
+
+<section>
+  <h2>Authentication</h2>
+  <p>All API requests require an API key passed via the <code>X-API-Key</code> header, or a JWT Bearer token in the <code>Authorization</code> header.</p>
+  <div class="note">
+    <strong>Getting started:</strong> Register at <code>POST /api/v1/register</code> with email + password, then create an API key at <code>POST /api/v1/keys</code>.
+  </div>
+</section>
+
+<section>
+  <h2>Quick Start</h2>
+  <pre><span class="comment"># Register</span>
+curl -X POST https://your-host/api/v1/register \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you@example.com","password":"s3cure!"}'
+
+<span class="comment"># Create API key</span>
+curl -X POST https://your-host/api/v1/keys \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{"label":"my-app","tier":"free"}'
+
+<span class="comment"># Upscale an image</span>
+curl -X POST https://your-host/api/v1/upscale \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"image_data":"BASE64_IMAGE","model":"natural","format":"png"}'</pre>
+</section>
+
+<section>
+  <h2>Endpoints</h2>
+
+  <h3>Image Upscaling</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/upscale</code></td><td>Synchronous upscale (returns base64 result)</td></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/upscale/async</code></td><td>Async upscale (returns job_id)</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/job/:id</code></td><td>Poll job status + result</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/jobs</code></td><td>List jobs (paginated, filterable)</td></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/detect</code></td><td>Auto-detect image type + recommend model</td></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/compare</code></td><td>Multi-model comparison (PSNR/SSIM)</td></tr>
+  </table>
+
+  <h3>Batch Processing</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/batch</code></td><td>Submit batch of images (URLs or base64)</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/batch/:id</code></td><td>Batch status + per-item results</td></tr>
+    <tr><td><span class="method method-delete">DELETE</span></td><td><code>/api/v1/batch/:id</code></td><td>Cancel a running batch</td></tr>
+  </table>
+
+  <h3>Webhooks</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/webhooks</code></td><td>Register a webhook endpoint</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/webhooks</code></td><td>List your registered webhooks</td></tr>
+    <tr><td><span class="method method-delete">DELETE</span></td><td><code>/api/v1/webhooks/:id</code></td><td>Remove a webhook</td></tr>
+  </table>
+  <div class="note">
+    Webhook payloads are signed with HMAC-SHA256 via the <code>X-SRGAN-Signature</code> header.<br>
+    Events: <code>job.completed</code>, <code>job.failed</code>, <code>batch.completed</code>. Retries: 3 attempts with exponential backoff.
+  </div>
+
+  <h3>Analytics</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/analytics/usage?period=7d</code></td><td>Per-key usage time-series</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/admin/analytics?period=30d</code></td><td>Admin aggregate analytics</td></tr>
+  </table>
+
+  <h3>Models</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/models</code></td><td>List available models</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/health</code></td><td>Health check + loaded model info</td></tr>
+  </table>
+
+  <h3>Account &amp; Keys</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/register</code></td><td>Register (email + password)</td></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/keys</code></td><td>Create API key</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/keys</code></td><td>List your API keys</td></tr>
+    <tr><td><span class="method method-delete">DELETE</span></td><td><code>/api/v1/keys/:id</code></td><td>Revoke an API key</td></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/keys/:id/rotate</code></td><td>Rotate key (24h grace period)</td></tr>
+  </table>
+
+  <h3>Organizations</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/orgs</code></td><td>Create organization</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/orgs/:id</code></td><td>Get org details</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/orgs/:id/usage</code></td><td>Org usage + credit pool</td></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/orgs/:id/members</code></td><td>Add member</td></tr>
+    <tr><td><span class="method method-delete">DELETE</span></td><td><code>/api/v1/orgs/:id/members/:uid</code></td><td>Remove member</td></tr>
+  </table>
+
+  <h3>Billing</h3>
+  <table>
+    <tr><th>Method</th><th>Path</th><th>Description</th></tr>
+    <tr><td><span class="method method-post">POST</span></td><td><code>/api/v1/billing/checkout</code></td><td>Create Stripe checkout session</td></tr>
+    <tr><td><span class="method method-get">GET</span></td><td><code>/api/v1/billing/status</code></td><td>Subscription status</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>Models</h2>
+  <table>
+    <tr><th>Label</th><th>Architecture</th><th>Scale</th><th>Best For</th></tr>
+    <tr><td><code>natural</code></td><td>SRGAN (L1)</td><td>4×</td><td>Photos, landscapes, general</td></tr>
+    <tr><td><code>anime</code></td><td>SRGAN (L1)</td><td>4×</td><td>Anime, illustration, artwork</td></tr>
+    <tr><td><code>waifu2x</code></td><td>VGG7 CNN</td><td>1×/2×</td><td>Anime with noise reduction (default: noise=1, scale=2×)</td></tr>
+    <tr><td><code>waifu2x-anime</code></td><td>VGG7 CNN</td><td>2×</td><td>Anime/manga — noise=1, anime-tuned sharpening</td></tr>
+    <tr><td><code>waifu2x-photo</code></td><td>VGG7 CNN</td><td>2×</td><td>Photos/scans — noise=2, photo denoise+upscale</td></tr>
+    <tr><td><code>real-esrgan</code></td><td>Real-ESRGAN</td><td>4×</td><td>Compressed/noisy photos</td></tr>
+    <tr><td><code>real-esrgan-anime</code></td><td>Real-ESRGAN</td><td>4×</td><td>Compressed/noisy anime</td></tr>
+    <tr><td><code>real-esrgan-x2</code></td><td>Real-ESRGAN</td><td>2×</td><td>Photos, lower memory</td></tr>
+    <tr><td><code>bilinear</code></td><td>Interpolation</td><td>2×/4×</td><td>Fast preview (no AI)</td></tr>
+  </table>
+
+  <h3>Waifu2x Options</h3>
+  <p style="font-size:.88rem;color:var(--muted);margin-bottom:.6rem">When using any <code>waifu2x</code> model, you can pass these additional fields in the upscale request:</p>
+  <table>
+    <tr><th>Field</th><th>Type</th><th>Default</th><th>Description</th></tr>
+    <tr><td><code>waifu2x_noise_level</code></td><td>0–3</td><td>1</td><td>Noise reduction strength (0=none, 1=light, 2=medium, 3=aggressive)</td></tr>
+    <tr><td><code>waifu2x_scale</code></td><td>1 or 2</td><td>2</td><td>1=denoise only, 2=upscale 2×</td></tr>
+    <tr><td><code>waifu2x_style</code></td><td>string</td><td>"anime"</td><td>"anime", "photo", or "artwork" — selects weight set / sharpening profile</td></tr>
+  </table>
+  <pre><span class="comment">// Waifu2x example: denoise + upscale 2× with photo style</span>
+{
+  <span class="string">"image_data"</span>: <span class="string">"BASE64..."</span>,
+  <span class="string">"model"</span>: <span class="string">"waifu2x"</span>,
+  <span class="string">"waifu2x_noise_level"</span>: 2,
+  <span class="string">"waifu2x_scale"</span>: 2,
+  <span class="string">"waifu2x_style"</span>: <span class="string">"photo"</span>
+}</pre>
+</section>
+
+<section>
+  <h2>Rate Limits</h2>
+  <table>
+    <tr><th>Tier</th><th>Requests/Hour</th><th>Daily Quota</th><th>Max Output</th></tr>
+    <tr><td>Free</td><td>10</td><td>10 images</td><td>2 MP</td></tr>
+    <tr><td>Pro</td><td>1,000</td><td>1,000 images</td><td>10 MP</td></tr>
+    <tr><td>Enterprise</td><td>Unlimited</td><td>Unlimited</td><td>Unlimited</td></tr>
+  </table>
+  <p style="margin-top:.5rem;font-size:.85rem;color:var(--muted)">Rate limit headers: <code>X-RateLimit-Limit</code>, <code>X-RateLimit-Remaining</code>, <code>X-RateLimit-Reset</code>, <code>Retry-After</code></p>
+</section>
+
+<section>
+  <h2>Error Codes</h2>
+  <table>
+    <tr><th>Status</th><th>Meaning</th></tr>
+    <tr><td>400</td><td>Bad request (invalid input, missing fields)</td></tr>
+    <tr><td>401</td><td>Unauthorized (missing or invalid API key)</td></tr>
+    <tr><td>402</td><td>Payment required (quota exceeded, upgrade needed)</td></tr>
+    <tr><td>429</td><td>Rate limited (retry after <code>Retry-After</code> seconds)</td></tr>
+    <tr><td>500</td><td>Internal server error</td></tr>
+  </table>
+</section>
+
+</div>
+</body>
+</html>

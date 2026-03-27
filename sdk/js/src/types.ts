@@ -18,6 +18,8 @@ export type ModelLabel =
   | "natural"
   | "anime"
   | "waifu2x"
+  | "waifu2x-anime"
+  | "waifu2x-photo"
   | "real-esrgan"
   | "real-esrgan-anime"
   | "real-esrgan-x2"
@@ -148,6 +150,10 @@ export interface ModelInfo {
   label: ModelLabel;
   description: string;
   scale_factor: number;
+  /** Model architecture family (e.g. "esrgan", "waifu2x", "custom"). */
+  model_type?: string;
+  /** Supported scale factors for this model (e.g. [1, 2] for waifu2x). */
+  scale_factors?: number[];
 }
 
 export interface HealthResponse {
