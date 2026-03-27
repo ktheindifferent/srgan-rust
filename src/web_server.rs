@@ -14,6 +14,7 @@ use crate::thread_safe_network::ThreadSafeNetwork;
 use crate::api::auth::{self, KeyStore, RegisterRequest};
 use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, SubscriptionTier};
 use crate::api::middleware::TierRateLimiter;
+use crate::api::rate_limit_dashboard::RateLimitDashboard;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
 use crate::storage::S3Config;
 
@@ -412,6 +413,8 @@ pub struct WebServer {
     org_db: Arc<Mutex<crate::api::org::OrgDb>>,
     /// SQLite-backed user + API key store
     key_store: Arc<KeyStore>,
+    /// Per-API-key rate-limit dashboard (daily usage + throttle counts)
+    rate_limit_dashboard: Arc<Mutex<RateLimitDashboard>>,
 }
 
 /// Cached result
@@ -491,6 +494,7 @@ impl WebServer {
             request_metrics: Arc::new(Mutex::new(RequestMetrics::new())),
             org_db: Arc::new(Mutex::new(crate::api::org::OrgDb::new())),
             key_store: Arc::new(key_store),
+            rate_limit_dashboard: Arc::new(Mutex::new(RateLimitDashboard::new())),
         })
     }
     
@@ -657,6 +661,7 @@ impl WebServer {
                 ("POST", "/webhooks/stripe") => self.handle_stripe_webhook_v2(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 ("GET", "/api/v1/admin/keys") => self.handle_admin_keys(&request),
+                ("GET", "/api/v1/rate-limit") => self.handle_rate_limit_self(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
                 // Registration & API key management
@@ -3207,6 +3212,10 @@ function renderKeys(keys){
         let tier = self.tier_for_key(&api_key);
         let result = self.tier_rate_limiter.check(&api_key, &tier);
         let headers = result.headers();
+        // Record the request in the per-key rate-limit dashboard
+        if let Ok(mut dashboard) = self.rate_limit_dashboard.lock() {
+            dashboard.record_request(&api_key, !result.allowed);
+        }
         (result.allowed, headers)
     }
 
@@ -3342,18 +3351,32 @@ function renderKeys(keys){
             return self.error_response(401, "Unauthorized");
         }
 
+        let dashboard_stats = self.rate_limit_dashboard.lock().ok().and_then(|dash| {
+            self.billing_db.lock().ok().map(|db| dash.get_all_stats(&db))
+        });
+
         let keys = if let Ok(db) = self.billing_db.lock() {
             db.all_users_snapshot()
                 .into_iter()
                 .map(|mut entry| {
                     // Mask the key_id: show first 8 chars + "..."
-                    if let Some(uid) = entry["user_id"].as_str() {
+                    if let Some(uid) = entry["user_id"].as_str().map(|s| s.to_string()) {
                         let masked = if uid.len() > 8 {
                             format!("{}...", &uid[..8])
                         } else {
-                            uid.to_string()
+                            uid.clone()
                         };
                         entry["key_id"] = serde_json::Value::String(masked);
+
+                        // Merge rate-limit dashboard stats for this key
+                        if let Some(ref stats) = dashboard_stats {
+                            if let Some(rl) = stats.iter().find(|s| s.api_key == uid) {
+                                entry["requests_today"] = serde_json::json!(rl.requests_today);
+                                entry["quota_daily"] = serde_json::json!(rl.quota_daily);
+                                entry["pct_quota_used"] = serde_json::json!((rl.pct_daily * 100.0).round() / 100.0);
+                                entry["throttled_today"] = serde_json::json!(rl.throttled_today);
+                            }
+                        }
                     }
                     entry
                 })
@@ -3363,6 +3386,38 @@ function renderKeys(keys){
         };
 
         let body = serde_json::json!({ "keys": keys });
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            body
+        )
+    }
+
+    /// GET /api/v1/rate-limit — self-service rate-limit stats for the caller's API key
+    fn handle_rate_limit_self(&self, request: &str) -> String {
+        let api_key = self.resolve_api_identity(request);
+
+        let stats = self.rate_limit_dashboard.lock().ok().and_then(|dash| {
+            self.billing_db.lock().ok().and_then(|db| dash.get_stats(&api_key, &db))
+        });
+
+        let body = match stats {
+            Some(s) => serde_json::json!({
+                "api_key": format!("{}...", &s.api_key[..s.api_key.len().min(8)]),
+                "tier": s.tier,
+                "requests_today": s.requests_today,
+                "quota_daily": s.quota_daily,
+                "pct_quota_used": (s.pct_daily * 100.0).round() / 100.0,
+                "throttled_today": s.throttled_today,
+            }),
+            None => serde_json::json!({
+                "api_key": format!("{}...", &api_key[..api_key.len().min(8)]),
+                "requests_today": 0,
+                "quota_daily": 0,
+                "pct_quota_used": 0.0,
+                "throttled_today": 0,
+            }),
+        };
+
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
             body
