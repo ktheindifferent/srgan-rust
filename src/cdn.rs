@@ -35,13 +35,28 @@ pub struct CdnConfig {
 impl CdnConfig {
     /// Try to load from environment variables. Returns `None` if required vars
     /// are missing.
+    ///
+    /// Checks `CDN_*` env vars first (CDN_ENDPOINT, CDN_BUCKET, CDN_KEY,
+    /// CDN_SECRET), then falls back to `S3_*` for backwards compatibility.
     pub fn from_env() -> Option<Self> {
-        let endpoint = env::var("S3_ENDPOINT").ok()?;
-        let bucket = env::var("S3_BUCKET").ok()?;
-        let access_key = env::var("S3_KEY").ok()?;
-        let secret_key = env::var("S3_SECRET").ok()?;
-        let region = env::var("S3_REGION").unwrap_or_else(|_| "us-east-1".into());
-        let key_prefix = env::var("S3_KEY_PREFIX").unwrap_or_else(|_| "upscaled/".into());
+        let endpoint = env::var("CDN_ENDPOINT")
+            .or_else(|_| env::var("S3_ENDPOINT"))
+            .ok()?;
+        let bucket = env::var("CDN_BUCKET")
+            .or_else(|_| env::var("S3_BUCKET"))
+            .ok()?;
+        let access_key = env::var("CDN_KEY")
+            .or_else(|_| env::var("S3_KEY"))
+            .ok()?;
+        let secret_key = env::var("CDN_SECRET")
+            .or_else(|_| env::var("S3_SECRET"))
+            .ok()?;
+        let region = env::var("CDN_REGION")
+            .or_else(|_| env::var("S3_REGION"))
+            .unwrap_or_else(|_| "us-east-1".into());
+        let key_prefix = env::var("CDN_KEY_PREFIX")
+            .or_else(|_| env::var("S3_KEY_PREFIX"))
+            .unwrap_or_else(|_| "upscaled/".into());
 
         Some(Self {
             endpoint,

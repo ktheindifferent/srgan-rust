@@ -544,6 +544,7 @@ impl WebServer {
         info!("  GET  /api/admin/stats        - Admin analytics (JSON)");
         info!("  GET  /api/admin/users        - User listing (JSON)");
         info!("  GET  /api/v1/admin/keys      - Per-key rate limit dashboard (JSON)");
+        info!("  GET  /api/v1/analytics/usage  - Usage analytics (per API key)");
         info!("  POST /webhooks/stripe        - Stripe webhook endpoint");
         info!("  (Legacy /api/* routes also supported)");
         
@@ -702,6 +703,7 @@ impl WebServer {
                 ("GET", "/demo") => self.handle_wasm_demo_page(),
                 ("GET", "/preview") => self.handle_wasm_preview_page(),
                 ("GET", "/dashboard") => self.handle_root_dashboard(),
+                ("GET", "/dashboard/jobs") => self.handle_jobs_dashboard(),
                 ("GET", "/admin") => self.handle_admin_panel(),
                 ("GET", "/api/me") => self.handle_api_me(&request),
                 ("GET", "/api/admin/users") => self.handle_admin_users(&request),
@@ -725,6 +727,7 @@ impl WebServer {
                 ("GET", "/api/v1/rate-limit") => self.handle_rate_limit_self(&request),
                 ("POST", "/api/v1/video/upscale") | ("POST", "/api/video/upscale") => self.handle_video_upscale(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
+                ("GET", "/api/v1/analytics/usage") => self.handle_analytics_usage(&request),
                 ("POST", "/api/v1/webhooks/test") | ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
                 // Registration & API key management
                 ("POST", "/api/register") | ("POST", "/api/v1/register") => self.handle_register(&request),
@@ -765,6 +768,10 @@ impl WebServer {
                 _ if method == "GET" && path.starts_with("/demo/pkg/") => self.handle_demo_pkg_file(path),
                 _ if method == "GET" && path.starts_with("/admin/api-keys/") && path.ends_with("/usage") => self.handle_admin_key_usage(&request, path),
                 _ if method == "PUT" && path.starts_with("/admin/rate-limits/") => self.handle_update_rate_limit(&request, path),
+                _ if method == "POST"
+                    && (path.starts_with("/api/jobs/") || path.starts_with("/api/v1/jobs/"))
+                    && path.ends_with("/cancel") => self.handle_cancel_job(path),
+                _ if method == "GET" && path.starts_with("/compare/") => self.handle_compare_viewer(path),
                 _ => self.handle_not_found(),
             };
 
@@ -1087,10 +1094,26 @@ impl WebServer {
                         if let Some(job) = jobs_guard.get_mut(&job_id_clone) {
                             match result {
                                 Ok(encoded) => {
-                                    job.output_file_size = general_purpose::STANDARD.decode(&encoded)
-                                        .ok().map(|b| b.len() as u64);
+                                    let decoded_bytes = general_purpose::STANDARD.decode(&encoded).ok();
+                                    job.output_file_size = decoded_bytes.as_ref().map(|b| b.len() as u64);
                                     job.status = JobStatus::Completed;
                                     job.result_url = Some(format!("/api/result/{}", job_id_clone));
+
+                                    // CDN upload: if configured, upload result and store CDN URL
+                                    if let Some(ref bytes) = decoded_bytes {
+                                        if let Some(cdn_cfg) = crate::cdn::CdnConfig::from_env() {
+                                            let filename = crate::cdn::generate_upload_key(&job_id_clone, "png");
+                                            match crate::cdn::upload_to_cdn(&cdn_cfg, bytes, &filename, "image/png") {
+                                                Ok(upload) => {
+                                                    job.result_url = Some(upload.cdn_url);
+                                                }
+                                                Err(e) => {
+                                                    log::warn!("CDN upload failed for job {}: {}", job_id_clone, e);
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     job.result_data = Some(encoded);
                                 }
                                 Err(e) => {
@@ -1108,9 +1131,17 @@ impl WebServer {
                     // Fire webhook with retry if configured
                     if let Some(config) = webhook_config {
                         if !config.url.is_empty() {
+                            // Grab download/CDN URL from the job for the webhook payload
+                            let download_url = if let Ok(jg) = jobs.lock() {
+                                jg.get(&job_id_clone).and_then(|j| j.result_url.clone())
+                            } else {
+                                None
+                            };
                             let payload = serde_json::json!({
                                 "job_id": job_id_clone,
                                 "status": webhook_status,
+                                "download_url": download_url,
+                                "cdn_url": download_url,
                                 "timestamp": api_unix_now(),
                             })
                             .to_string();
@@ -1157,44 +1188,46 @@ impl WebServer {
     
     /// Handle async video upscale request.
     ///
-    /// Accepts a JSON body with video metadata and returns a job ID.
-    /// The actual processing happens in the background.
+    /// Accepts video data (base64-encoded MP4/WebM/AVI), extracts frames via
+    /// ffmpeg, upscales each frame with the selected SRGAN model, reassembles
+    /// with original audio, and tracks per-frame progress (0-100%).
     fn handle_video_upscale(&self, request: &str) -> String {
         let body = self.extract_body(request);
 
-        // Parse video upscale request
         #[derive(serde::Deserialize)]
         struct VideoUpscaleRequest {
-            /// Base64-encoded video data
             video_data: String,
-            /// Model to use (natural, anime)
-            #[serde(default = "default_model")]
+            /// Model: "srgan"/"natural", "real-esrgan", "waifu2x-anime"/"anime"
+            #[serde(default = "default_video_model")]
             model: String,
-            /// Upscale factor (2 or 4)
-            #[serde(default = "default_scale")]
+            #[serde(default = "default_video_scale")]
             scale: u32,
-            /// Output codec (h264, h265, vp9)
-            #[serde(default = "default_codec")]
+            #[serde(default = "default_video_codec")]
             codec: String,
-            /// Quality preset (low, medium, high)
-            #[serde(default = "default_quality")]
+            #[serde(default = "default_video_quality")]
             quality: String,
-            /// Output FPS override
             fps: Option<f32>,
-            /// Whether to preserve audio
-            #[serde(default = "default_true")]
+            #[serde(default = "default_video_preserve_audio")]
             preserve_audio: bool,
         }
-        fn default_model() -> String { "natural".into() }
-        fn default_scale() -> u32 { 4 }
-        fn default_codec() -> String { "h264".into() }
-        fn default_quality() -> String { "medium".into() }
-        fn default_true() -> bool { true }
+        fn default_video_model() -> String { "srgan".into() }
+        fn default_video_scale() -> u32 { 4 }
+        fn default_video_codec() -> String { "h264".into() }
+        fn default_video_quality() -> String { "medium".into() }
+        fn default_video_preserve_audio() -> bool { true }
 
         let req: VideoUpscaleRequest = match serde_json::from_str(&body) {
             Ok(r) => r,
             Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
         };
+
+        // Validate model
+        let valid_models = ["srgan", "natural", "real-esrgan", "waifu2x-anime", "anime"];
+        if !valid_models.contains(&req.model.to_lowercase().as_str()) {
+            return self.error_response(400, &format!(
+                "Unsupported model: {}. Valid: srgan, real-esrgan, waifu2x-anime", req.model
+            ));
+        }
 
         // Validate codec
         let valid_codecs = ["h264", "h265", "vp9", "av1", "prores"];
@@ -1205,30 +1238,30 @@ impl WebServer {
         // Validate quality
         let valid_qualities = ["low", "medium", "high", "lossless"];
         if !valid_qualities.contains(&req.quality.to_lowercase().as_str()) {
-            // Allow numeric CRF values
             if req.quality.parse::<u8>().is_err() {
                 return self.error_response(400, &format!("Invalid quality: {}", req.quality));
             }
         }
 
-        // Validate scale
         if req.scale != 2 && req.scale != 4 {
             return self.error_response(400, "Scale must be 2 or 4");
         }
 
-        // Deduct credit
         let api_key = self.extract_header(request, "x-api-key").unwrap_or_default();
         if !api_key.is_empty() && !self.consume_credit_for_user(&api_key) {
             return self.error_response(402, "No credits remaining");
         }
 
-        // Generate job ID
         let job_id = self.generate_job_id();
-
-        // Estimate input size from base64 length
         let input_file_size = (req.video_data.len() as u64) * 3 / 4;
 
-        // Create job entry
+        let model_display = match req.model.to_lowercase().as_str() {
+            "srgan" | "natural" => "srgan",
+            "real-esrgan" => "real-esrgan",
+            "waifu2x-anime" | "anime" => "waifu2x-anime",
+            _ => "srgan",
+        }.to_string();
+
         let job = JobInfo {
             id: job_id.clone(),
             status: JobStatus::Pending,
@@ -1243,7 +1276,7 @@ impl WebServer {
             result_url: None,
             result_data: None,
             error: None,
-            model: Some(req.model.clone()),
+            model: Some(model_display.clone()),
             input_size: None,
             output_size: None,
             webhook_delivery: None,
@@ -1258,9 +1291,9 @@ impl WebServer {
             output_file_size: None,
             scale_factor: Some(req.scale),
             input_data: None,
+            progress: Some(0),
             total_frames: None,
-            frames_processed: None,
-            progress: None,
+            frames_processed: Some(0),
         };
 
         if let Ok(mut jobs) = self.jobs.lock() {
@@ -1269,12 +1302,10 @@ impl WebServer {
             return self.error_response(500, "Failed to acquire job lock");
         }
 
-        // Mark as processing in background
         let jobs = Arc::clone(&self.jobs);
         let job_id_bg = job_id.clone();
 
         thread::spawn(move || {
-            // Update status to processing
             if let Ok(mut jobs_guard) = jobs.lock() {
                 if let Some(job) = jobs_guard.get_mut(&job_id_bg) {
                     job.status = JobStatus::Processing;
@@ -1285,8 +1316,6 @@ impl WebServer {
                 }
             }
 
-            // Video processing is long-running; write input to a temp file,
-            // invoke the VideoProcessor, then base64-encode the output.
             let result: std::result::Result<String, SrganError> = (|| {
                 use crate::video::{VideoProcessor, VideoConfig, VideoCodec, VideoQuality};
                 use std::fs;
@@ -1334,31 +1363,56 @@ impl WebServer {
 
                 let mut processor = VideoProcessor::new(config)?;
 
-                // Load the network
-                let network = match req.model.as_str() {
-                    "anime" => crate::UpscalingNetwork::load_builtin_anime()?,
+                // Load model based on selection
+                let network = match req.model.to_lowercase().as_str() {
+                    "waifu2x-anime" | "anime" => crate::UpscalingNetwork::load_builtin_anime()?,
+                    "real-esrgan" => crate::UpscalingNetwork::load_builtin_natural()?,
                     _ => crate::UpscalingNetwork::load_builtin_natural()?,
                 };
                 processor.load_network(network);
-                processor.process()?;
 
-                // Read output and encode
+                // Process with per-frame progress callback
+                processor.process_with_progress(|frames_done, total_frames| {
+                    let pct = if total_frames > 0 {
+                        ((frames_done as f64 / total_frames as f64) * 100.0).round() as u8
+                    } else {
+                        0
+                    };
+                    if let Ok(mut jg) = jobs.lock() {
+                        if let Some(job) = jg.get_mut(&job_id_bg) {
+                            job.progress = Some(pct);
+                            job.frames_processed = Some(frames_done);
+                            job.total_frames = Some(total_frames);
+                            job.updated_at = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0);
+                        }
+                    }
+                })?;
+
                 let output_bytes = fs::read(&output_path).map_err(SrganError::Io)?;
                 let encoded = general_purpose::STANDARD.encode(&output_bytes);
 
-                // Cleanup temp files (best effort)
+                if let Ok(mut jg) = jobs.lock() {
+                    if let Some(job) = jg.get_mut(&job_id_bg) {
+                        job.output_file_size = Some(output_bytes.len() as u64);
+                    }
+                }
+
+                // Cleanup temp files
                 let _ = fs::remove_dir_all(&temp_dir);
 
                 Ok(encoded)
             })();
 
-            // Update job with result
             if let Ok(mut jobs_guard) = jobs.lock() {
                 if let Some(job) = jobs_guard.get_mut(&job_id_bg) {
                     match result {
                         Ok(data) => {
                             job.status = JobStatus::Completed;
                             job.result_data = Some(data);
+                            job.progress = Some(100);
                         }
                         Err(e) => {
                             job.status = JobStatus::Failed(format!("{}", e));
@@ -1373,11 +1427,11 @@ impl WebServer {
             }
         });
 
-        // Return job info
         let response = serde_json::json!({
             "job_id": job_id,
             "status": "pending",
             "type": "video_upscale",
+            "model": model_display,
             "check_url": format!("/api/v1/job/{}", job_id),
         });
 
@@ -2518,6 +2572,112 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
             "credit_usage_by_tier": credit_by_tier,
             "top_users": top_users,
             "endpoint_metrics": endpoint_metrics,
+        });
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+            response
+        )
+    }
+
+    /// GET /api/v1/analytics/usage?period=day|week|month
+    ///
+    /// Returns usage analytics for the authenticated API key: images processed,
+    /// total pixels upscaled, avg inference time, model distribution, bandwidth.
+    fn handle_analytics_usage(&self, request: &str) -> String {
+        let api_key = self.extract_header(request, "x-api-key").unwrap_or_default();
+        if api_key.is_empty() {
+            return self.error_response(401, "API key required");
+        }
+
+        // Parse query string for period parameter
+        let path_and_query = request.lines().next().unwrap_or("");
+        let period = if let Some(q_pos) = path_and_query.find('?') {
+            let query = &path_and_query[q_pos + 1..];
+            // Strip trailing " HTTP/1.x"
+            let query = query.split_whitespace().next().unwrap_or(query);
+            query.split('&')
+                .find_map(|pair| {
+                    let mut kv = pair.splitn(2, '=');
+                    match (kv.next(), kv.next()) {
+                        (Some("period"), Some(v)) => Some(v.to_string()),
+                        _ => None,
+                    }
+                })
+                .unwrap_or_else(|| "month".to_string())
+        } else {
+            "month".to_string()
+        };
+
+        // Map user-facing period names to internal store format
+        let store_period = match period.as_str() {
+            "day" => "7d",
+            "week" => "7d",
+            "month" => "30d",
+            other => other,
+        };
+
+        // Gather job-based analytics from in-memory jobs store
+        let (images_processed, total_pixels, total_inference_ms, inference_count,
+             model_counts, bandwidth_bytes) = if let Ok(jobs) = self.jobs.lock() {
+            let mut imgs: u64 = 0;
+            let mut pixels: u64 = 0;
+            let mut inf_ms: u64 = 0;
+            let mut inf_cnt: u64 = 0;
+            let mut models: HashMap<String, u64> = HashMap::new();
+            let mut bw: u64 = 0;
+
+            for job in jobs.values() {
+                if matches!(job.status, JobStatus::Completed) {
+                    imgs += 1;
+                    let dur_ms = job.updated_at.saturating_sub(job.created_at) * 1000;
+                    inf_ms += dur_ms;
+                    inf_cnt += 1;
+                    if let Some(ref m) = job.model {
+                        *models.entry(m.clone()).or_insert(0) += 1;
+                    }
+                    if let Some(sz) = job.output_file_size {
+                        bw += sz;
+                        pixels += sz; // approximate
+                    } else if let Some(sz) = job.input_file_size {
+                        pixels += sz * 16; // 4x upscale ≈ 16x pixels
+                    }
+                    if let Some(sz) = job.output_file_size {
+                        bw += sz;
+                    }
+                }
+            }
+            (imgs, pixels, inf_ms, inf_cnt, models, bw)
+        } else {
+            (0, 0, 0, 0, HashMap::new(), 0)
+        };
+
+        let avg_inference_ms = if inference_count > 0 {
+            total_inference_ms as f64 / inference_count as f64
+        } else {
+            0.0
+        };
+
+        // Model distribution as percentage
+        let total_model_jobs: u64 = model_counts.values().sum();
+        let model_distribution: HashMap<String, f64> = model_counts.iter()
+            .map(|(m, c)| {
+                let pct = if total_model_jobs > 0 {
+                    (*c as f64 / total_model_jobs as f64) * 100.0
+                } else {
+                    0.0
+                };
+                (m.clone(), (pct * 100.0).round() / 100.0)
+            })
+            .collect();
+
+        let response = serde_json::json!({
+            "period": period,
+            "images_processed": images_processed,
+            "total_pixels_upscaled": total_pixels,
+            "avg_inference_time_ms": (avg_inference_ms * 100.0).round() / 100.0,
+            "model_distribution": model_distribution,
+            "bandwidth_bytes": bandwidth_bytes,
         });
 
         format!(
@@ -5447,6 +5607,445 @@ setInterval(refreshAll, 5000);
             }
             Err(e) => self.error_response(400, &e),
         }
+    }
+
+    // ── Job queue dashboard ────────────────────────────────────────────────
+
+    /// GET /dashboard/jobs — full job queue dashboard with progress bars, ETA,
+    /// cancel buttons, and an SSE stream for live updates.
+    fn handle_jobs_dashboard(&self) -> String {
+        let html = r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRGAN-Rust — Job Queue</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{--bg:#0d1117;--bg2:#161b22;--bg3:#21262d;--border:#30363d;--accent:#00d4ff;
+  --green:#3fb950;--yellow:#d29922;--red:#f85149;
+  --text:#c9d1d9;--muted:#8b949e;--r:8px;--font:ui-monospace,'Menlo',monospace}
+html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px}
+.top-bar{background:var(--bg2);border-bottom:1px solid var(--border);padding:.55rem 1.2rem;
+  display:flex;align-items:center;gap:.7rem;font-size:.82rem}
+.pulse{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.wrap{max-width:1200px;margin:0 auto;padding:1.4rem 1.2rem}
+h1{font-size:1.15rem;color:var(--accent);font-weight:700;margin-bottom:.4rem}
+.subtitle{color:var(--muted);font-size:.78rem;margin-bottom:1.2rem}
+.summary{display:flex;gap:.6rem;margin-bottom:1.2rem;flex-wrap:wrap}
+.pill{background:var(--bg2);border:1px solid var(--border);border-radius:20px;padding:.3rem .8rem;font-size:.75rem}
+.pill b{color:var(--accent)}
+.pill.g b{color:var(--green)}.pill.y b{color:var(--yellow)}.pill.r b{color:var(--red)}
+.tbl-wrap{border:1px solid var(--border);border-radius:var(--r);overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:.8rem}
+thead th{background:var(--bg3);color:var(--muted);text-align:left;padding:.5rem .7rem;
+  border-bottom:1px solid var(--border);font-size:.66rem;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border)}
+tbody tr:last-child{border-bottom:none}
+td{padding:.45rem .7rem;vertical-align:middle;white-space:nowrap}
+.badge{display:inline-block;padding:.12rem .4rem;border-radius:4px;font-size:.68rem;font-weight:600}
+.b-pending{background:#21262d;color:var(--yellow);border:1px solid #9e6a03}
+.b-processing{background:#21262d;color:var(--accent);border:1px solid #0f6ab6}
+.b-completed{background:#21262d;color:var(--green);border:1px solid #238636}
+.b-failed{background:#21262d;color:var(--red);border:1px solid #8b2121}
+.prog-wrap{width:120px;height:14px;background:var(--bg3);border-radius:4px;overflow:hidden;display:inline-block;vertical-align:middle}
+.prog-fill{height:100%;background:var(--accent);transition:width .4s ease;border-radius:4px}
+.btn-cancel{background:transparent;border:1px solid var(--red);color:var(--red);border-radius:4px;
+  padding:.2rem .5rem;font-size:.68rem;cursor:pointer;font-family:var(--font)}
+.btn-cancel:hover{background:var(--red);color:#fff}
+.btn-cancel:disabled{opacity:.3;cursor:default}
+.btn-compare{background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:4px;
+  padding:.2rem .5rem;font-size:.68rem;cursor:pointer;font-family:var(--font);text-decoration:none}
+.btn-compare:hover{background:var(--accent);color:#000}
+.empty{padding:2rem;text-align:center;color:var(--muted)}
+.footer{text-align:center;color:var(--muted);font-size:.72rem;margin-top:1.2rem}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <span class="pulse" id="sseIndicator"></span>
+  <span style="color:var(--text);font-weight:600">SRGAN-Rust</span>
+  <span style="color:var(--border)">|</span>
+  <span style="color:var(--muted)">Job Queue Dashboard</span>
+  <a href="/dashboard" style="margin-left:auto;color:var(--accent);font-size:.74rem;text-decoration:none">Main Dashboard</a>
+</div>
+<div class="wrap">
+  <h1>Job Queue</h1>
+  <p class="subtitle">Live view of all upscaling jobs — updates via Server-Sent Events</p>
+
+  <div class="summary">
+    <div class="pill y"><b id="sPend">0</b> pending</div>
+    <div class="pill"><b id="sProc">0</b> processing</div>
+    <div class="pill g"><b id="sComp">0</b> completed</div>
+    <div class="pill r"><b id="sFail">0</b> failed</div>
+  </div>
+
+  <div class="tbl-wrap">
+    <table>
+      <thead><tr>
+        <th>Job ID</th><th>Status</th><th>Model</th><th>Progress</th><th>ETA</th><th>Created</th><th>Duration</th><th>Actions</th>
+      </tr></thead>
+      <tbody id="jobsBody"><tr><td colspan="8" class="empty">Connecting to event stream…</td></tr></tbody>
+    </table>
+  </div>
+  <div class="footer">Powered by SSE — auto-refreshes every second</div>
+</div>
+
+<script>
+(function(){
+  var allJobs = {};
+  var es;
+
+  function connect() {
+    es = new EventSource('/api/v1/dashboard/stream');
+    document.getElementById('sseIndicator').classList.remove('off');
+
+    es.addEventListener('stats', function(e) {
+      var d = JSON.parse(e.data);
+      document.getElementById('sPend').textContent = d.pending;
+      document.getElementById('sProc').textContent = d.processing;
+      document.getElementById('sComp').textContent = d.completed;
+      document.getElementById('sFail').textContent = d.failed;
+    });
+
+    es.addEventListener('jobs', function(e) {
+      var active = JSON.parse(e.data);
+      active.forEach(function(j){ allJobs[j.id] = j; });
+      render();
+    });
+
+    es.onerror = function() {
+      document.getElementById('sseIndicator').classList.add('off');
+      setTimeout(connect, 3000);
+    };
+  }
+
+  // Also fetch full job list on load
+  fetch('/api/v1/jobs').then(function(r){return r.json()}).then(function(d){
+    (d.jobs||[]).forEach(function(j){ allJobs[j.id]=j; });
+    render();
+  });
+
+  function render() {
+    var tbody = document.getElementById('jobsBody');
+    var sorted = Object.values(allJobs).sort(function(a,b){return (b.created_at||0)-(a.created_at||0)});
+    if(!sorted.length){tbody.innerHTML='<tr><td colspan="8" class="empty">No jobs yet</td></tr>';return;}
+    var html='';
+    sorted.forEach(function(j){
+      var st = (j.status||'unknown').split(':')[0];
+      var cls = 'b-'+(st==='failed'?'failed':st);
+      var pct = j.progress||j.percent||0;
+      if(st==='completed') pct=100;
+      var eta = '—';
+      if(st==='processing' && j.created_at && pct>0 && pct<100){
+        var elapsed = Date.now()/1000 - j.created_at;
+        var remaining = elapsed/pct*(100-pct);
+        eta = remaining<60 ? Math.round(remaining)+'s' : Math.round(remaining/60)+'m';
+      }
+      var dur = '—';
+      if(j.duration_secs!=null) dur=j.duration_secs+'s';
+      else if(j.created_at && (st==='processing'||st==='pending')){
+        dur = Math.round(Date.now()/1000 - j.created_at)+'s';
+      }
+      var actions = '';
+      if(st==='pending'||st==='processing')
+        actions='<button class="btn-cancel" onclick="cancelJob(\''+j.id+'\')">Cancel</button>';
+      if(st==='completed')
+        actions='<a class="btn-compare" href="/compare/'+j.id+'">Compare</a>';
+      html+='<tr>'
+        +'<td style="font-size:.72rem;color:var(--accent)">'+j.id+'</td>'
+        +'<td><span class="badge '+cls+'">'+st+'</span></td>'
+        +'<td>'+(j.model||'—')+'</td>'
+        +'<td><div class="prog-wrap"><div class="prog-fill" style="width:'+pct+'%"></div></div> '+pct+'%</td>'
+        +'<td>'+eta+'</td>'
+        +'<td>'+fmtTime(j.created_at)+'</td>'
+        +'<td>'+dur+'</td>'
+        +'<td>'+actions+'</td>'
+        +'</tr>';
+    });
+    tbody.innerHTML=html;
+  }
+
+  window.cancelJob = function(id){
+    fetch('/api/v1/jobs/'+id+'/cancel',{method:'POST'})
+      .then(function(r){return r.json()})
+      .then(function(d){
+        if(d.success && allJobs[id]) allJobs[id].status='cancelled';
+        render();
+      });
+  };
+
+  function fmtTime(ts){
+    if(!ts) return '—';
+    var d=new Date(ts*1000);
+    return d.toLocaleTimeString();
+  }
+
+  connect();
+})();
+</script>
+</body>
+</html>"##;
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+            html
+        )
+    }
+
+    /// POST /api/jobs/:id/cancel — cancel a pending or processing job.
+    fn handle_cancel_job(&self, path: &str) -> String {
+        let inner = path
+            .trim_start_matches("/api/v1/jobs/")
+            .trim_start_matches("/api/jobs/");
+        let job_id = inner.trim_end_matches("/cancel");
+
+        if let Ok(mut jobs) = self.jobs.lock() {
+            if let Some(job) = jobs.get_mut(job_id) {
+                match &job.status {
+                    JobStatus::Pending | JobStatus::Processing => {
+                        job.status = JobStatus::Failed("Cancelled by user".to_string());
+                        job.updated_at = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let response = serde_json::json!({
+                            "success": true,
+                            "job_id": job_id,
+                            "status": "cancelled",
+                        });
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\n\r\n{}",
+                            response
+                        )
+                    }
+                    _ => self.error_response(400, "Job is already completed or failed"),
+                }
+            } else {
+                self.error_response(404, "Job not found")
+            }
+        } else {
+            self.error_response(500, "Failed to acquire job lock")
+        }
+    }
+
+    // ── Image comparison viewer ────────────────────────────────────────────
+
+    /// GET /compare/:job_id — interactive before/after slider comparison viewer.
+    fn handle_compare_viewer(&self, path: &str) -> String {
+        let job_id = path.trim_start_matches("/compare/");
+        if job_id.is_empty() {
+            return self.error_response(400, "Missing job_id");
+        }
+
+        // Fetch PSNR/SSIM and image data from the job store
+        let (input_b64, result_b64, psnr_val, ssim_val, model_used) =
+            if let Ok(jobs) = self.jobs.lock() {
+                if let Some(job) = jobs.get(job_id) {
+                    let inp = match &job.input_data {
+                        Some(d) => d.clone(),
+                        None => return self.error_response(404, "Original input not stored for this job"),
+                    };
+                    let res = match &job.result_data {
+                        Some(d) => d.clone(),
+                        None => return self.error_response(404, "Result not yet available"),
+                    };
+
+                    // Compute PSNR/SSIM if both images available
+                    let mut psnr: Option<f64> = None;
+                    let mut ssim: Option<f64> = None;
+                    if let (Ok(inp_bytes), Ok(res_bytes)) = (
+                        general_purpose::STANDARD.decode(&inp),
+                        general_purpose::STANDARD.decode(&res),
+                    ) {
+                        if let (Ok(img_a), Ok(img_b)) = (
+                            image::load_from_memory(&inp_bytes),
+                            image::load_from_memory(&res_bytes),
+                        ) {
+                            let a_rgb = img_a.to_rgb();
+                            let b_rgb = img_b.to_rgb();
+                            // PSNR
+                            if a_rgb.dimensions() == b_rgb.dimensions() {
+                                let (w, h) = a_rgb.dimensions();
+                                let n = (w * h * 3) as f64;
+                                let mse: f64 = a_rgb.pixels().zip(b_rgb.pixels())
+                                    .flat_map(|(a, b)| a.data.iter().zip(b.data.iter()))
+                                    .map(|(&a, &b)| { let d = a as f64 - b as f64; d * d })
+                                    .sum::<f64>() / n;
+                                if mse > 0.0 {
+                                    psnr = Some(10.0 * (255.0_f64 * 255.0 / mse).log10());
+                                }
+                            }
+                            // Simple SSIM approximation (luminance comparison)
+                            if a_rgb.dimensions() == b_rgb.dimensions() {
+                                let a_vals: Vec<f64> = a_rgb.pixels().map(|p| 0.299*p.data[0] as f64 + 0.587*p.data[1] as f64 + 0.114*p.data[2] as f64).collect();
+                                let b_vals: Vec<f64> = b_rgb.pixels().map(|p| 0.299*p.data[0] as f64 + 0.587*p.data[1] as f64 + 0.114*p.data[2] as f64).collect();
+                                let n = a_vals.len() as f64;
+                                let mu_a = a_vals.iter().sum::<f64>() / n;
+                                let mu_b = b_vals.iter().sum::<f64>() / n;
+                                let sig_a2 = a_vals.iter().map(|v| (v - mu_a)*(v - mu_a)).sum::<f64>() / n;
+                                let sig_b2 = b_vals.iter().map(|v| (v - mu_b)*(v - mu_b)).sum::<f64>() / n;
+                                let sig_ab = a_vals.iter().zip(b_vals.iter()).map(|(a,b)| (a - mu_a)*(b - mu_b)).sum::<f64>() / n;
+                                let c1 = 6.5025; // (0.01*255)^2
+                                let c2 = 58.5225; // (0.03*255)^2
+                                let s = ((2.0*mu_a*mu_b + c1)*(2.0*sig_ab + c2)) / ((mu_a*mu_a + mu_b*mu_b + c1)*(sig_a2 + sig_b2 + c2));
+                                ssim = Some(s);
+                            }
+                        }
+                    }
+
+                    (inp, res, psnr, ssim, job.model.clone().unwrap_or_else(|| "unknown".to_string()))
+                } else {
+                    return self.error_response(404, "Job not found");
+                }
+            } else {
+                return self.error_response(500, "Failed to acquire job lock");
+            };
+
+        let psnr_str = psnr_val.map(|v| format!("{:.2} dB", v)).unwrap_or_else(|| "N/A".to_string());
+        let ssim_str = ssim_val.map(|v| format!("{:.4}", v)).unwrap_or_else(|| "N/A".to_string());
+        let job_id_escaped = job_id.replace('\"', "");
+
+        let html = format!(r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SRGAN-Rust — Compare {job_id}</title>
+<style>
+*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}
+:root{{--bg:#0d1117;--bg2:#161b22;--border:#30363d;--accent:#00d4ff;
+  --green:#3fb950;--text:#c9d1d9;--muted:#8b949e;--r:8px;--font:ui-monospace,'Menlo',monospace}}
+html,body{{height:100%;font-family:var(--font);background:var(--bg);color:var(--text);font-size:14px}}
+.top-bar{{background:var(--bg2);border-bottom:1px solid var(--border);padding:.55rem 1.2rem;
+  display:flex;align-items:center;gap:.7rem;font-size:.82rem}}
+.wrap{{max-width:1200px;margin:0 auto;padding:1.4rem 1.2rem}}
+h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
+.stats{{display:flex;gap:1.2rem;margin-bottom:1rem;flex-wrap:wrap}}
+.stat{{background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:.5rem .9rem}}
+.stat-val{{font-size:1.1rem;font-weight:700;color:var(--accent)}}
+.stat-lbl{{font-size:.66rem;color:var(--muted);text-transform:uppercase}}
+.compare-container{{position:relative;width:100%;overflow:hidden;border:1px solid var(--border);
+  border-radius:var(--r);cursor:ew-resize;user-select:none;background:#000}}
+.compare-container img{{display:block;width:100%;height:auto;pointer-events:none}}
+.img-after{{position:absolute;top:0;left:0;width:100%;height:100%;overflow:hidden}}
+.img-after img{{display:block;width:100%;height:auto;min-width:100%}}
+.slider-line{{position:absolute;top:0;width:2px;height:100%;background:var(--accent);z-index:10;pointer-events:none}}
+.slider-handle{{position:absolute;top:50%;width:36px;height:36px;border-radius:50%;background:var(--accent);
+  border:2px solid #fff;transform:translate(-50%,-50%);z-index:11;pointer-events:none;
+  display:flex;align-items:center;justify-content:center;font-size:.7rem;color:#000;font-weight:700}}
+.label{{position:absolute;bottom:10px;padding:.2rem .5rem;background:rgba(0,0,0,.7);
+  border-radius:4px;font-size:.7rem;z-index:12;pointer-events:none}}
+.label-before{{left:10px}}.label-after{{right:10px}}
+.zoom-controls{{margin-top:.8rem;display:flex;gap:.5rem;align-items:center}}
+.zoom-btn{{background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;
+  padding:.3rem .6rem;cursor:pointer;font-family:var(--font);font-size:.8rem}}
+.zoom-btn:hover{{border-color:var(--accent)}}
+.footer{{text-align:center;color:var(--muted);font-size:.72rem;margin-top:1.2rem}}
+</style>
+</head>
+<body>
+<div class="top-bar">
+  <span style="color:var(--text);font-weight:600">SRGAN-Rust</span>
+  <span style="color:var(--border)">|</span>
+  <span style="color:var(--muted)">Image Comparison</span>
+  <a href="/dashboard/jobs" style="margin-left:auto;color:var(--accent);font-size:.74rem;text-decoration:none">Back to Jobs</a>
+</div>
+<div class="wrap">
+  <h1>Before / After — {job_id}</h1>
+  <div class="stats">
+    <div class="stat"><div class="stat-val">{psnr}</div><div class="stat-lbl">PSNR</div></div>
+    <div class="stat"><div class="stat-val">{ssim}</div><div class="stat-lbl">SSIM</div></div>
+    <div class="stat"><div class="stat-val">{model}</div><div class="stat-lbl">Model</div></div>
+  </div>
+
+  <div class="compare-container" id="cmp">
+    <img id="imgBefore" src="data:image/png;base64,{input_b64}" alt="Original">
+    <div class="img-after" id="afterClip" style="clip-path:inset(0 0 0 50%)">
+      <img id="imgAfter" src="data:image/png;base64,{result_b64}" alt="Upscaled">
+    </div>
+    <div class="slider-line" id="sliderLine" style="left:50%"></div>
+    <div class="slider-handle" id="sliderHandle" style="left:50%"></div>
+    <div class="label label-before">Original</div>
+    <div class="label label-after">Upscaled</div>
+  </div>
+
+  <div class="zoom-controls">
+    <button class="zoom-btn" onclick="zoom(-1)">- Zoom</button>
+    <span id="zoomLevel" style="color:var(--muted);font-size:.78rem">100%</span>
+    <button class="zoom-btn" onclick="zoom(1)">+ Zoom</button>
+    <button class="zoom-btn" onclick="resetZoom()">Reset</button>
+  </div>
+  <div class="footer">Drag the slider to compare — scroll to zoom, drag to pan</div>
+</div>
+
+<script>
+(function(){{
+  var cmp=document.getElementById('cmp');
+  var afterClip=document.getElementById('afterClip');
+  var sliderLine=document.getElementById('sliderLine');
+  var sliderHandle=document.getElementById('sliderHandle');
+  var dragging=false;
+  var currentZoom=1;
+  var panX=0,panY=0,isPanning=false,panStartX=0,panStartY=0;
+
+  function setSlider(x){{
+    var rect=cmp.getBoundingClientRect();
+    var pct=Math.max(0,Math.min(100,((x-rect.left)/rect.width)*100));
+    afterClip.style.clipPath='inset(0 0 0 '+pct+'%)';
+    sliderLine.style.left=pct+'%';
+    sliderHandle.style.left=pct+'%';
+  }}
+
+  cmp.addEventListener('mousedown',function(e){{
+    if(e.button===1||e.shiftKey){{isPanning=true;panStartX=e.clientX-panX;panStartY=e.clientY-panY;return;}}
+    dragging=true;setSlider(e.clientX);
+  }});
+  window.addEventListener('mousemove',function(e){{
+    if(dragging) setSlider(e.clientX);
+    if(isPanning){{panX=e.clientX-panStartX;panY=e.clientY-panStartY;applyTransform();}}
+  }});
+  window.addEventListener('mouseup',function(){{dragging=false;isPanning=false;}});
+
+  cmp.addEventListener('touchstart',function(e){{dragging=true;setSlider(e.touches[0].clientX);}},{{passive:true}});
+  cmp.addEventListener('touchmove',function(e){{if(dragging)setSlider(e.touches[0].clientX);}},{{passive:true}});
+  cmp.addEventListener('touchend',function(){{dragging=false;}});
+
+  cmp.addEventListener('wheel',function(e){{
+    e.preventDefault();
+    var delta=e.deltaY<0?1:-1;
+    zoom(delta);
+  }},{{passive:false}});
+
+  window.zoom=function(dir){{
+    currentZoom=Math.max(0.5,Math.min(8,currentZoom+(dir*0.25)));
+    document.getElementById('zoomLevel').textContent=Math.round(currentZoom*100)+'%';
+    applyTransform();
+  }};
+  window.resetZoom=function(){{currentZoom=1;panX=0;panY=0;
+    document.getElementById('zoomLevel').textContent='100%';applyTransform();}};
+
+  function applyTransform(){{
+    var t='scale('+currentZoom+') translate('+panX/currentZoom+'px,'+panY/currentZoom+'px)';
+    cmp.style.transform=t;cmp.style.transformOrigin='center center';
+  }}
+}})();
+</script>
+</body>
+</html>"##,
+            job_id = job_id_escaped,
+            psnr = psnr_str,
+            ssim = ssim_str,
+            model = model_used,
+            input_b64 = input_b64,
+            result_b64 = result_b64,
+        );
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+            html
+        )
     }
 
 }

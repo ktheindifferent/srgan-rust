@@ -33,8 +33,12 @@ pub enum WebhookEvent {
     JobCompleted,
     #[serde(rename = "job.failed")]
     JobFailed,
+    #[serde(rename = "job.progress")]
+    JobProgress,
     #[serde(rename = "batch.completed")]
     BatchCompleted,
+    #[serde(rename = "org.quota_warning")]
+    OrgQuotaWarning,
 }
 
 impl std::fmt::Display for WebhookEvent {
@@ -42,7 +46,9 @@ impl std::fmt::Display for WebhookEvent {
         match self {
             Self::JobCompleted => write!(f, "job.completed"),
             Self::JobFailed => write!(f, "job.failed"),
+            Self::JobProgress => write!(f, "job.progress"),
             Self::BatchCompleted => write!(f, "batch.completed"),
+            Self::OrgQuotaWarning => write!(f, "org.quota_warning"),
         }
     }
 }
@@ -64,7 +70,9 @@ fn default_events() -> Vec<WebhookEvent> {
     vec![
         WebhookEvent::JobCompleted,
         WebhookEvent::JobFailed,
+        WebhookEvent::JobProgress,
         WebhookEvent::BatchCompleted,
+        WebhookEvent::OrgQuotaWarning,
     ]
 }
 
@@ -407,6 +415,113 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+// ── SQLite delivery log ──────────────────────────────────────────────────
+
+/// Persistent delivery log backed by SQLite.
+///
+/// Stores every delivery attempt so operators can audit webhook reliability.
+/// Table: `webhook_delivery_log` with columns:
+///   id, webhook_id, event, attempt, status_code, success, error_message, timestamp
+pub struct DeliveryLog {
+    conn: Mutex<rusqlite::Connection>,
+}
+
+impl DeliveryLog {
+    /// Open (or create) the delivery log database at the given path.
+    pub fn open(path: &str) -> Result<Self, rusqlite::Error> {
+        let conn = rusqlite::Connection::open(path)?;
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS webhook_delivery_log (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                webhook_id    TEXT NOT NULL,
+                event         TEXT NOT NULL,
+                attempt       INTEGER NOT NULL,
+                status_code   INTEGER,
+                success       INTEGER NOT NULL DEFAULT 0,
+                error_message TEXT,
+                payload       TEXT,
+                timestamp     INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_wdl_webhook_id ON webhook_delivery_log(webhook_id);
+            CREATE INDEX IF NOT EXISTS idx_wdl_timestamp ON webhook_delivery_log(timestamp);",
+        )?;
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
+    }
+
+    /// Open an in-memory delivery log (useful for tests).
+    pub fn open_in_memory() -> Result<Self, rusqlite::Error> {
+        Self::open(":memory:")
+    }
+
+    /// Record a delivery attempt.
+    pub fn record(&self, attempt: &DeliveryAttempt, payload: Option<&str>) {
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "INSERT INTO webhook_delivery_log (webhook_id, event, attempt, status_code, success, error_message, payload, timestamp)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    attempt.webhook_id,
+                    attempt.event,
+                    attempt.attempt,
+                    attempt.status_code,
+                    attempt.success as i32,
+                    attempt.error_message,
+                    payload,
+                    attempt.timestamp,
+                ],
+            );
+        }
+    }
+
+    /// Query recent delivery attempts for a given webhook.
+    pub fn list_for_webhook(&self, webhook_id: &str, limit: usize) -> Vec<DeliveryAttempt> {
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+        let mut stmt = match conn.prepare(
+            "SELECT webhook_id, event, attempt, status_code, success, error_message, timestamp
+             FROM webhook_delivery_log
+             WHERE webhook_id = ?1
+             ORDER BY timestamp DESC
+             LIMIT ?2",
+        ) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+        stmt.query_map(rusqlite::params![webhook_id, limit as i64], |row| {
+            Ok(DeliveryAttempt {
+                webhook_id: row.get(0)?,
+                event: row.get(1)?,
+                attempt: row.get(2)?,
+                status_code: row.get(3)?,
+                success: row.get::<_, i32>(4)? != 0,
+                error_message: row.get(5)?,
+                timestamp: row.get(6)?,
+            })
+        })
+        .ok()
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    /// Count total delivery attempts.
+    pub fn count(&self) -> usize {
+        self.conn
+            .lock()
+            .ok()
+            .and_then(|c| {
+                c.query_row("SELECT COUNT(*) FROM webhook_delivery_log", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .ok()
+            })
+            .unwrap_or(0) as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -532,5 +647,47 @@ mod tests {
         assert_eq!(RETRY_DELAYS_SECS[3], 3600); // 1 hour
         assert_eq!(RETRY_DELAYS_SECS[4], 14400); // 4 hours
         assert_eq!(MAX_DELIVERY_ATTEMPTS, 5);
+    }
+
+    #[test]
+    fn test_delivery_log_record_and_query() {
+        let log = DeliveryLog::open_in_memory().unwrap();
+        assert_eq!(log.count(), 0);
+
+        let attempt = DeliveryAttempt {
+            webhook_id: "wh_test".into(),
+            event: "job.completed".into(),
+            attempt: 1,
+            status_code: Some(200),
+            success: true,
+            timestamp: unix_now(),
+            error_message: None,
+        };
+        log.record(&attempt, Some(r#"{"event":"job.completed"}"#));
+        assert_eq!(log.count(), 1);
+
+        let rows = log.list_for_webhook("wh_test", 10);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].webhook_id, "wh_test");
+        assert!(rows[0].success);
+    }
+
+    #[test]
+    fn test_delivery_log_failed_attempt() {
+        let log = DeliveryLog::open_in_memory().unwrap();
+        let attempt = DeliveryAttempt {
+            webhook_id: "wh_fail".into(),
+            event: "job.failed".into(),
+            attempt: 3,
+            status_code: Some(500),
+            success: false,
+            timestamp: unix_now(),
+            error_message: Some("Internal Server Error".into()),
+        };
+        log.record(&attempt, None);
+        let rows = log.list_for_webhook("wh_fail", 10);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].success);
+        assert_eq!(rows[0].error_message.as_deref(), Some("Internal Server Error"));
     }
 }

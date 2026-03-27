@@ -1,0 +1,65 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: srgan-rust
+  namespace: default
+  labels:
+    app: srgan-rust
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: srgan-rust
+  template:
+    metadata:
+      labels:
+        app: srgan-rust
+    spec:
+      containers:
+        - name: srgan-rust
+          image: srgan-rust:latest
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "4Gi"
+          env:
+            - name: RUST_LOG
+              value: "info"
+            - name: SRGAN_MAX_WORKERS
+              value: "4"
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 2
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: srgan-rust
+  namespace: default
+spec:
+  selector:
+    app: srgan-rust
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+  type: ClusterIP

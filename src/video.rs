@@ -122,41 +122,56 @@ impl VideoProcessor {
     
     /// Process the video
     pub fn process(&mut self) -> Result<(), SrganError> {
+        self.process_with_progress(|_, _| {})
+    }
+
+    /// Process the video with a per-frame progress callback.
+    ///
+    /// The callback receives `(frames_completed, total_frames)` after each frame.
+    pub fn process_with_progress<F>(&mut self, on_progress: F) -> Result<(), SrganError>
+    where
+        F: Fn(usize, usize),
+    {
         let network = self.network.as_ref()
             .ok_or_else(|| SrganError::InvalidInput("No network loaded".into()))?;
-        
+
         info!("Processing video: {:?}", self.config.input_path);
-        
+
         // Create temporary directory for frames
         let temp_dir = self.create_temp_dir()?;
-        
+
         // Extract video information
         let video_info = self.get_video_info()?;
         info!("Video info: {} frames @ {} fps", video_info.frame_count, video_info.fps);
         self.frame_count = Some(video_info.frame_count);
-        
+
         // Extract frames
         info!("Extracting frames...");
         self.extract_frames(&temp_dir, &video_info)?;
-        
-        // Process frames
+
+        // Process frames with progress tracking
         info!("Upscaling frames...");
         let processed_dir = temp_dir.join("processed");
         fs::create_dir_all(&processed_dir)
             .map_err(|e| SrganError::Io(e))?;
-        
-        self.process_frames(&temp_dir.join("frames"), &processed_dir, network)?;
-        
+
+        self.process_frames_with_progress(
+            &temp_dir.join("frames"),
+            &processed_dir,
+            network,
+            &on_progress,
+        )?;
+
         // Reassemble video
         info!("Reassembling video...");
         self.reassemble_video(&processed_dir, &video_info)?;
-        
+
         // Clean up temporary files
         if self.config.temp_dir.is_none() {
             fs::remove_dir_all(&temp_dir)
                 .map_err(|e| SrganError::Io(e))?;
         }
-        
+
         info!("✓ Video processing complete: {:?}", self.config.output_path);
         Ok(())
     }
@@ -438,35 +453,45 @@ impl VideoProcessor {
     
     /// Process extracted frames
     fn process_frames(&self, input_dir: &Path, output_dir: &Path, network: &UpscalingNetwork) -> Result<(), SrganError> {
-        let frame_files: Vec<_> = fs::read_dir(input_dir)
+        self.process_frames_with_progress(input_dir, output_dir, network, &|_, _| {})
+    }
+
+    /// Process extracted frames with a per-frame progress callback.
+    fn process_frames_with_progress<F>(
+        &self,
+        input_dir: &Path,
+        output_dir: &Path,
+        network: &UpscalingNetwork,
+        on_progress: &F,
+    ) -> Result<(), SrganError>
+    where
+        F: Fn(usize, usize),
+    {
+        let mut frame_files: Vec<_> = fs::read_dir(input_dir)
             .map_err(|e| SrganError::Io(e))?
             .filter_map(|entry| entry.ok())
             .map(|entry| entry.path())
             .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("png"))
             .collect();
-        
+        frame_files.sort();
+
         let total_frames = frame_files.len();
-        
-        // Note: Parallel processing is temporarily disabled due to network not being Send + Sync
-        // This is a known limitation that can be addressed in future refactoring
-        {
-            // Sequential processing
-            let pb = ProgressBar::new(total_frames as u64);
-            pb.set_style(
-                ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} frames ({eta})")
-                    .unwrap_or_else(|_| ProgressStyle::default_bar())
-                    .progress_chars("=>-")
-            );
-            
-            for frame_path in frame_files {
-                self.process_single_frame(&frame_path, output_dir, network)?;
-                pb.inc(1);
-            }
-            
-            pb.finish_with_message("All frames processed");
+
+        let pb = ProgressBar::new(total_frames as u64);
+        pb.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos}/{len} frames ({eta})")
+                .unwrap_or_else(|_| ProgressStyle::default_bar())
+                .progress_chars("=>-")
+        );
+
+        for (i, frame_path) in frame_files.iter().enumerate() {
+            self.process_single_frame(frame_path, output_dir, network)?;
+            pb.inc(1);
+            on_progress(i + 1, total_frames);
         }
-        
+
+        pb.finish_with_message("All frames processed");
         Ok(())
     }
     
