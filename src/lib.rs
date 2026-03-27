@@ -370,26 +370,85 @@ impl UpscalingNetwork {
 				display: "bilinear interpolation".into(),
 			}),
 			// Waifu2x: bare label or parameterised label (noise level + scale).
-			// TODO: Load dedicated waifu2x weights when weight-conversion pipeline
-			//       (ncnn/ONNX → .rsr) is ready.  For now, the anime model is the
-			//       best available approximation for anime/illustration inputs.
+			// Attempts to load real waifu2x VGG7 weights from disk.
+			// Falls back to the built-in anime model when weights are not available.
 			label if label == "waifu2x" || label.starts_with("waifu2x-") => {
-				let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
-				let display = format!(
-					"waifu2x ({}; backed by built-in anime model — TODO: real waifu2x weights)",
-					label
-				);
-				Ok(UpscalingNetwork {
-					graph: inference_sr_net(
-						desc.factor as usize,
-						desc.width,
-						desc.log_depth,
-						desc.global_node_factor as usize,
-					)
-					.map_err(|e| format!("{}", e))?,
-					parameters: desc.parameters,
-					display,
-				})
+				// Try to construct a Waifu2xNetwork; if it loads CNN weights,
+				// build the VGG7 graph.
+				let wnet = waifu2x::Waifu2xNetwork::from_label(label)
+					.map_err(|e| format!("{}", e))?;
+				if wnet.is_cnn() {
+					// CNN weights are available — build the waifu2x VGG7 graph.
+					let scale = wnet.scale().as_u8() as usize;
+					let graph = waifu2x_vgg7_net(scale)
+						.map_err(|e| format!("{}", e))?;
+					let display = format!(
+						"waifu2x VGG7 CNN ({}) — noise={} scale={}x",
+						label, wnet.noise_level(), wnet.scale()
+					);
+					// Extract parameters from the Waifu2xNetwork's backend
+					// (which already loaded them from the .rsr file).
+					// We need to re-load them here for UpscalingNetwork.
+					let config = crate::config::Waifu2xConfig {
+						noise_level: wnet.noise_level().as_u8(),
+						scale: wnet.scale().as_u8(),
+						style: wnet.style(),
+					};
+					let weight_path = waifu2x::find_weight_file(
+						config.noise_level, config.scale, config.style,
+					);
+					match weight_path {
+						Some(path) => {
+							let mut file = std::fs::File::open(&path)
+								.map_err(|e| format!("{}", e))?;
+							let mut data = Vec::new();
+							std::io::Read::read_to_end(&mut file, &mut data)
+								.map_err(|e| format!("{}", e))?;
+							let desc = network_from_bytes(&data)?;
+							Ok(UpscalingNetwork {
+								graph,
+								parameters: desc.parameters,
+								display,
+							})
+						}
+						None => {
+							// Should not happen if is_cnn() is true, but
+							// fall back gracefully.
+							let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
+							let display = format!(
+								"waifu2x ({}) — backed by anime model (weight file disappeared)",
+								label
+							);
+							Ok(UpscalingNetwork {
+								graph: inference_sr_net(
+									desc.factor as usize,
+									desc.width,
+									desc.log_depth,
+									desc.global_node_factor as usize,
+								).map_err(|e| format!("{}", e))?,
+								parameters: desc.parameters,
+								display,
+							})
+						}
+					}
+				} else {
+					// No CNN weights — use built-in anime model as proxy.
+					let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
+					let display = format!(
+						"waifu2x-compat ({}) — backed by anime model (no waifu2x weights on disk)",
+						label
+					);
+					Ok(UpscalingNetwork {
+						graph: inference_sr_net(
+							desc.factor as usize,
+							desc.width,
+							desc.log_depth,
+							desc.global_node_factor as usize,
+						).map_err(|e| format!("{}", e))?,
+						parameters: desc.parameters,
+						display,
+					})
+				}
 			},
 			// Real-ESRGAN: three variants, currently backed by built-in proxy models.
 		// TODO: replace with dedicated Real-ESRGAN weights once ONNX → .rsr

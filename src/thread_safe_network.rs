@@ -166,12 +166,33 @@ impl ThreadSafeNetwork {
                 Self::new_bilinear(bilinear_factor.unwrap_or(4))
             },
             label if label == "waifu2x" || label.starts_with("waifu2x-") => {
-                // Waifu2x-compat mode: Lanczos3 resize + unsharp mask.
-                // Inference is handled by Waifu2xNetwork::upscale_image, not
-                // the SRGAN neural network.  We still construct a minimal
-                // ThreadSafeNetwork so callers that need one get a valid
-                // object; the actual upscaling should go through
-                // crate::waifu2x::Waifu2xNetwork directly.
+                // Try to use real waifu2x CNN weights if available.
+                let wnet = crate::waifu2x::Waifu2xNetwork::from_label(label)
+                    .map_err(|e| SrganError::Network(format!("{}", e)))?;
+                if wnet.is_cnn() {
+                    let config = crate::config::Waifu2xConfig {
+                        noise_level: wnet.noise_level().as_u8(),
+                        scale: wnet.scale().as_u8(),
+                        style: wnet.style(),
+                    };
+                    if let Some(path) = crate::waifu2x::find_weight_file(
+                        config.noise_level, config.scale, config.style,
+                    ) {
+                        let mut file = std::fs::File::open(&path)
+                            .map_err(|e| SrganError::Io(e))?;
+                        let mut data = Vec::new();
+                        std::io::Read::read_to_end(&mut file, &mut data)
+                            .map_err(|e| SrganError::Io(e))?;
+                        let desc = crate::network_from_bytes(&data)
+                            .map_err(|e| SrganError::Network(e))?;
+                        let display = format!(
+                            "waifu2x VGG7 CNN ({}) — neural network inference",
+                            label
+                        );
+                        return Self::new_with_display(desc, &display);
+                    }
+                }
+                // Fallback: compat mode backed by anime model.
                 let data = crate::L1_SRGB_ANIME_PARAMS;
                 let desc = crate::network_from_bytes(data)
                     .map_err(|e| SrganError::Network(e))?;

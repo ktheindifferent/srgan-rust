@@ -750,17 +750,19 @@ impl WebServer {
             serde_json::json!({
                 "name": "waifu2x",
                 "display_name": "Waifu2x",
-                "description": "Waifu2x-compat: Lanczos3 resize + unsharp-mask noise reduction (noise_level 0–3, scale 1×/2×, style anime/photo/artwork). Software fallback — no neural network weights required.",
-                "architecture": "waifu2x",
+                "description": "Waifu2x VGG7 CNN for anime/illustration upscaling and noise reduction. Uses real neural network inference when weight files are available (models/waifu2x/*.rsr), otherwise falls back to Lanczos3 + unsharp-mask approximation. Supports noise levels 0–3, scale 1×/2×, and content styles (anime/photo/artwork).",
+                "architecture": "waifu2x-vgg7",
                 "scale_factors": [1, 2],
-                "recommended_for": ["anime", "illustrations", "photos"],
+                "recommended_for": ["anime", "illustrations", "manga", "photos"],
                 "parameters": {
                     "waifu2x_noise_level": "0–3 (0 = none, 3 = aggressive; default 1)",
                     "waifu2x_scale": "1 or 2 (default 2)",
                     "waifu2x_style": "'anime' (default), 'photo', or 'artwork' — selects weight set / sharpening profile"
                 },
                 "variants": crate::waifu2x::WAIFU2X_LABELS,
-                "source": "built-in"
+                "source": "built-in / external weights",
+                "weight_format": "Convert waifu2x JSON weights with: convert-model --format waifu2x-json",
+                "weight_search_paths": ["$SRGAN_MODEL_PATH/waifu2x/", "./models/waifu2x/"]
             }),
             serde_json::json!({
                 "name": "real-esrgan",
@@ -2339,8 +2341,9 @@ function renderEndpointMetrics(metrics){
 
         // Select the inference path for the effective label.
         //
-        // Waifu2x labels use the waifu2x-compat software path (Lanczos3
-        // resize + unsharp mask) — no neural network is involved.
+        // Waifu2x labels use the Waifu2xNetwork which automatically selects
+        // between VGG7 CNN inference (when weights are available) and the
+        // compat software fallback (Lanczos3 + unsharp mask).
         // All other labels go through ThreadSafeNetwork / the default net.
         let upscaled = if effective_label == "waifu2x"
             || effective_label.starts_with("waifu2x-")

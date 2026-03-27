@@ -9,20 +9,26 @@
 //! - Optional noise reduction (levels 0–3)
 //! - Sub-pixel convolution for upscaling (×1 = denoise only, ×2 = upscale)
 //!
-//! ## Weight status
+//! ## Inference modes
 //!
-//! The native waifu2x weights (distributed as `.json` / `.bin` files in the
-//! original project) use a different serialisation format from the `.rsr`
-//! format used by this codebase. Conversion from ncnn/ONNX/waifu2x-json to
-//! `.rsr` is tracked as a TODO.
+//! When converted waifu2x weights (`.rsr` files) are available on disk, the
+//! `Waifu2xNetwork` uses the VGG7 alumina graph for real CNN inference.
+//! Otherwise it falls back to the "waifu2x-compat" software path (Lanczos3
+//! resize + unsharp-mask sharpening).
 //!
-//! In the meantime all waifu2x labels fall back to the built-in anime model,
-//! which was trained on the same class of content and provides equivalent
-//! upscaling quality at ×4.
+//! Weight files are searched for at:
+//!   1. `$SRGAN_MODEL_PATH/waifu2x/noise{N}_scale{M}_{style}.rsr`
+//!   2. `./models/waifu2x/noise{N}_scale{M}_{style}.rsr`
+//!
+//! To convert original waifu2x JSON weights to `.rsr`, use the
+//! `Waifu2xWeightConverter` in `model_converter/waifu2x_converter.rs` or the
+//! CLI command `convert-model --format waifu2x-json`.
 
 use crate::config::{Waifu2xConfig, Waifu2xStyle};
 use crate::error::{Result, SrganError};
 use image::GenericImage;
+use log::{info, debug};
+use std::path::{Path, PathBuf};
 
 // ── NoiseLevel ────────────────────────────────────────────────────────────────
 
@@ -88,40 +94,42 @@ impl std::fmt::Display for Waifu2xScale {
     }
 }
 
-// ── Waifu2xNetwork (waifu2x-compat mode) ─────────────────────────────────────
-//
-// This is the "waifu2x-compat" software fallback.  It does NOT use the
-// original waifu2x neural network weights (which require a separate weight
-// conversion pipeline).  Instead it approximates waifu2x output using:
-//
-//   1. Lanczos3 resize at the requested scale (1× = identity, 2× = upscale)
-//   2. Unsharp-mask sharpening whose strength is derived from noise_level:
-//        noise 0 → no sharpening
-//        noise 1 → light  (amount=0.3, radius=1)
-//        noise 2 → medium (amount=0.5, radius=1)
-//        noise 3 → aggressive (amount=0.8, radius=1)
-//
-// When native waifu2x weights are bundled this implementation should be
-// replaced with real CNN inference.
+// ── Inference backend ────────────────────────────────────────────────────────
 
-/// High-level waifu2x-compat wrapper.  Performs Lanczos3 resize + unsharp-mask
-/// sharpening to approximate waifu2x noise-reduction output without requiring
-/// the original neural network weights.
+/// The inference backend for a `Waifu2xNetwork` instance.
+enum Waifu2xBackend {
+    /// Real VGG7 CNN inference via an alumina graph + loaded weights.
+    Cnn {
+        graph: crate::GraphDef,
+        parameters: Vec<ndarray::ArrayD<f32>>,
+    },
+    /// Software-only fallback: Lanczos3 resize + unsharp-mask sharpening.
+    Compat,
+}
+
+// ── Waifu2xNetwork ──────────────────────────────────────────────────────────
+
+/// High-level waifu2x wrapper.
+///
+/// When converted weight files are available on disk, inference runs through
+/// the VGG7 alumina graph (real CNN).  Otherwise the waifu2x-compat software
+/// fallback is used (Lanczos3 resize + unsharp mask).
 pub struct Waifu2xNetwork {
     noise_level: NoiseLevel,
     scale: Waifu2xScale,
     style: Waifu2xStyle,
+    backend: Waifu2xBackend,
 }
 
 impl Waifu2xNetwork {
     /// Build a `Waifu2xNetwork` from a [`Waifu2xConfig`].
     ///
-    /// This uses the waifu2x-compat software fallback (Lanczos3 + unsharp
-    /// mask) — no neural network weights are loaded.
+    /// Attempts to load CNN weights from disk; falls back to compat mode.
     pub fn from_config(config: &Waifu2xConfig) -> Result<Self> {
         let noise_level = NoiseLevel::from_u8(config.noise_level);
         let scale = Waifu2xScale::from_u8(config.scale);
-        Ok(Self { noise_level, scale, style: config.style })
+        let backend = Self::try_load_cnn(config.noise_level, config.scale, config.style);
+        Ok(Self { noise_level, scale, style: config.style, backend })
     }
 
     /// Load from a canonical label such as `"waifu2x"` or
@@ -156,18 +164,124 @@ impl Waifu2xNetwork {
         self.style
     }
 
-    /// Upscale (and optionally denoise) a [`image::DynamicImage`] using the
-    /// waifu2x-compat software path (Lanczos3 resize + unsharp mask).
+    /// Whether this instance is using real CNN inference (vs compat fallback).
+    pub fn is_cnn(&self) -> bool {
+        matches!(self.backend, Waifu2xBackend::Cnn { .. })
+    }
+
+    /// Upscale (and optionally denoise) a [`image::DynamicImage`].
     ///
-    /// The `style` parameter adjusts the sharpening profile:
-    /// - `Anime`: stronger edge sharpening (default waifu2x behaviour)
-    /// - `Photo`: gentler sharpening to preserve natural texture
-    /// - `Artwork`: moderate sharpening tuned for digital paintings
-    ///
-    /// TODO: When native waifu2x weights are bundled, replace this with real
-    /// CNN inference and load style-specific weight files (e.g.
-    /// `noise{N}_scale{M}_{style}.json`).
+    /// Uses CNN inference when weights are available, otherwise falls back to
+    /// the compat software path (Lanczos3 + unsharp mask).
     pub fn upscale_image(
+        &self,
+        img: &image::DynamicImage,
+    ) -> Result<image::DynamicImage> {
+        match &self.backend {
+            Waifu2xBackend::Cnn { graph, parameters } => {
+                self.upscale_cnn(img, graph, parameters)
+            }
+            Waifu2xBackend::Compat => {
+                self.upscale_compat(img)
+            }
+        }
+    }
+
+    /// Human-readable description of the active configuration.
+    pub fn description(&self) -> String {
+        let backend_desc = if self.is_cnn() { "VGG7 CNN" } else { "compat" };
+        format!(
+            "waifu2x-{} noise={} scale={}x style={} ({})",
+            backend_desc, self.noise_level, self.scale, self.style,
+            if self.is_cnn() { "neural network inference" } else { "Lanczos3 + unsharp mask" }
+        )
+    }
+
+    // ── CNN inference path ──────────────────────────────────────────────
+
+    /// Attempt to load waifu2x VGG7 weights from the standard search paths.
+    fn try_load_cnn(noise_level: u8, scale: u8, style: Waifu2xStyle) -> Waifu2xBackend {
+        let weight_path = find_weight_file(noise_level, scale, style);
+        match weight_path {
+            Some(path) => {
+                info!("Loading waifu2x CNN weights from {}", path.display());
+                match Self::load_weights_from_file(&path, scale as usize) {
+                    Ok((graph, parameters)) => {
+                        info!("Waifu2x VGG7 CNN ready ({} parameters)", parameters.len());
+                        Waifu2xBackend::Cnn { graph, parameters }
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to load waifu2x weights from {}: {}; using compat mode",
+                            path.display(), e
+                        );
+                        Waifu2xBackend::Compat
+                    }
+                }
+            }
+            None => {
+                debug!(
+                    "No waifu2x weight file found for noise={} scale={} style={}; using compat mode",
+                    noise_level, scale, style
+                );
+                Waifu2xBackend::Compat
+            }
+        }
+    }
+
+    /// Load `.rsr` weight file and build the VGG7 graph.
+    fn load_weights_from_file(
+        path: &Path,
+        scale_factor: usize,
+    ) -> Result<(crate::GraphDef, Vec<ndarray::ArrayD<f32>>)> {
+        use std::io::Read;
+
+        let mut file = std::fs::File::open(path).map_err(SrganError::Io)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).map_err(SrganError::Io)?;
+
+        let desc = crate::network_from_bytes(&data)
+            .map_err(|e| SrganError::Network(e))?;
+
+        let graph = crate::network::waifu2x_vgg7_net(scale_factor)
+            .map_err(|e| SrganError::Network(format!("waifu2x graph build failed: {}", e)))?;
+
+        Ok((graph, desc.parameters))
+    }
+
+    /// Run CNN inference on an image through the VGG7 graph.
+    fn upscale_cnn(
+        &self,
+        img: &image::DynamicImage,
+        graph: &crate::GraphDef,
+        _parameters: &[ndarray::ArrayD<f32>],
+    ) -> Result<image::DynamicImage> {
+        use alumina::data::image_folder::image_to_data;
+
+        let input_data = image_to_data(img);
+
+        let input_id = graph.node_id("input").value_id();
+        let output_id = graph.node_id("output").value_id();
+
+        let mut subgraph = graph
+            .subgraph(&[input_id.clone()], &[output_id.clone()])
+            .map_err(|e| SrganError::GraphExecution(format!("{}", e)))?;
+
+        let result = subgraph.execute(vec![input_data])
+            .map_err(|e| SrganError::GraphExecution(format!("{}", e)))?;
+
+        let output_data = result.into_map().remove(&output_id)
+            .ok_or_else(|| SrganError::GraphExecution(
+                "Output node not found in waifu2x graph result".into()
+            ))?;
+
+        Ok(alumina::data::image_folder::data_to_image(output_data.view()))
+    }
+
+    // ── Compat (software fallback) path ─────────────────────────────────
+
+    /// Software fallback: Lanczos3 resize + unsharp mask.
+    fn upscale_compat(
         &self,
         img: &image::DynamicImage,
     ) -> Result<image::DynamicImage> {
@@ -183,11 +297,6 @@ impl Waifu2xNetwork {
 
         // Step 2: Unsharp-mask sharpening based on noise level, adjusted by
         // content style.
-        //
-        // Style multipliers:
-        //   Anime   → 1.0× (baseline — waifu2x was designed for anime)
-        //   Artwork → 0.8× (slightly softer for painterly detail)
-        //   Photo   → 0.6× (gentler to preserve natural texture/grain)
         let style_multiplier = match self.style {
             Waifu2xStyle::Anime   => 1.0f32,
             Waifu2xStyle::Artwork => 0.8,
@@ -209,20 +318,62 @@ impl Waifu2xNetwork {
 
         Ok(unsharp_mask(&resized, amount))
     }
-
-    /// Human-readable description of the active configuration.
-    pub fn description(&self) -> String {
-        format!(
-            "waifu2x-compat noise={} scale={}x style={} (Lanczos3 + unsharp mask)",
-            self.noise_level, self.scale, self.style
-        )
-    }
 }
 
 impl std::fmt::Display for Waifu2xNetwork {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.description())
     }
+}
+
+// ── Weight file search ──────────────────────────────────────────────────────
+
+/// Expected weight file name for a given waifu2x configuration.
+///
+/// Format: `noise{N}_scale{M}_{style}.rsr`
+/// Examples: `noise1_scale2_anime.rsr`, `noise0_scale1_photo.rsr`
+pub fn weight_file_name(noise_level: u8, scale: u8, style: Waifu2xStyle) -> String {
+    format!("noise{}_scale{}_{}.rsr", noise_level, scale, style)
+}
+
+/// Search for a waifu2x weight file in the standard locations.
+///
+/// Search order:
+/// 1. `$SRGAN_MODEL_PATH/waifu2x/<file>`
+/// 2. `./models/waifu2x/<file>`
+pub fn find_weight_file(noise_level: u8, scale: u8, style: Waifu2xStyle) -> Option<PathBuf> {
+    let filename = weight_file_name(noise_level, scale, style);
+
+    // Try $SRGAN_MODEL_PATH/waifu2x/
+    if let Ok(model_path) = std::env::var("SRGAN_MODEL_PATH") {
+        let candidate = PathBuf::from(model_path).join("waifu2x").join(&filename);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Try ./models/waifu2x/
+    let local = PathBuf::from("models").join("waifu2x").join(&filename);
+    if local.is_file() {
+        return Some(local);
+    }
+
+    // Also try without style suffix (generic weight file)
+    let generic = format!("noise{}_scale{}.rsr", noise_level, scale);
+
+    if let Ok(model_path) = std::env::var("SRGAN_MODEL_PATH") {
+        let candidate = PathBuf::from(model_path).join("waifu2x").join(&generic);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let local_generic = PathBuf::from("models").join("waifu2x").join(&generic);
+    if local_generic.is_file() {
+        return Some(local_generic);
+    }
+
+    None
 }
 
 // ── Unsharp mask ─────────────────────────────────────────────────────────────
@@ -443,7 +594,29 @@ mod tests {
     #[test]
     fn compat_description_mentions_compat() {
         let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
-        assert!(net.description().contains("compat"));
+        // In compat mode (no weight files), description should mention compat
+        if !net.is_cnn() {
+            assert!(net.description().contains("compat"));
+        }
+    }
+
+    #[test]
+    fn is_cnn_false_without_weights() {
+        let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
+        // Without weight files on disk, should be in compat mode
+        assert!(!net.is_cnn());
+    }
+
+    #[test]
+    fn weight_file_name_format() {
+        assert_eq!(
+            weight_file_name(1, 2, Waifu2xStyle::Anime),
+            "noise1_scale2_anime.rsr"
+        );
+        assert_eq!(
+            weight_file_name(3, 1, Waifu2xStyle::Photo),
+            "noise3_scale1_photo.rsr"
+        );
     }
 
     #[test]

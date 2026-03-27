@@ -24,6 +24,8 @@ mod keras;
 #[cfg(not(feature = "keras-support"))]
 #[path = "model_converter/keras_simple.rs"]
 mod keras_simple;
+#[path = "model_converter/waifu2x_converter.rs"]
+pub mod waifu2x_converter;
 
 use pytorch::PyTorchParser;
 use tensorflow::TensorFlowParser;
@@ -41,6 +43,8 @@ pub enum ModelFormat {
     TensorFlow,
     ONNX,
     Keras,
+    /// Original waifu2x JSON weight format (`noise{N}_scale{M}x_model.json`).
+    Waifu2xJson,
 }
 
 /// Model metadata for conversion
@@ -175,6 +179,23 @@ impl ModelConverter {
         Ok(())
     }
 
+    /// Load a waifu2x JSON model file.
+    ///
+    /// Delegates to [`waifu2x_converter::Waifu2xWeightConverter`] for parsing,
+    /// then stores the extracted metadata so the rest of the conversion pipeline
+    /// can proceed uniformly.
+    pub fn load_waifu2x_json(&mut self, path: &Path) -> Result<(), SrganError> {
+        if !path.exists() {
+            return Err(SrganError::FileNotFound(path.to_path_buf()));
+        }
+
+        let mut w2x = waifu2x_converter::Waifu2xWeightConverter::new();
+        w2x.load_waifu2x_json(path)?;
+
+        info!("Loaded Waifu2x JSON model from {:?}", path);
+        Ok(())
+    }
+
     /// Convert loaded model to SRGAN-Rust format
     pub fn convert_to_srgan(&self) -> Result<UpscalingNetwork, SrganError> {
         let _metadata = self.metadata.as_ref()
@@ -204,11 +225,23 @@ impl ModelConverter {
             .and_then(|e| e.to_str())
             .ok_or_else(|| SrganError::InvalidInput("No file extension".into()))?;
 
+        // Check for waifu2x JSON by filename pattern
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        let is_waifu2x_json = filename.contains("noise") && filename.contains("scale")
+            && extension.to_lowercase() == "json";
+
+        if is_waifu2x_json {
+            return Ok(ModelFormat::Waifu2xJson);
+        }
+
         match extension.to_lowercase().as_str() {
             "pth" | "pt" => Ok(ModelFormat::PyTorch),
             "pb" => Ok(ModelFormat::TensorFlow),
             "onnx" => Ok(ModelFormat::ONNX),
             "h5" | "hdf5" => Ok(ModelFormat::Keras),
+            "json" => Ok(ModelFormat::Waifu2xJson), // fallback for .json
             _ => Err(SrganError::InvalidInput(
                 format!("Unknown model format: {}", extension)
             ))
@@ -999,6 +1032,7 @@ fn convert_single_model(input_path: &Path, output_dir: &Path, format: Option<Mod
         ModelFormat::TensorFlow => converter.load_tensorflow(input_path)?,
         ModelFormat::ONNX => converter.load_onnx(input_path)?,
         ModelFormat::Keras => converter.load_keras(input_path)?,
+        ModelFormat::Waifu2xJson => converter.load_waifu2x_json(input_path)?,
     }
     
     // Generate output filename

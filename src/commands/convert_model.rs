@@ -97,6 +97,10 @@ pub fn convert_model(matches: &ArgMatches) -> Result<(), SrganError> {
                 info!("Loading Keras model...");
                 converter.load_keras(input_path)?;
             },
+            ModelFormat::Waifu2xJson => {
+                info!("Loading Waifu2x JSON model...");
+                converter.load_waifu2x_json(input_path)?;
+            },
         }
         
         // Display conversion statistics

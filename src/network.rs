@@ -331,3 +331,102 @@ pub fn downscale_srgb_net(factor: usize) -> Result<GraphDef> {
 
 	Ok(g)
 }
+
+// ── Waifu2x VGG7 network architecture ──────────────────────────────────────
+
+/// Layer widths for the waifu2x VGG7 architecture.
+///
+/// The standard waifu2x "vgg7" model uses 7 convolutional layers with this
+/// channel progression: 3 → 32 → 32 → 64 → 64 → 128 → 128 → out.
+/// For scale=1 (denoise-only), out = 3 channels.
+/// For scale=2 (upscale), out = 3*4 = 12 channels fed into pixel-shuffle.
+pub const WAIFU2X_VGG7_CHANNELS: [usize; 7] = [32, 32, 64, 64, 128, 128, 0]; // last is computed
+
+/// Build a waifu2x VGG7 inference graph.
+///
+/// The architecture is a simple sequential stack of 3×3 convolutions with
+/// Spline activations (approximating leaky ReLU), followed by either a
+/// direct 3-channel output (scale=1) or a pixel-shuffle ×2 upscale.
+///
+/// Parameters are expected to be loaded from a converted waifu2x weight file
+/// (see `Waifu2xWeightConverter`).
+pub fn waifu2x_vgg7_net(scale_factor: usize) -> Result<GraphDef> {
+	assert!(scale_factor == 1 || scale_factor == 2, "waifu2x scale must be 1 or 2");
+
+	let mut g = GraphDef::new();
+
+	let input = g.new_node(shape![Unknown, Unknown, Unknown, CHANNELS], "input", tag![])?;
+
+	// Hidden layers: 6 conv+activation blocks
+	let layer_widths = &WAIFU2X_VGG7_CHANNELS[..6]; // [32, 32, 64, 64, 128, 128]
+	let mut prev_node = input.clone();
+
+	for (i, &width) in layer_widths.iter().enumerate() {
+		let conv_node = g.new_node(
+			shape![Unknown, Unknown, Unknown, width],
+			format!("w2x_conv{}", i),
+			tag![],
+		)?;
+		Conv::new(&prev_node, &conv_node, &[3, 3])
+			.init(Conv::msra(1.0))
+			.add_to(&mut g, tag![])?;
+		Bias::new(&conv_node).add_to(&mut g, tag![])?;
+
+		let activ_node = g.new_node(
+			shape![Unknown, Unknown, Unknown, width],
+			format!("w2x_activ{}", i),
+			tag![],
+		)?;
+		Spline::new(&conv_node, &activ_node)
+			.shared_axes(&[0, 1, 2])
+			.init(Spline::swan())
+			.add_to(&mut g, tag![])?;
+
+		prev_node = activ_node;
+	}
+
+	// Output layer
+	let output = g.new_node(shape![Unknown, Unknown, Unknown, CHANNELS], "output", tag![])?;
+
+	if scale_factor == 2 {
+		// Pixel-shuffle path: conv to 12 channels, then expand ×2
+		let expand_channels = CHANNELS * scale_factor * scale_factor;
+		let expand_node = g.new_node(
+			shape![Unknown, Unknown, Unknown, expand_channels],
+			"w2x_expand",
+			tag![],
+		)?;
+		Conv::new(&prev_node, &expand_node, &[3, 3])
+			.init(Conv::msra(0.01))
+			.add_to(&mut g, tag![])?;
+		Bias::new(&expand_node).add_to(&mut g, tag![])?;
+
+		Expand::new(&expand_node, &output, &[1, scale_factor, scale_factor])
+			.add_to(&mut g, tag![])?;
+
+		// Add residual connection: bilinear upsample input and add
+		Linterp::new(&input, &output, &[1, scale_factor, scale_factor, 1])
+			.add_to(&mut g, tag![])?;
+
+		ShapeConstraint::new(&g.node_id("input"), &g.node_id("output"))
+			.single(1, move |d| d * scale_factor)
+			.single(2, move |d| d * scale_factor)
+			.add_to(&mut g, tag![])?;
+	} else {
+		// Denoise-only path: conv directly to 3 channels + residual
+		Conv::new(&prev_node, &output, &[3, 3])
+			.init(Conv::msra(0.01))
+			.add_to(&mut g, tag![])?;
+		Bias::new(&output).add_to(&mut g, tag![])?;
+
+		// Residual: output = input + learned_residual
+		Add::new(&input, &output).add_to(&mut g, tag![])?;
+
+		ShapeConstraint::new(&g.node_id("input"), &g.node_id("output"))
+			.single(1, |d| d)
+			.single(2, |d| d)
+			.add_to(&mut g, tag![])?;
+	}
+
+	Ok(g)
+}

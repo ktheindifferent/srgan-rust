@@ -251,12 +251,9 @@ fn load_network(app_m: &ArgMatches, factor: usize, input_path: &Path) -> Result<
 	} else {
 		let param_type = app_m.value_of("PARAMETERS").unwrap_or("natural");
 		if param_type == "waifu2x" || param_type.starts_with("waifu2x-") {
-			// Route waifu2x through the dedicated Waifu2xNetwork path so that
-			// missing weights produce a clear error message rather than a
-			// silent fallback to the anime model.
-			crate::waifu2x::Waifu2xNetwork::from_label(param_type)?;
-			// TODO: when native waifu2x weights are available, use
-			//       Waifu2xNetwork directly instead of falling through here.
+			// Validate the label parses correctly and log the inference mode.
+			let wnet = crate::waifu2x::Waifu2xNetwork::from_label(param_type)?;
+			log::info!("Waifu2x mode: {}", wnet.description());
 			UpscalingNetwork::from_label(param_type, Some(factor))
 				.map_err(|e| SrganError::Network(e))
 		} else {

@@ -1,10 +1,10 @@
-//! Tests for the Waifu2x model variant and waifu2x-compat inference path.
+//! Tests for the Waifu2x model variant, CNN inference, compat path, and weight converter.
 
-use srgan_rust::config::Waifu2xConfig;
+use srgan_rust::config::{Waifu2xConfig, Waifu2xStyle};
 use srgan_rust::model_downloader::{list_available_models, REMOTE_MODELS};
 use srgan_rust::model_manager::ModelArchitecture;
 use srgan_rust::thread_safe_network::ThreadSafeNetwork;
-use srgan_rust::waifu2x::Waifu2xNetwork;
+use srgan_rust::waifu2x::{Waifu2xNetwork, weight_file_name, find_weight_file};
 use image::GenericImage;
 
 // ── Waifu2xConfig ─────────────────────────────────────────────────────────────
@@ -213,12 +213,129 @@ fn test_waifu2x_compat_all_variants_succeed() {
 #[test]
 fn test_waifu2x_compat_description_mentions_compat() {
     let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
-    let desc = net.description();
-    assert!(desc.contains("compat"), "description should mention compat: {}", desc);
+    // Without weight files, should be in compat mode
+    if !net.is_cnn() {
+        let desc = net.description();
+        assert!(desc.contains("compat"), "description should mention compat: {}", desc);
+    }
 }
 
 #[test]
 fn test_waifu2x_compat_invalid_label_errors() {
     assert!(Waifu2xNetwork::from_label("esrgan").is_err());
     assert!(Waifu2xNetwork::from_label("waifu2x-bad").is_err());
+}
+
+// ── CNN / compat mode detection ─────────────────────────────────────────────
+
+#[test]
+fn test_waifu2x_is_cnn_false_without_weight_files() {
+    let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
+    // No weight files in the test environment, so should be compat mode
+    assert!(!net.is_cnn());
+}
+
+#[test]
+fn test_waifu2x_description_indicates_backend() {
+    let net = Waifu2xNetwork::from_label("waifu2x-noise2-scale2").unwrap();
+    let desc = net.description();
+    if net.is_cnn() {
+        assert!(desc.contains("CNN"), "CNN desc: {}", desc);
+    } else {
+        assert!(desc.contains("compat"), "compat desc: {}", desc);
+    }
+}
+
+// ── Weight file naming and search ───────────────────────────────────────────
+
+#[test]
+fn test_weight_file_name_anime() {
+    assert_eq!(weight_file_name(1, 2, Waifu2xStyle::Anime), "noise1_scale2_anime.rsr");
+}
+
+#[test]
+fn test_weight_file_name_photo() {
+    assert_eq!(weight_file_name(0, 1, Waifu2xStyle::Photo), "noise0_scale1_photo.rsr");
+}
+
+#[test]
+fn test_weight_file_name_artwork() {
+    assert_eq!(weight_file_name(3, 2, Waifu2xStyle::Artwork), "noise3_scale2_artwork.rsr");
+}
+
+#[test]
+fn test_find_weight_file_returns_none_when_missing() {
+    // No weight files should exist in the test environment
+    assert!(find_weight_file(1, 2, Waifu2xStyle::Anime).is_none());
+}
+
+// ── Waifu2x from_config ─────────────────────────────────────────────────────
+
+#[test]
+fn test_waifu2x_from_config() {
+    let cfg = Waifu2xConfig::with_style(2, 2, Waifu2xStyle::Photo).unwrap();
+    let net = Waifu2xNetwork::from_config(&cfg).unwrap();
+    assert_eq!(net.noise_level().as_u8(), 2);
+    assert_eq!(net.scale().as_u8(), 2);
+    assert_eq!(net.style(), Waifu2xStyle::Photo);
+}
+
+#[test]
+fn test_waifu2x_from_label_with_style() {
+    let net = Waifu2xNetwork::from_label_with_style("waifu2x-noise1-scale2", Waifu2xStyle::Artwork).unwrap();
+    assert_eq!(net.style(), Waifu2xStyle::Artwork);
+}
+
+// ── VGG7 network graph builder ──────────────────────────────────────────────
+
+#[test]
+fn test_waifu2x_vgg7_net_scale1_builds() {
+    let graph = srgan_rust::network::waifu2x_vgg7_net(1);
+    assert!(graph.is_ok(), "VGG7 scale=1 graph build failed: {:?}", graph.err());
+}
+
+#[test]
+fn test_waifu2x_vgg7_net_scale2_builds() {
+    let graph = srgan_rust::network::waifu2x_vgg7_net(2);
+    assert!(graph.is_ok(), "VGG7 scale=2 graph build failed: {:?}", graph.err());
+}
+
+#[test]
+#[should_panic(expected = "waifu2x scale must be 1 or 2")]
+fn test_waifu2x_vgg7_net_invalid_scale_panics() {
+    let _ = srgan_rust::network::waifu2x_vgg7_net(4);
+}
+
+// ── Weight converter ────────────────────────────────────────────────────────
+
+#[test]
+fn test_waifu2x_converter_new() {
+    let conv = srgan_rust::model_converter::waifu2x_converter::Waifu2xWeightConverter::new();
+    assert_eq!(conv.summary(), "Waifu2x model: 0 layers, 0 total parameters, output_channels=0");
+}
+
+#[test]
+fn test_waifu2x_converter_save_fails_without_weights() {
+    let conv = srgan_rust::model_converter::waifu2x_converter::Waifu2xWeightConverter::new();
+    assert!(conv.save_rsr(std::path::Path::new("/tmp/test_w2x.rsr")).is_err());
+}
+
+#[test]
+fn test_waifu2x_converter_load_nonexistent_file_fails() {
+    let mut conv = srgan_rust::model_converter::waifu2x_converter::Waifu2xWeightConverter::new();
+    assert!(conv.load_waifu2x_json(std::path::Path::new("/nonexistent.json")).is_err());
+}
+
+// ── ModelFormat detection ───────────────────────────────────────────────────
+
+#[test]
+fn test_auto_detect_waifu2x_json_format() {
+    use srgan_rust::model_converter::ModelConverter;
+    let path = std::path::Path::new("noise1_scale2x_model.json");
+    let format = ModelConverter::auto_detect_format(path);
+    assert!(format.is_ok());
+    match format.unwrap() {
+        srgan_rust::model_converter::ModelFormat::Waifu2xJson => {},
+        other => panic!("Expected Waifu2xJson, got {:?}", other),
+    }
 }
