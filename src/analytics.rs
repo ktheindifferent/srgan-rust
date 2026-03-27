@@ -526,13 +526,15 @@ impl BatchAnalyticsDb {
         let records = if let Some(ref model) = query.model {
             let sql = format!("{} WHERE model=?1 ORDER BY completed_at DESC LIMIT ?2 OFFSET ?3", base);
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            stmt.query_map(rusqlite::params![model, query.limit, query.offset], map_job_row)
-                .map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect()
+            let rows = stmt.query_map(rusqlite::params![model, query.limit, query.offset], map_job_row)
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
         } else {
             let sql = format!("{} ORDER BY completed_at DESC LIMIT ?1 OFFSET ?2", base);
             let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
-            stmt.query_map(rusqlite::params![query.limit, query.offset], map_job_row)
-                .map_err(|e| e.to_string())?.filter_map(|r| r.ok()).collect()
+            let rows = stmt.query_map(rusqlite::params![query.limit, query.offset], map_job_row)
+                .map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
         };
         Ok(records)
     }

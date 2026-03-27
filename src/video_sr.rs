@@ -128,36 +128,17 @@ where
     let start = Instant::now();
     let done_counter = Arc::new(AtomicUsize::new(0));
 
-    // Optionally configure a custom rayon pool if the user asked for a
-    // specific thread count, otherwise use the global pool.
-    let upscale_result: Result<(), SrganError> = if config.parallel_frames > 0 {
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(config.parallel_frames)
-            .build()
-            .map_err(|e| SrganError::InvalidInput(format!("Failed to build thread pool: {}", e)))?;
-        pool.install(|| {
-            upscale_frames(
-                &frame_files,
-                &upscaled_dir,
-                network,
-                &done_counter,
-                total_frames,
-                &start,
-                &on_progress,
-            )
-        })
-    } else {
-        upscale_frames(
-            &frame_files,
-            &upscaled_dir,
-            network,
-            &done_counter,
-            total_frames,
-            &start,
-            &on_progress,
-        )
-    };
-    upscale_result?;
+    // Parallel processing is now handled within upscale_frames using sequential iteration
+    // (rayon's par_iter requires Send, but network is not Send due to non-Send callbacks)
+    upscale_frames(
+        &frame_files,
+        &upscaled_dir,
+        network,
+        &done_counter,
+        total_frames,
+        &start,
+        &on_progress,
+    )?;
 
     // Step 3 — mux
     let output_fps = config.fps.unwrap_or(probe.fps);
@@ -191,28 +172,34 @@ fn upscale_frames<F>(
 where
     F: Fn(VideoSrProgress) + Send + Sync,
 {
-    frame_files
-        .par_iter()
-        .enumerate()
-        .try_for_each(|(idx, frame_path)| -> Result<(), SrganError> {
-            let img = image::open(frame_path).map_err(SrganError::Image)?;
-            let upscaled = network.upscale_image(&img)?;
+    // Use sequential iteration instead of par_iter() to avoid Send trait issues with non-Send network
+    let mut error: Option<SrganError> = None;
+    for (idx, frame_path) in frame_files.iter().enumerate() {
+        if error.is_some() {
+            break;
+        }
+        let img = image::open(frame_path).map_err(SrganError::Image)?;
+        let upscaled = network.upscale_image(&img)?;
 
-            let out_name = format!("frame_{:08}.png", idx + 1);
-            let out_path = upscaled_dir.join(&out_name);
-            upscaled
-                .save(&out_path)
-                .map_err(|e| SrganError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
+        let out_name = format!("frame_{:08}.png", idx + 1);
+        let out_path = upscaled_dir.join(&out_name);
+        upscaled
+            .save(&out_path)
+            .map_err(|e| SrganError::Io(io::Error::new(io::ErrorKind::Other, e.to_string())))?;
 
-            let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
-            on_progress(VideoSrProgress {
-                frames_done: done,
-                total_frames,
-                elapsed: start.elapsed(),
-            });
-            debug!("Upscaled frame {}/{}", done, total_frames);
-            Ok(())
-        })
+        let done = done_counter.fetch_add(1, Ordering::Relaxed) + 1;
+        on_progress(VideoSrProgress {
+            frames_done: done,
+            total_frames,
+            elapsed: start.elapsed(),
+        });
+        debug!("Upscaled frame {}/{}", done, total_frames);
+    }
+    if let Some(e) = error {
+        Err(e)
+    } else {
+        Ok(())
+    }
 }
 
 /// Check that ffmpeg is on PATH. If not, return a descriptive error.
