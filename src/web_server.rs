@@ -455,6 +455,8 @@ pub struct WebServer {
     model_version_store: Arc<crate::model_version::ModelVersionStore>,
     /// Affiliate / referral system
     pub referral_store: Arc<ReferralStore>,
+    /// Batch job analytics (per-job metrics in SQLite)
+    batch_analytics_db: Arc<crate::analytics::BatchAnalyticsDb>,
 }
 
 /// Cached result
@@ -545,6 +547,14 @@ impl WebServer {
             model_version_registry,
             model_version_store: Arc::new(crate::model_version::ModelVersionStore::new()),
             referral_store: Arc::new(ReferralStore::new()),
+            batch_analytics_db: Arc::new(
+                crate::analytics::BatchAnalyticsDb::open_in_memory()
+                    .unwrap_or_else(|e| {
+                        log::warn!("Failed to open batch analytics db: {}", e);
+                        crate::analytics::BatchAnalyticsDb::open_in_memory()
+                            .expect("in-memory analytics db must succeed")
+                    }),
+            ),
         })
     }
 

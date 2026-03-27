@@ -75,8 +75,10 @@ pub mod stripe_dunning;
 pub mod docs;
 pub mod webhook_docs;
 pub mod sdk_docs;
+pub mod video_sr;
 pub mod web_server;
 pub mod web_server_improved;
+pub mod analytics;
 
 #[cfg(test)]
 mod error_handling_tests;

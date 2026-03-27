@@ -1,20 +1,25 @@
-// Package srgan provides a Go client for the SRGAN-Rust REST API.
+// Package srgan provides an idiomatic Go client for the SRGAN-Rust REST API.
 //
-// Usage:
+// The Client wraps all HTTP communication and provides both synchronous and
+// asynchronous upscaling workflows.  Every method that performs I/O accepts a
+// [context.Context] for cancellation and deadline propagation.
+//
+// Quick start:
 //
 //	client := srgan.NewClient("http://localhost:8080", "sk-...")
 //
-//	// Synchronous upscale
-//	data, err := client.Upscale("photo.jpg", &srgan.UpscaleOptions{Scale: 4, Model: "natural"})
+//	// Synchronous single-image upscale
+//	data, err := client.Upscale(ctx, "photo.jpg", 4)
 //
 //	// Async workflow
-//	jobID, _ := client.UpscaleAsync("photo.jpg", nil)
-//	status, _ := client.WaitForJob(jobID)
-//	_ = client.DownloadResult(jobID, "photo_4x.png")
+//	job, _ := client.UpscaleAsync(ctx, "photo.jpg", nil)
+//	job, _ = client.WaitForJob(ctx, job.ID)
+//	_ = client.DownloadResult(ctx, job.ID, "photo_4x.png")
 package srgan
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -46,10 +51,9 @@ func (e *APIError) Error() string {
 // ---------------------------------------------------------------------------
 
 // UpscaleOptions configures an upscale request.
+// All fields are optional; zero values are omitted from the JSON payload.
 type UpscaleOptions struct {
-	// Scale is the upscaling factor (2, 4, or 8). Defaults to 4 if zero.
-	Scale int `json:"scale_factor,omitempty"`
-	// Model selects the upscaling model: "natural", "anime", or "bilinear".
+	// Model selects the upscaling model: "natural", "anime", "bilinear", etc.
 	Model string `json:"model,omitempty"`
 	// OutputFormat is the desired output encoding: "png", "jpeg", or "webp".
 	OutputFormat string `json:"output_format,omitempty"`
@@ -57,24 +61,32 @@ type UpscaleOptions struct {
 	Quality int `json:"quality,omitempty"`
 }
 
-// JobStatus describes the current state of an async upscaling job.
-type JobStatus struct {
-	// JobID is the unique identifier for the job.
-	JobID string `json:"job_id"`
-	// Status is one of: "queued", "processing", "completed", "failed", "cancelled".
+// Job describes the state of an upscaling job.
+type Job struct {
+	// ID is the unique job identifier.
+	ID string `json:"id"`
+	// Status is one of: "Pending", "Processing", "Completed", "Failed".
 	Status string `json:"status"`
-	// Progress is the completion percentage (0-100).
-	Progress int `json:"progress_pct"`
-	// ResultData holds the base64-encoded result image when status is "completed".
+	// ResultData holds the base64-encoded result image when Status is "Completed".
 	ResultData string `json:"result_data,omitempty"`
-	// Error contains the failure reason when status is "failed".
+	// Error contains the failure reason when Status is "Failed".
 	Error string `json:"error,omitempty"`
+	// Model used for this job.
+	Model string `json:"model,omitempty"`
+	// InputSize is the original dimensions "WxH".
+	InputSize string `json:"input_size,omitempty"`
+	// OutputSize is the upscaled dimensions "WxH".
+	OutputSize string `json:"output_size,omitempty"`
+	// ScaleFactor applied.
+	ScaleFactor int `json:"scale_factor,omitempty"`
+	// Progress percentage (0-100) for long-running jobs.
+	Progress int `json:"progress,omitempty"`
 }
 
 // IsDone reports whether the job has reached a terminal state.
-func (j *JobStatus) IsDone() bool {
+func (j *Job) IsDone() bool {
 	switch j.Status {
-	case "completed", "failed", "cancelled":
+	case "Completed", "completed", "Failed", "failed", "cancelled":
 		return true
 	}
 	return false
@@ -84,32 +96,34 @@ func (j *JobStatus) IsDone() bool {
 type HealthResponse struct {
 	Status  string `json:"status"`
 	Version string `json:"version,omitempty"`
-	Uptime  string `json:"uptime,omitempty"`
+	Uptime  int64  `json:"uptime,omitempty"`
 }
 
 // ModelInfo describes an available upscaling model.
 type ModelInfo struct {
-	Name        string `json:"name"`
-	Description string `json:"description,omitempty"`
-	ScaleFactors []int `json:"scale_factors,omitempty"`
+	Name         string `json:"name"`
+	Description  string `json:"description,omitempty"`
+	ScaleFactors []int  `json:"scale_factors,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
 
-// Client is a thin wrapper around the SRGAN-Rust REST API.
+// Client is an idiomatic Go client for the SRGAN-Rust REST API.
+//
+// Create one with [NewClient] and reuse it for multiple requests.
 type Client struct {
 	// BaseURL is the root URL of the SRGAN server (e.g. "http://localhost:8080").
 	BaseURL string
 	// APIKey is sent as the X-API-Key header on every request.
 	APIKey string
-	// HTTPClient is the underlying HTTP client. If nil, http.DefaultClient is used.
+	// HTTPClient is the underlying HTTP client. If nil, a default client with
+	// a 120-second timeout is used.
 	HTTPClient *http.Client
 }
 
-// NewClient creates a Client configured with the given base URL and API key.
-// It uses http.DefaultClient for requests; set client.HTTPClient to override.
+// NewClient creates a [Client] configured with the given base URL and API key.
 func NewClient(baseURL, apiKey string) *Client {
 	return &Client{
 		BaseURL:    strings.TrimRight(baseURL, "/"),
@@ -118,7 +132,6 @@ func NewClient(baseURL, apiKey string) *Client {
 	}
 }
 
-// httpClient returns the configured HTTP client or the default.
 func (c *Client) httpClient() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient
@@ -127,89 +140,165 @@ func (c *Client) httpClient() *http.Client {
 }
 
 // ---------------------------------------------------------------------------
-// Public methods
+// Core methods
 // ---------------------------------------------------------------------------
 
-// Upscale reads the image at imagePath, sends it to the synchronous upscale
-// endpoint, and returns the resulting image bytes.
-// Pass nil for opts to use server defaults.
-func (c *Client) Upscale(imagePath string, opts *UpscaleOptions) ([]byte, error) {
-	encoded, err := encodeImageFile(imagePath)
+// Upscale reads the image at inputPath, sends it to the synchronous upscale
+// endpoint with the given scale factor, and returns the resulting image bytes.
+//
+// Pass 0 for scale to use the server default (4x).
+func (c *Client) Upscale(ctx context.Context, inputPath string, scale int) (*Job, error) {
+	encoded, err := encodeImageFile(inputPath)
 	if err != nil {
 		return nil, err
 	}
 
-	body := buildUpscalePayload(encoded, opts)
-
-	var result struct {
-		ImageBase64 string `json:"image_base64"`
+	body := map[string]interface{}{
+		"image_data": encoded,
 	}
-	if err := c.postJSON("/api/v1/upscale", body, &result); err != nil {
+	if scale > 0 {
+		body["scale_factor"] = scale
+	}
+
+	var resp struct {
+		Success    bool   `json:"success"`
+		ImageData  string `json:"image_data"`
+		Error      string `json:"error"`
+		Metadata   struct {
+			OriginalSize   [2]uint32 `json:"original_size"`
+			UpscaledSize   [2]uint32 `json:"upscaled_size"`
+			ProcessingTime uint64    `json:"processing_time_ms"`
+			Format         string    `json:"format"`
+			ModelUsed      string    `json:"model_used"`
+		} `json:"metadata"`
+	}
+	if err := c.postJSON(ctx, "/api/v1/upscale", body, &resp); err != nil {
 		return nil, err
 	}
+	if !resp.Success {
+		return nil, &APIError{StatusCode: 400, Message: resp.Error}
+	}
 
-	return base64.StdEncoding.DecodeString(result.ImageBase64)
+	return &Job{
+		Status:     "Completed",
+		ResultData: resp.ImageData,
+		Model:      resp.Metadata.ModelUsed,
+		InputSize:  fmt.Sprintf("%dx%d", resp.Metadata.OriginalSize[0], resp.Metadata.OriginalSize[1]),
+		OutputSize: fmt.Sprintf("%dx%d", resp.Metadata.UpscaledSize[0], resp.Metadata.UpscaledSize[1]),
+		ScaleFactor: scale,
+	}, nil
 }
 
 // UpscaleAsync submits an image for asynchronous upscaling and returns the
-// job ID. Use GetJob or WaitForJob to track progress.
-func (c *Client) UpscaleAsync(imagePath string, opts *UpscaleOptions) (string, error) {
-	encoded, err := encodeImageFile(imagePath)
+// initial [Job] with its ID. Use [Client.GetJob] or [Client.WaitForJob] to
+// track progress.
+func (c *Client) UpscaleAsync(ctx context.Context, inputPath string, opts *UpscaleOptions) (*Job, error) {
+	encoded, err := encodeImageFile(inputPath)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
-	body := buildUpscalePayload(encoded, opts)
+	body := map[string]interface{}{
+		"image_data": encoded,
+	}
+	if opts != nil {
+		if opts.Model != "" {
+			body["model"] = opts.Model
+		}
+		if opts.OutputFormat != "" {
+			body["output_format"] = opts.OutputFormat
+		}
+		if opts.Quality > 0 {
+			body["quality"] = opts.Quality
+		}
+	}
 
 	var result struct {
 		JobID string `json:"job_id"`
 	}
-	if err := c.postJSON("/api/v1/upscale/async", body, &result); err != nil {
-		return "", err
-	}
-
-	return result.JobID, nil
-}
-
-// GetJob retrieves the current status of a job.
-func (c *Client) GetJob(jobID string) (*JobStatus, error) {
-	var status JobStatus
-	if err := c.getJSON("/api/v1/job/"+jobID, &status); err != nil {
+	if err := c.postJSON(ctx, "/api/v1/upscale/async", body, &result); err != nil {
 		return nil, err
 	}
-	return &status, nil
+	return &Job{ID: result.JobID, Status: "Pending"}, nil
+}
+
+// GetJob retrieves the current status of a job by its ID.
+func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
+	var raw struct {
+		ID         string  `json:"id"`
+		Status     string  `json:"status"`
+		ResultData *string `json:"result_data"`
+		Error      *string `json:"error"`
+		Model      *string `json:"model"`
+		InputSize  *string `json:"input_size"`
+		OutputSize *string `json:"output_size"`
+		ScaleFactor *int   `json:"scale_factor"`
+		Progress   *int    `json:"progress"`
+	}
+	if err := c.getJSON(ctx, "/api/v1/job/"+jobID, &raw); err != nil {
+		return nil, err
+	}
+	job := &Job{
+		ID:     raw.ID,
+		Status: raw.Status,
+	}
+	if raw.ResultData != nil {
+		job.ResultData = *raw.ResultData
+	}
+	if raw.Error != nil {
+		job.Error = *raw.Error
+	}
+	if raw.Model != nil {
+		job.Model = *raw.Model
+	}
+	if raw.InputSize != nil {
+		job.InputSize = *raw.InputSize
+	}
+	if raw.OutputSize != nil {
+		job.OutputSize = *raw.OutputSize
+	}
+	if raw.ScaleFactor != nil {
+		job.ScaleFactor = *raw.ScaleFactor
+	}
+	if raw.Progress != nil {
+		job.Progress = *raw.Progress
+	}
+	return job, nil
 }
 
 // WaitForJob polls the job status every 2 seconds until it reaches a terminal
-// state (completed, failed, or cancelled). It returns an error if the job
-// failed or was cancelled.
-func (c *Client) WaitForJob(jobID string) (*JobStatus, error) {
+// state (Completed or Failed). The context can be used to set a deadline or
+// cancel the polling loop.
+//
+// Returns the final [Job] on success. If the job failed, the returned error
+// wraps the failure reason.
+func (c *Client) WaitForJob(ctx context.Context, jobID string) (*Job, error) {
 	const pollInterval = 2 * time.Second
 
 	for {
-		status, err := c.GetJob(jobID)
+		job, err := c.GetJob(ctx, jobID)
 		if err != nil {
 			return nil, err
 		}
-
-		if status.IsDone() {
-			if status.Status == "failed" {
-				return status, fmt.Errorf("srgan: job %s failed: %s", jobID, status.Error)
+		if job.IsDone() {
+			if job.Status == "Failed" || job.Status == "failed" {
+				return job, fmt.Errorf("srgan: job %s failed: %s", jobID, job.Error)
 			}
-			if status.Status == "cancelled" {
-				return status, fmt.Errorf("srgan: job %s was cancelled", jobID)
-			}
-			return status, nil
+			return job, nil
 		}
 
-		time.Sleep(pollInterval)
+		select {
+		case <-ctx.Done():
+			return job, ctx.Err()
+		case <-time.After(pollInterval):
+		}
 	}
 }
 
 // DownloadResult fetches the result of a completed job and writes it to
 // outputPath. The file is created with mode 0644.
-func (c *Client) DownloadResult(jobID, outputPath string) error {
-	req, err := http.NewRequest("GET", c.BaseURL+"/api/v1/result/"+jobID, nil)
+func (c *Client) DownloadResult(ctx context.Context, jobID, outputPath string) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+"/api/v1/result/"+jobID, nil)
 	if err != nil {
 		return err
 	}
@@ -236,28 +325,28 @@ func (c *Client) DownloadResult(jobID, outputPath string) error {
 }
 
 // Health returns the server health status.
-func (c *Client) Health() (*HealthResponse, error) {
+func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	var h HealthResponse
-	if err := c.getJSON("/api/v1/health", &h); err != nil {
+	if err := c.getJSON(ctx, "/api/v1/health", &h); err != nil {
 		return nil, err
 	}
 	return &h, nil
 }
 
 // ListModels returns the list of models available on the server.
-func (c *Client) ListModels() ([]ModelInfo, error) {
+func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	var wrapper struct {
 		Models []ModelInfo `json:"models"`
 	}
-	if err := c.getJSON("/api/v1/models", &wrapper); err != nil {
+	if err := c.getJSON(ctx, "/api/v1/models", &wrapper); err != nil {
 		return nil, err
 	}
 	return wrapper.Models, nil
 }
 
 // CancelJob cancels a queued or in-progress job.
-func (c *Client) CancelJob(jobID string) error {
-	req, err := http.NewRequest("POST", c.BaseURL+"/api/jobs/"+jobID+"/cancel", nil)
+func (c *Client) CancelJob(ctx context.Context, jobID string) error {
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/api/v1/jobs/"+jobID+"/cancel", nil)
 	if err != nil {
 		return err
 	}
@@ -279,22 +368,19 @@ func (c *Client) CancelJob(jobID string) error {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-// setAuth applies the X-API-Key header to a request.
 func (c *Client) setAuth(req *http.Request) {
 	if c.APIKey != "" {
 		req.Header.Set("X-API-Key", c.APIKey)
 	}
 }
 
-// postJSON sends a POST request with a JSON body and decodes the response
-// into dest.
-func (c *Client) postJSON(path string, payload interface{}, dest interface{}) error {
+func (c *Client) postJSON(ctx context.Context, path string, payload interface{}, dest interface{}) error {
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("srgan: failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.BaseURL+path, bytes.NewReader(data))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+path, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -315,9 +401,8 @@ func (c *Client) postJSON(path string, payload interface{}, dest interface{}) er
 	return json.NewDecoder(resp.Body).Decode(dest)
 }
 
-// getJSON sends a GET request and decodes the JSON response into dest.
-func (c *Client) getJSON(path string, dest interface{}) error {
-	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+func (c *Client) getJSON(ctx context.Context, path string, dest interface{}) error {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.BaseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -337,10 +422,8 @@ func (c *Client) getJSON(path string, dest interface{}) error {
 	return json.NewDecoder(resp.Body).Decode(dest)
 }
 
-// parseAPIError reads an error response body and returns an *APIError.
 func parseAPIError(resp *http.Response) error {
 	body, _ := io.ReadAll(resp.Body)
-
 	msg := string(body)
 	var parsed struct {
 		Error string `json:"error"`
@@ -348,40 +431,13 @@ func parseAPIError(resp *http.Response) error {
 	if json.Unmarshal(body, &parsed) == nil && parsed.Error != "" {
 		msg = parsed.Error
 	}
-
-	return &APIError{
-		StatusCode: resp.StatusCode,
-		Message:    msg,
-	}
+	return &APIError{StatusCode: resp.StatusCode, Message: msg}
 }
 
-// encodeImageFile reads a file and returns its contents as a base64 string.
 func encodeImageFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("srgan: failed to read image %q: %w", path, err)
 	}
 	return base64.StdEncoding.EncodeToString(data), nil
-}
-
-// buildUpscalePayload constructs the JSON body for upscale endpoints.
-func buildUpscalePayload(imageBase64 string, opts *UpscaleOptions) map[string]interface{} {
-	body := map[string]interface{}{
-		"image_data": imageBase64,
-	}
-	if opts != nil {
-		if opts.Scale > 0 {
-			body["scale_factor"] = opts.Scale
-		}
-		if opts.Model != "" {
-			body["model"] = opts.Model
-		}
-		if opts.OutputFormat != "" {
-			body["output_format"] = opts.OutputFormat
-		}
-		if opts.Quality > 0 {
-			body["quality"] = opts.Quality
-		}
-	}
-	return body
 }
