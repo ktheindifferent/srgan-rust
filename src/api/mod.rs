@@ -15,6 +15,7 @@ pub mod jobs;
 pub mod middleware;
 pub mod org;
 pub mod rate_limit;
+pub mod rate_limit_dashboard;
 pub mod upscale;
 
 pub use auth::{
