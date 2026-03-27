@@ -102,6 +102,54 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 ./srgan-rust -f 2 photo.jpg photo_2x.png
 ```
 
+### Video upscaling
+
+```bash
+# Basic video upscale (4x, h264, medium quality)
+./srgan-rust video --input clip.mp4 --output clip_4x.mp4
+
+# Anime video with H.265 codec and high quality
+./srgan-rust video --input anime.mkv --output anime_4x.mkv \
+  -p anime --codec h265 --quality high
+
+# 2x upscale, VP9 codec, strip audio
+./srgan-rust video --input input.webm --output output.webm \
+  --scale 2 --codec vp9 --no-audio
+
+# Override FPS and use 8 parallel frame workers
+./srgan-rust video --input timelapse.mp4 --output timelapse_4x.mp4 \
+  --fps 60 --parallel 8
+
+# Preview a single frame before committing to full processing
+./srgan-rust video --input movie.mp4 --output movie_4x.mp4 --preview-only
+
+# Process only a 30-second clip starting at 1:30
+./srgan-rust video --input long.mp4 --output clip_4x.mp4 \
+  --start 00:01:30 --duration 00:00:30
+```
+
+### Video upscaling via API
+
+```bash
+# Submit async video upscale job
+curl -X POST http://localhost:8080/api/v1/video/upscale \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "video_data": "'$(base64 -i clip.mp4)'",
+    "model": "anime",
+    "scale": 4,
+    "codec": "h265",
+    "quality": "high",
+    "preserve_audio": true
+  }'
+# {"job_id":"...","status":"pending","type":"video_upscale","check_url":"/api/v1/job/..."}
+
+# Poll job status
+curl http://localhost:8080/api/v1/job/$JOB_ID \
+  -H "Authorization: Bearer $TOKEN"
+```
+
 ---
 
 ## Model comparison
@@ -166,6 +214,7 @@ All endpoints are under `/api/v1/`. Authenticate with `Authorization: Bearer <to
 | `GET` | `/api/v1/job/:id` | Poll async job status |
 | `GET` | `/api/v1/job/:id/webhook` | Webhook delivery state |
 | `POST` | `/api/v1/detect` | Classify image as photo/anime |
+| `POST` | `/api/v1/video/upscale` | Async video upscale (returns `job_id`) |
 | `POST` | `/api/v1/batch` | Batch upscale (sync ≤10, async >10) |
 | `POST` | `/api/v1/batch/start` | Start directory batch job |
 | `GET` | `/api/v1/batch/:id` | Poll batch job status |

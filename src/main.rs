@@ -35,6 +35,7 @@ fn main() {
 		("download-models", Some(sub_m)) => commands::download_models(sub_m),
 		("compare", Some(sub_m)) => commands::compare(sub_m),
 		("classify", Some(sub_m)) => commands::classify(sub_m),
+		("video", Some(sub_m)) => commands::upscale_video(sub_m),
 		("batch-status", Some(sub_m)) => commands::batch_status(sub_m),
 		("completions", Some(sub_m)) => commands::completions(sub_m),
 		("profile-memory", Some(sub_m)) => {

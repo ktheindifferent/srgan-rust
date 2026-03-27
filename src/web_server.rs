@@ -515,6 +515,7 @@ impl WebServer {
         info!("  GET  /api/v1/job/{{id}}       - Check single-image job status");
         info!("  GET  /api/v1/health          - Health check");
         info!("  GET  /api/models             - List available models");
+        info!("  POST /api/v1/video/upscale    - Async video upscaling (returns job_id)");
         info!("  POST /api/v1/compare         - Multi-model PSNR/SSIM comparison");
         info!("  GET  /dashboard              - Live processing dashboard (HTML)");
         info!("  GET  /api/v1/dashboard/stream - SSE live stats stream");
@@ -663,6 +664,7 @@ impl WebServer {
                 ("GET", "/api/v1/admin/keys") => self.handle_admin_keys(&request),
                 ("GET", "/admin/rate-limits") => self.handle_admin_rate_limits(&request),
                 ("GET", "/api/v1/rate-limit") => self.handle_rate_limit_self(&request),
+                ("POST", "/api/v1/video/upscale") | ("POST", "/api/video/upscale") => self.handle_video_upscale(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
                 // Registration & API key management
@@ -1092,6 +1094,235 @@ impl WebServer {
         }
     }
     
+    /// Handle async video upscale request.
+    ///
+    /// Accepts a JSON body with video metadata and returns a job ID.
+    /// The actual processing happens in the background.
+    fn handle_video_upscale(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+
+        // Parse video upscale request
+        #[derive(serde::Deserialize)]
+        struct VideoUpscaleRequest {
+            /// Base64-encoded video data
+            video_data: String,
+            /// Model to use (natural, anime)
+            #[serde(default = "default_model")]
+            model: String,
+            /// Upscale factor (2 or 4)
+            #[serde(default = "default_scale")]
+            scale: u32,
+            /// Output codec (h264, h265, vp9)
+            #[serde(default = "default_codec")]
+            codec: String,
+            /// Quality preset (low, medium, high)
+            #[serde(default = "default_quality")]
+            quality: String,
+            /// Output FPS override
+            fps: Option<f32>,
+            /// Whether to preserve audio
+            #[serde(default = "default_true")]
+            preserve_audio: bool,
+        }
+        fn default_model() -> String { "natural".into() }
+        fn default_scale() -> u32 { 4 }
+        fn default_codec() -> String { "h264".into() }
+        fn default_quality() -> String { "medium".into() }
+        fn default_true() -> bool { true }
+
+        let req: VideoUpscaleRequest = match serde_json::from_str(&body) {
+            Ok(r) => r,
+            Err(e) => return self.error_response(400, &format!("Invalid request: {}", e)),
+        };
+
+        // Validate codec
+        let valid_codecs = ["h264", "h265", "vp9", "av1", "prores"];
+        if !valid_codecs.contains(&req.codec.to_lowercase().as_str()) {
+            return self.error_response(400, &format!("Unsupported codec: {}", req.codec));
+        }
+
+        // Validate quality
+        let valid_qualities = ["low", "medium", "high", "lossless"];
+        if !valid_qualities.contains(&req.quality.to_lowercase().as_str()) {
+            // Allow numeric CRF values
+            if req.quality.parse::<u8>().is_err() {
+                return self.error_response(400, &format!("Invalid quality: {}", req.quality));
+            }
+        }
+
+        // Validate scale
+        if req.scale != 2 && req.scale != 4 {
+            return self.error_response(400, "Scale must be 2 or 4");
+        }
+
+        // Deduct credit
+        let api_key = self.extract_header(request, "x-api-key").unwrap_or_default();
+        if !api_key.is_empty() && !self.consume_credit_for_user(&api_key) {
+            return self.error_response(402, "No credits remaining");
+        }
+
+        // Generate job ID
+        let job_id = self.generate_job_id();
+
+        // Estimate input size from base64 length
+        let input_file_size = (req.video_data.len() as u64) * 3 / 4;
+
+        // Create job entry
+        let job = JobInfo {
+            id: job_id.clone(),
+            status: JobStatus::Pending,
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            updated_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            result_url: None,
+            result_data: None,
+            error: None,
+            model: Some(req.model.clone()),
+            input_size: None,
+            output_size: None,
+            webhook_delivery: None,
+            org_id: {
+                if let Ok(db) = self.org_db.lock() {
+                    db.user_org_id(&api_key).cloned()
+                } else {
+                    None
+                }
+            },
+            input_file_size: Some(input_file_size),
+            output_file_size: None,
+            scale_factor: Some(req.scale),
+            input_data: None,
+        };
+
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.insert(job_id.clone(), job);
+        } else {
+            return self.error_response(500, "Failed to acquire job lock");
+        }
+
+        // Mark as processing in background
+        let jobs = Arc::clone(&self.jobs);
+        let job_id_bg = job_id.clone();
+
+        thread::spawn(move || {
+            // Update status to processing
+            if let Ok(mut jobs_guard) = jobs.lock() {
+                if let Some(job) = jobs_guard.get_mut(&job_id_bg) {
+                    job.status = JobStatus::Processing;
+                    job.updated_at = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                }
+            }
+
+            // Video processing is long-running; write input to a temp file,
+            // invoke the VideoProcessor, then base64-encode the output.
+            let result: std::result::Result<String, SrganError> = (|| {
+                use crate::video::{VideoProcessor, VideoConfig, VideoCodec, VideoQuality};
+                use std::fs;
+
+                let video_bytes = general_purpose::STANDARD.decode(&req.video_data)
+                    .map_err(|e| SrganError::InvalidInput(format!("Invalid base64: {}", e)))?;
+
+                let temp_dir = std::env::temp_dir().join(format!("srgan_video_{}", job_id_bg));
+                fs::create_dir_all(&temp_dir).map_err(SrganError::Io)?;
+
+                let input_path = temp_dir.join("input.mp4");
+                let output_path = temp_dir.join("output.mp4");
+                fs::write(&input_path, &video_bytes).map_err(SrganError::Io)?;
+
+                let codec = match req.codec.to_lowercase().as_str() {
+                    "h265" | "hevc" => VideoCodec::H265,
+                    "vp9" => VideoCodec::VP9,
+                    "av1" => VideoCodec::AV1,
+                    "prores" => VideoCodec::ProRes,
+                    _ => VideoCodec::H264,
+                };
+
+                let quality = match req.quality.to_lowercase().as_str() {
+                    "low" => VideoQuality::Low,
+                    "high" => VideoQuality::High,
+                    "lossless" => VideoQuality::Lossless,
+                    other => other.parse::<u8>()
+                        .map(VideoQuality::Custom)
+                        .unwrap_or(VideoQuality::Medium),
+                };
+
+                let config = VideoConfig {
+                    input_path: input_path.clone(),
+                    output_path: output_path.clone(),
+                    model_path: None,
+                    fps: req.fps,
+                    quality,
+                    codec,
+                    preserve_audio: req.preserve_audio,
+                    parallel_frames: 4,
+                    temp_dir: Some(temp_dir.clone()),
+                    start_time: None,
+                    duration: None,
+                };
+
+                let mut processor = VideoProcessor::new(config)?;
+
+                // Load the network
+                let network = match req.model.as_str() {
+                    "anime" => crate::UpscalingNetwork::load_builtin_anime()?,
+                    _ => crate::UpscalingNetwork::load_builtin_natural()?,
+                };
+                processor.load_network(network);
+                processor.process()?;
+
+                // Read output and encode
+                let output_bytes = fs::read(&output_path).map_err(SrganError::Io)?;
+                let encoded = general_purpose::STANDARD.encode(&output_bytes);
+
+                // Cleanup temp files (best effort)
+                let _ = fs::remove_dir_all(&temp_dir);
+
+                Ok(encoded)
+            })();
+
+            // Update job with result
+            if let Ok(mut jobs_guard) = jobs.lock() {
+                if let Some(job) = jobs_guard.get_mut(&job_id_bg) {
+                    match result {
+                        Ok(data) => {
+                            job.status = JobStatus::Completed;
+                            job.result_data = Some(data);
+                        }
+                        Err(e) => {
+                            job.status = JobStatus::Failed(format!("{}", e));
+                            job.error = Some(format!("{}", e));
+                        }
+                    }
+                    job.updated_at = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                }
+            }
+        });
+
+        // Return job info
+        let response = serde_json::json!({
+            "job_id": job_id,
+            "status": "pending",
+            "type": "video_upscale",
+            "check_url": format!("/api/v1/job/{}", job_id),
+        });
+
+        format!(
+            "HTTP/1.1 202 Accepted\r\nContent-Type: application/json\r\n\r\n{}",
+            response
+        )
+    }
+
     /// Handle job status check
     fn handle_job_status(&self, path: &str) -> String {
         let job_id = path.trim_start_matches("/api/job/");

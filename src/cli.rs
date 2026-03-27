@@ -40,6 +40,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_completions_subcommand())
 		.subcommand(build_classify_subcommand())
 		.subcommand(build_batch_status_subcommand())
+		.subcommand(build_video_subcommand())
 		.get_matches()
 }
 
@@ -1211,6 +1212,134 @@ fn build_server_subcommand() -> App<'static, 'static> {
 			Arg::with_name("no-logging")
 				.help("Disable request logging")
 				.long("no-logging")
+				.takes_value(false),
+		)
+}
+
+fn build_video_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("video")
+		.about("Upscale a video file frame by frame")
+		.arg(
+			Arg::with_name("input")
+				.help("Input video file path")
+				.long("input")
+				.short("i")
+				.required(true)
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("output")
+				.help("Output video file path")
+				.long("output")
+				.short("o")
+				.required(true)
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("parameters")
+				.help("The name of a parameter set to use")
+				.short("p")
+				.long("parameters")
+				.takes_value(true)
+				.default_value("natural")
+				.possible_values(&["natural", "anime"]),
+		)
+		.arg(
+			Arg::with_name("custom")
+				.help("Path to a custom model file (.rsr)")
+				.short("c")
+				.long("custom")
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("scale")
+				.help("Upscaling factor")
+				.long("scale")
+				.takes_value(true)
+				.default_value("4")
+				.possible_values(&["2", "4"]),
+		)
+		.arg(
+			Arg::with_name("fps")
+				.help("Override output frame rate")
+				.long("fps")
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("quality")
+				.help("Output quality preset or CRF value")
+				.long("quality")
+				.short("q")
+				.takes_value(true)
+				.default_value("medium"),
+		)
+		.arg(
+			Arg::with_name("codec")
+				.help("Output video codec")
+				.long("codec")
+				.takes_value(true)
+				.default_value("h264")
+				.possible_values(&["h264", "h265", "vp9", "av1", "prores"]),
+		)
+		.arg(
+			Arg::with_name("preserve-audio")
+				.help("Preserve the original audio track (default: true)")
+				.long("preserve-audio")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("no-audio")
+				.help("Strip audio from the output")
+				.long("no-audio")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("parallel")
+				.help("Number of frames to process in parallel")
+				.long("parallel")
+				.takes_value(true)
+				.default_value("4"),
+		)
+		.arg(
+			Arg::with_name("temp-dir")
+				.help("Temporary directory for extracted frames")
+				.long("temp-dir")
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("start")
+				.help("Start time (e.g. 00:01:30 or 90)")
+				.long("start")
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("duration")
+				.help("Duration to process (e.g. 00:00:30 or 30)")
+				.long("duration")
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("preview")
+				.help("Generate a preview frame before processing")
+				.long("preview")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("preview-only")
+				.help("Only generate a preview frame, skip full processing")
+				.long("preview-only")
+				.takes_value(false),
+		)
+		.arg(
+			Arg::with_name("preview-time")
+				.help("Timestamp for preview frame extraction")
+				.long("preview-time")
+				.takes_value(true),
+		)
+		.arg(
+			Arg::with_name("overwrite")
+				.help("Overwrite existing output files")
+				.long("overwrite")
 				.takes_value(false),
 		)
 }
