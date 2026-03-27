@@ -68,6 +68,9 @@ pub mod cdn;
 pub mod web;
 pub mod rate_limit_dashboard;
 pub mod stripe_dunning;
+pub mod docs;
+pub mod webhook_docs;
+pub mod sdk_docs;
 pub mod web_server;
 pub mod web_server_improved;
 

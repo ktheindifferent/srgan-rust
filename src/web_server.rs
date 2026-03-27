@@ -648,6 +648,9 @@ impl WebServer {
                 ("GET", "/") | ("GET", "/landing") => self.handle_landing_page(),
                 ("GET", "/app") => self.handle_public_ui(),
                 ("GET", "/docs") => self.handle_docs_page(),
+                ("GET", "/docs/openapi.json") => self.handle_openapi_spec(),
+                ("GET", "/docs/webhooks") => self.handle_webhook_docs_page(),
+                ("GET", "/docs/sdk") => self.handle_sdk_docs_page(),
                 ("GET", "/pricing") => self.handle_pricing_page(),
                 ("GET", "/demo") => self.handle_demo_page(),
                 ("GET", "/preview") => self.handle_wasm_preview_page(),
@@ -1444,9 +1447,36 @@ impl WebServer {
         )
     }
 
-    /// GET /docs — API documentation page
+    /// GET /docs — full API reference page
     fn handle_docs_page(&self) -> String {
         let html = crate::web::docs::render_docs_page();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET /docs/openapi.json — OpenAPI 3.0 specification
+    fn handle_openapi_spec(&self) -> String {
+        let json = crate::docs::render_openapi_spec();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            json.len(), json
+        )
+    }
+
+    /// GET /docs/webhooks — webhook documentation and test UI
+    fn handle_webhook_docs_page(&self) -> String {
+        let html = crate::webhook_docs::render_webhook_docs_page();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET /docs/sdk — SDK reference page
+    fn handle_sdk_docs_page(&self) -> String {
+        let html = crate::sdk_docs::render_sdk_docs_page();
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
             html.len(), html
