@@ -53,6 +53,7 @@ pub mod network;
 pub mod parallel;
 pub mod psnr;
 pub mod quality;
+pub mod referral;
 pub mod ssim;
 pub mod profiling;
 pub mod thread_safe_network;

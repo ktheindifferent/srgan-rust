@@ -17,6 +17,7 @@ use crate::api::middleware::TierRateLimiter;
 use crate::api::rate_limit_dashboard::RateLimitDashboard;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
 use crate::rate_limit_dashboard::KeyUsageDashboard;
+use crate::referral::ReferralStore;
 use crate::stripe_dunning::StripeDunningManager;
 use crate::storage::S3Config;
 
@@ -101,6 +102,16 @@ fn format_uptime(secs: u64) -> String {
         format!("{}h {}m", hours, mins)
     } else {
         format!("{}m {}s", mins, secs % 60)
+    }
+}
+
+fn format_byte_size(bytes: u64) -> String {
+    if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
     }
 }
 
@@ -442,6 +453,8 @@ pub struct WebServer {
     model_version_registry: Arc<crate::model_versioning::ModelVersionRegistry>,
     /// Named model version store (CRUD for srgan-v1, real-esrgan-v1, etc.)
     model_version_store: Arc<crate::model_version::ModelVersionStore>,
+    /// Affiliate / referral system
+    pub referral_store: Arc<ReferralStore>,
 }
 
 /// Cached result
@@ -531,9 +544,10 @@ impl WebServer {
             stripe_dunning: Arc::new(Mutex::new(StripeDunningManager::new())),
             model_version_registry,
             model_version_store: Arc::new(crate::model_version::ModelVersionStore::new()),
+            referral_store: Arc::new(ReferralStore::new()),
         })
     }
-    
+
     /// Start the web server
     pub fn start(&self) -> Result<(), SrganError> {
         let addr: SocketAddr = format!("{}:{}", self.config.host, self.config.port)
@@ -562,6 +576,11 @@ impl WebServer {
         info!("  GET  /api/v1/admin/keys      - Per-key rate limit dashboard (JSON)");
         info!("  GET  /api/v1/analytics/usage  - Usage analytics (per API key)");
         info!("  POST /webhooks/stripe        - Stripe webhook endpoint");
+        info!("  POST /api/v1/referrals/code   - Generate referral code");
+        info!("  GET  /api/v1/referrals/validate/:code - Validate referral code");
+        info!("  POST /api/v1/referrals/signup  - Record referral signup");
+        info!("  GET  /api/v1/referrals/stats   - Referral stats");
+        info!("  POST /api/v1/referrals/redeem  - Redeem referral credits");
         info!("  (Legacy /api/* routes also supported)");
         
         if let Some(ref _api_key) = self.config.api_key {
@@ -721,6 +740,7 @@ impl WebServer {
                 ("GET", "/demo") => self.handle_wasm_demo_page(),
                 ("GET", "/preview") => self.handle_wasm_preview_page(),
                 ("GET", "/dashboard") => self.handle_root_dashboard(),
+                ("GET", "/dashboard/user") => self.handle_user_dashboard(&request),
                 ("GET", "/dashboard/jobs") => self.handle_jobs_dashboard(),
                 ("GET", "/admin") => self.handle_admin_panel(),
                 ("GET", "/api/me") => self.handle_api_me(&request),
@@ -795,6 +815,13 @@ impl WebServer {
                 _ if method == "GET" && path.starts_with("/compare/") => self.handle_compare_viewer(path),
                 _ if method == "GET" && path.starts_with("/v1/models/") => self.handle_get_model_version(path),
                 _ if method == "DELETE" && path.starts_with("/v1/models/") => self.handle_delete_model_version(path),
+                // Referral / affiliate endpoints
+                ("POST", "/api/v1/referrals/code") => self.handle_referral_generate_code(&request),
+                ("POST", "/api/v1/referrals/signup") => self.handle_referral_signup(&request),
+                ("POST", "/api/v1/referrals/redeem") => self.handle_referral_redeem(&request),
+                ("GET", "/api/v1/referrals/stats") => self.handle_referral_stats(&request),
+                _ if method == "GET"
+                    && path.starts_with("/api/v1/referrals/validate/") => self.handle_referral_validate(path),
                 _ => self.handle_not_found(),
             };
 
@@ -1030,6 +1057,142 @@ impl WebServer {
             "HTTP/1.1 204 No Content\r\n\r\n".to_string()
         } else {
             self.error_response(404, &format!("Model '{}' not found", id))
+        }
+    }
+
+    // ── Referral / affiliate handlers ────────────────────────────────────────
+
+    /// POST /api/v1/referrals/code - generate a new referral code
+    fn handle_referral_generate_code(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+
+        #[derive(Deserialize)]
+        struct Req {
+            user_id: String,
+            #[serde(default = "default_discount")]
+            discount_pct: u8,
+            #[serde(default = "default_commission")]
+            commission_pct: u8,
+        }
+        fn default_discount() -> u8 { 20 }
+        fn default_commission() -> u8 { 10 }
+
+        match serde_json::from_str::<Req>(&body) {
+            Ok(req) => {
+                match self.referral_store.generate_code(
+                    &req.user_id,
+                    req.discount_pct,
+                    req.commission_pct,
+                ) {
+                    Ok(code) => {
+                        let json = serde_json::to_string(&code).unwrap_or_default();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                            json
+                        )
+                    }
+                    Err(e) => self.error_response(500, &format!("{}", e)),
+                }
+            }
+            Err(e) => self.error_response(400, &format!("Invalid request: {}", e)),
+        }
+    }
+
+    /// GET /api/v1/referrals/validate/:code
+    fn handle_referral_validate(&self, path: &str) -> String {
+        let code = path.trim_start_matches("/api/v1/referrals/validate/");
+        if code.is_empty() {
+            return self.error_response(400, "Missing referral code");
+        }
+        match self.referral_store.validate_code(code) {
+            Some(rc) => {
+                let json = serde_json::to_string(&rc).unwrap_or_default();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    json
+                )
+            }
+            None => self.error_response(404, "Invalid or inactive referral code"),
+        }
+    }
+
+    /// POST /api/v1/referrals/signup - record a referral signup
+    fn handle_referral_signup(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+
+        #[derive(Deserialize)]
+        struct Req {
+            code: String,
+            referred_user_id: String,
+        }
+
+        match serde_json::from_str::<Req>(&body) {
+            Ok(req) => {
+                match self.referral_store.record_signup(&req.code, &req.referred_user_id) {
+                    Ok(signup) => {
+                        // Automatically credit the referrer
+                        let _ = self.referral_store.credit_referrer(&signup.id);
+                        let json = serde_json::to_string(&signup).unwrap_or_default();
+                        format!(
+                            "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{}",
+                            json
+                        )
+                    }
+                    Err(e) => self.error_response(400, &format!("{}", e)),
+                }
+            }
+            Err(e) => self.error_response(400, &format!("Invalid request: {}", e)),
+        }
+    }
+
+    /// GET /api/v1/referrals/stats - get referral stats for a user
+    fn handle_referral_stats(&self, request: &str) -> String {
+        let user_id = self
+            .extract_header(request, "x-user-id")
+            .or_else(|| self.extract_query_param(request, "user_id"));
+
+        match user_id {
+            Some(uid) => {
+                let stats = self.referral_store.get_referral_stats(&uid);
+                let json = serde_json::to_string(&stats).unwrap_or_default();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    json
+                )
+            }
+            None => self.error_response(400, "Missing user_id query param or x-user-id header"),
+        }
+    }
+
+    /// POST /api/v1/referrals/redeem - redeem referral credits
+    fn handle_referral_redeem(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+
+        #[derive(Deserialize)]
+        struct Req {
+            user_id: String,
+            amount: f64,
+        }
+
+        #[derive(Serialize)]
+        struct Resp {
+            new_balance: f64,
+        }
+
+        match serde_json::from_str::<Req>(&body) {
+            Ok(req) => {
+                match self.referral_store.redeem_credits(&req.user_id, req.amount) {
+                    Ok(new_balance) => {
+                        let json = serde_json::to_string(&Resp { new_balance }).unwrap_or_default();
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                            json
+                        )
+                    }
+                    Err(e) => self.error_response(400, &format!("{}", e)),
+                }
+            }
+            Err(e) => self.error_response(400, &format!("Invalid request: {}", e)),
         }
     }
 
@@ -3002,6 +3165,21 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
         )
     }
     
+    /// Generate a JSON success response with the given status and serializable body.
+    fn json_response<T: serde::Serialize>(&self, status: u16, body: &T) -> String {
+        let status_text = match status {
+            200 => "OK",
+            201 => "Created",
+            204 => "No Content",
+            _ => "OK",
+        };
+        let json = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
+        format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n\r\n{}",
+            status, status_text, json
+        )
+    }
+
     /// Extract body from HTTP request
     fn extract_body(&self, request: &str) -> String {
         if let Some(idx) = request.find("\r\n\r\n") {
@@ -5652,19 +5830,76 @@ setInterval(refreshAll, 5000);
             return;
         }
 
-        // --- progress: 10 events, 200 ms apart → ~2 s total ---
-        for i in 1u8..=10 {
-            thread::sleep(Duration::from_millis(200));
-            let percent = i * 10;
-            if !write_event(
-                &mut stream,
-                serde_json::json!({
-                    "event": "progress",
-                    "job_id": job_id,
-                    "percent": percent
-                }),
-            ) {
-                return;
+        // --- poll real job progress every 500 ms, up to 10 min ---
+        let max_polls = 10 * 60 * 1000 / 500; // 1200 polls × 500 ms = 10 minutes
+        for _ in 0..max_polls {
+            thread::sleep(Duration::from_millis(500));
+
+            let (status, progress, frames_processed, total_frames) = {
+                let jobs = self.jobs.lock().unwrap();
+                match jobs.get(&job_id) {
+                    Some(job) => (
+                        job.status.clone(),
+                        job.progress,
+                        job.frames_processed,
+                        job.total_frames,
+                    ),
+                    None => {
+                        // Job disappeared from the map
+                        write_event(
+                            &mut stream,
+                            serde_json::json!({
+                                "event": "error",
+                                "job_id": job_id,
+                                "message": "Job not found"
+                            }),
+                        );
+                        return;
+                    }
+                }
+            };
+
+            match &status {
+                JobStatus::Failed(msg) => {
+                    write_event(
+                        &mut stream,
+                        serde_json::json!({
+                            "event": "error",
+                            "job_id": job_id,
+                            "message": msg
+                        }),
+                    );
+                    return;
+                }
+                JobStatus::Completed => {
+                    // Send a final 100% progress before the done event
+                    write_event(
+                        &mut stream,
+                        serde_json::json!({
+                            "event": "progress",
+                            "job_id": job_id,
+                            "percent": 100,
+                            "frames_processed": frames_processed,
+                            "total_frames": total_frames
+                        }),
+                    );
+                    break;
+                }
+                _ => {
+                    // Pending or Processing – send current progress
+                    if !write_event(
+                        &mut stream,
+                        serde_json::json!({
+                            "event": "progress",
+                            "job_id": job_id,
+                            "percent": progress.unwrap_or(0),
+                            "frames_processed": frames_processed,
+                            "total_frames": total_frames
+                        }),
+                    ) {
+                        return;
+                    }
+                }
             }
         }
 
@@ -5969,7 +6204,8 @@ td{padding:.45rem .7rem;vertical-align:middle;white-space:nowrap}
         }
 
         // Fetch PSNR/SSIM and image data from the job store
-        let (input_b64, result_b64, psnr_val, ssim_val, model_used) =
+        let (input_b64, result_b64, psnr_val, ssim_val, model_used,
+             input_dims, output_dims, in_file_sz, out_file_sz, proc_time, scale_str) =
             if let Ok(jobs) = self.jobs.lock() {
                 if let Some(job) = jobs.get(job_id) {
                     let inp = match &job.input_data {
@@ -6024,7 +6260,18 @@ td{padding:.45rem .7rem;vertical-align:middle;white-space:nowrap}
                         }
                     }
 
-                    (inp, res, psnr, ssim, job.model.clone().unwrap_or_else(|| "unknown".to_string()))
+                    let input_dims = job.input_size.clone().unwrap_or_else(|| "N/A".to_string());
+                    let output_dims = job.output_size.clone().unwrap_or_else(|| "N/A".to_string());
+                    let in_file_sz = job.input_file_size.map(|s| format_byte_size(s)).unwrap_or_else(|| "N/A".to_string());
+                    let out_file_sz = job.output_file_size.map(|s| format_byte_size(s)).unwrap_or_else(|| "N/A".to_string());
+                    let proc_time = if job.updated_at > job.created_at {
+                        let elapsed = job.updated_at - job.created_at;
+                        if elapsed >= 60 {{ format!("{}m {}s", elapsed / 60, elapsed % 60) }}
+                        else {{ format!("{}s", elapsed) }}
+                    } else {{ "N/A".to_string() }};
+                    let scale = job.scale_factor.map(|s| format!("{}x", s)).unwrap_or_else(|| "N/A".to_string());
+                    (inp, res, psnr, ssim, job.model.clone().unwrap_or_else(|| "unknown".to_string()),
+                     input_dims, output_dims, in_file_sz, out_file_sz, proc_time, scale)
                 } else {
                     return self.error_response(404, "Job not found");
                 }
@@ -6071,6 +6318,15 @@ h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
 .zoom-btn{{background:var(--bg2);border:1px solid var(--border);color:var(--text);border-radius:4px;
   padding:.3rem .6rem;cursor:pointer;font-family:var(--font);font-size:.8rem}}
 .zoom-btn:hover{{border-color:var(--accent)}}
+.zoom-btn.active{{border-color:var(--accent);background:rgba(0,212,255,.15)}}
+.dl-row{{margin-top:.8rem;display:flex;gap:.5rem;align-items:center}}
+.dl-btn{{display:inline-block;background:var(--bg2);border:1px solid var(--border);color:var(--accent);
+  border-radius:4px;padding:.35rem .8rem;cursor:pointer;font-family:var(--font);font-size:.8rem;
+  text-decoration:none;transition:border-color .15s}}
+.dl-btn:hover{{border-color:var(--accent);background:rgba(0,212,255,.1)}}
+.magnifier{{position:absolute;width:160px;height:160px;border-radius:50%;border:2px solid var(--accent);
+  pointer-events:none;z-index:20;display:none;background-repeat:no-repeat;
+  box-shadow:0 0 12px rgba(0,212,255,.35)}}
 .footer{{text-align:center;color:var(--muted);font-size:.72rem;margin-top:1.2rem}}
 </style>
 </head>
@@ -6087,6 +6343,12 @@ h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
     <div class="stat"><div class="stat-val">{psnr}</div><div class="stat-lbl">PSNR</div></div>
     <div class="stat"><div class="stat-val">{ssim}</div><div class="stat-lbl">SSIM</div></div>
     <div class="stat"><div class="stat-val">{model}</div><div class="stat-lbl">Model</div></div>
+    <div class="stat"><div class="stat-val">{scale}</div><div class="stat-lbl">Scale</div></div>
+    <div class="stat"><div class="stat-val">{input_dims}</div><div class="stat-lbl">Input Dims</div></div>
+    <div class="stat"><div class="stat-val">{output_dims}</div><div class="stat-lbl">Output Dims</div></div>
+    <div class="stat"><div class="stat-val">{in_file_sz}</div><div class="stat-lbl">Input Size</div></div>
+    <div class="stat"><div class="stat-val">{out_file_sz}</div><div class="stat-lbl">Output Size</div></div>
+    <div class="stat"><div class="stat-val">{proc_time}</div><div class="stat-lbl">Processing Time</div></div>
   </div>
 
   <div class="compare-container" id="cmp">
@@ -6098,6 +6360,8 @@ h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
     <div class="slider-handle" id="sliderHandle" style="left:50%"></div>
     <div class="label label-before">Original</div>
     <div class="label label-after">Upscaled</div>
+    <div class="magnifier" id="magBefore"></div>
+    <div class="magnifier" id="magAfter"></div>
   </div>
 
   <div class="zoom-controls">
@@ -6105,8 +6369,13 @@ h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
     <span id="zoomLevel" style="color:var(--muted);font-size:.78rem">100%</span>
     <button class="zoom-btn" onclick="zoom(1)">+ Zoom</button>
     <button class="zoom-btn" onclick="resetZoom()">Reset</button>
+    <button class="zoom-btn" id="magToggle" onclick="toggleMagnifier()">Magnifier</button>
   </div>
-  <div class="footer">Drag the slider to compare — scroll to zoom, drag to pan</div>
+  <div class="dl-row">
+    <a class="dl-btn" id="dlOriginal" href="data:image/png;base64,{input_b64}" download="original_{job_id}.png">Download Original</a>
+    <a class="dl-btn" id="dlUpscaled" href="data:image/png;base64,{result_b64}" download="upscaled_{job_id}.png">Download Upscaled</a>
+  </div>
+  <div class="footer">Drag the slider to compare — scroll to zoom, drag to pan — toggle magnifier for 3x lens</div>
 </div>
 
 <script>
@@ -6160,6 +6429,62 @@ h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
     cmp.style.transform=t;cmp.style.transformOrigin='center center';
   }}
 }})();
+
+(function(){{
+  var magOn=false;
+  var magBefore=document.getElementById('magBefore');
+  var magAfter=document.getElementById('magAfter');
+  var imgBefore=document.getElementById('imgBefore');
+  var imgAfter=document.getElementById('imgAfter');
+  var cmp=document.getElementById('cmp');
+  var magSize=160;
+  var magZoom=3;
+
+  window.toggleMagnifier=function(){{
+    magOn=!magOn;
+    var btn=document.getElementById('magToggle');
+    if(magOn){{btn.classList.add('active');}}else{{btn.classList.remove('active');
+      magBefore.style.display='none';magAfter.style.display='none';}}
+  }};
+
+  cmp.addEventListener('mousemove',function(e){{
+    if(!magOn) return;
+    var rect=cmp.getBoundingClientRect();
+    var x=e.clientX-rect.left;
+    var y=e.clientY-rect.top;
+    var imgW=rect.width;
+    var imgH=rect.height;
+    var halfMag=magSize/2;
+    var bgW=imgW*magZoom;
+    var bgH=imgH*magZoom;
+    var bgX=-(x*magZoom-halfMag);
+    var bgY=-(y*magZoom-halfMag);
+
+    magBefore.style.display='block';
+    magBefore.style.left=(x-halfMag)+'px';
+    magBefore.style.top=(y-halfMag)+'px';
+    magBefore.style.backgroundImage='url('+imgBefore.src+')';
+    magBefore.style.backgroundSize=bgW+'px '+bgH+'px';
+    magBefore.style.backgroundPosition=bgX+'px '+bgY+'px';
+
+    magAfter.style.display='block';
+    magAfter.style.left=(x-halfMag)+'px';
+    magAfter.style.top=(y-halfMag)+'px';
+    magAfter.style.backgroundImage='url('+imgAfter.src+')';
+    magAfter.style.backgroundSize=bgW+'px '+bgH+'px';
+    magAfter.style.backgroundPosition=bgX+'px '+bgY+'px';
+
+    // Show before-magnifier on the left side of slider, after on the right
+    var sliderPct=parseFloat(document.getElementById('sliderLine').style.left)||50;
+    var sliderX=imgW*sliderPct/100;
+    if(x<sliderX){{magAfter.style.display='none';}}
+    else{{magBefore.style.display='none';}}
+  }});
+
+  cmp.addEventListener('mouseleave',function(){{
+    magBefore.style.display='none';magAfter.style.display='none';
+  }});
+}})();
 </script>
 </body>
 </html>"##,
@@ -6169,8 +6494,61 @@ h1{{font-size:1.1rem;color:var(--accent);font-weight:700;margin-bottom:.8rem}}
             model = model_used,
             input_b64 = input_b64,
             result_b64 = result_b64,
+            input_dims = input_dims,
+            output_dims = output_dims,
+            in_file_sz = in_file_sz,
+            out_file_sz = out_file_sz,
+            proc_time = proc_time,
+            scale = scale_str,
         );
 
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+            html
+        )
+    }
+
+    /// Extract API key from request headers (X-Api-Key) or query string (?api_key=...).
+    fn extract_api_key(&self, request: &str) -> Option<String> {
+        if let Some(key) = self.extract_header(request, "x-api-key") {
+            return Some(key);
+        }
+        // Fallback: check query string for ?api_key=...
+        if let Some(query_start) = request.find('?') {
+            let query_end = request[query_start..].find(' ').map(|i| query_start + i).unwrap_or(request.len());
+            let query = &request[query_start + 1..query_end];
+            for param in query.split('&') {
+                if let Some(val) = param.strip_prefix("api_key=") {
+                    if !val.is_empty() {
+                        return Some(val.to_string());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+
+    /// GET /dashboard/user — per-user usage dashboard
+    fn handle_user_dashboard(&self, request: &str) -> String {
+        let api_key = self.extract_api_key(request);
+        let html = format!(r#"<!DOCTYPE html><html><head><title>My Dashboard</title>
+<style>body{{font-family:sans-serif;background:#0d1117;color:#e6edf3;padding:2rem}}
+h1{{color:#58a6ff}}table{{width:100%;border-collapse:collapse}}
+th,td{{padding:.5rem 1rem;border:1px solid #30363d;text-align:left}}
+th{{background:#161b22}}.stat{{background:#161b22;border-radius:8px;padding:1rem;margin:.5rem;display:inline-block;min-width:160px}}
+</style></head><body>
+<h1>My Account Dashboard</h1>
+<div><div class="stat"><b>API Key</b><br/><code>{}</code></div></div>
+<h2>Usage This Month</h2>
+<table><tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Images Processed</td><td>—</td></tr>
+<tr><td>Pixels Upscaled</td><td>—</td></tr>
+<tr><td>Avg Inference Time</td><td>—</td></tr>
+<tr><td>Storage Used</td><td>—</td></tr>
+</table>
+<p style="margin-top:2rem;color:#8b949e">Full analytics available via <code>GET /api/v1/analytics/usage</code></p>
+</body></html>"#, api_key.as_deref().unwrap_or("(not provided)"));
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
             html

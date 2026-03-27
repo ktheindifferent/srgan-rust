@@ -1,6 +1,8 @@
 use crate::error::{Result, SrganError};
 use ndarray::ArrayD;
+use serde::Serialize;
 use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::collections::HashMap;
 
@@ -51,10 +53,10 @@ impl GpuBackend {
 }
 
 pub struct GpuDevice {
-    backend: GpuBackend,
-    device_id: usize,
-    memory_mb: usize,
-    name: String,
+    pub backend: GpuBackend,
+    pub device_id: usize,
+    pub memory_mb: usize,
+    pub name: String,
 }
 
 impl GpuDevice {
@@ -69,6 +71,22 @@ impl GpuDevice {
 
     pub fn list_devices() -> Vec<GpuDevice> {
         let mut devices = vec![Self::cpu()];
+
+        // Detect mock CUDA devices from environment variable
+        let cuda_ids_str = std::env::var("SRGAN_CUDA_DEVICES")
+            .unwrap_or_else(|_| "0,1".to_string());
+        for id_str in cuda_ids_str.split(',') {
+            if let Ok(id) = id_str.trim().parse::<usize>() {
+                devices.push(GpuDevice {
+                    backend: GpuBackend::Cuda,
+                    device_id: id,
+                    memory_mb: 24576, // 24 GB
+                    name: format!("NVIDIA RTX 4090 (Mock) [{}]", id),
+                });
+            }
+        }
+
+        // Detect Metal device on macOS
         #[cfg(target_os = "macos")]
         {
             devices.push(GpuDevice {
@@ -78,6 +96,7 @@ impl GpuDevice {
                 name: "Apple Metal GPU".to_string(),
             });
         }
+
         devices
     }
 
@@ -378,6 +397,253 @@ mod vulkan {
     
     pub fn get_vulkan_devices() -> Vec<GpuDevice> {
         vec![]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Multi-GPU support: device pool, health tracking, round-robin assignment
+// ---------------------------------------------------------------------------
+
+/// Status of a GPU device.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub enum DeviceStatus {
+    Healthy,
+    Degraded,
+    Failed,
+}
+
+impl fmt::Display for DeviceStatus {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            DeviceStatus::Healthy => write!(f, "Healthy"),
+            DeviceStatus::Degraded => write!(f, "Degraded"),
+            DeviceStatus::Failed => write!(f, "Failed"),
+        }
+    }
+}
+
+/// Runtime health information for a single GPU device.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceHealth {
+    pub device_id: usize,
+    pub device_name: String,
+    pub backend: String, // serialized backend name
+    pub status: DeviceStatus,
+    pub temperature_c: Option<f32>,
+    pub utilization_pct: Option<f32>,
+    pub memory_used_mb: usize,
+    pub memory_total_mb: usize,
+    pub jobs_completed: u64,
+    pub jobs_failed: u64,
+    pub last_error: Option<String>,
+    pub last_checked: u64, // unix timestamp
+}
+
+/// Serializable snapshot of device health, suitable for API responses.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeviceHealthSnapshot {
+    pub device_id: usize,
+    pub device_name: String,
+    pub backend: String,
+    pub status: String,
+    pub temperature_c: Option<f32>,
+    pub utilization_pct: Option<f32>,
+    pub memory_used_mb: usize,
+    pub memory_total_mb: usize,
+    pub jobs_completed: u64,
+    pub jobs_failed: u64,
+    pub last_error: Option<String>,
+    pub last_checked: u64,
+}
+
+impl From<&DeviceHealth> for DeviceHealthSnapshot {
+    fn from(h: &DeviceHealth) -> Self {
+        DeviceHealthSnapshot {
+            device_id: h.device_id,
+            device_name: h.device_name.clone(),
+            backend: h.backend.clone(),
+            status: h.status.to_string(),
+            temperature_c: h.temperature_c,
+            utilization_pct: h.utilization_pct,
+            memory_used_mb: h.memory_used_mb,
+            memory_total_mb: h.memory_total_mb,
+            jobs_completed: h.jobs_completed,
+            jobs_failed: h.jobs_failed,
+            last_error: h.last_error.clone(),
+            last_checked: h.last_checked,
+        }
+    }
+}
+
+/// A pool of GPU devices with round-robin job assignment and health tracking.
+pub struct GpuDevicePool {
+    devices: Vec<Arc<GpuDevice>>,
+    next_device: Arc<AtomicUsize>,
+    health: Arc<RwLock<HashMap<usize, DeviceHealth>>>,
+}
+
+impl GpuDevicePool {
+    /// Create a new device pool from a list of devices.
+    pub fn new(devices: Vec<GpuDevice>) -> Self {
+        let mut health_map = HashMap::new();
+        let arc_devices: Vec<Arc<GpuDevice>> = devices
+            .into_iter()
+            .enumerate()
+            .map(|(idx, dev)| {
+                health_map.insert(idx, DeviceHealth {
+                    device_id: idx,
+                    device_name: dev.name.clone(),
+                    backend: dev.backend.to_string(),
+                    status: DeviceStatus::Healthy,
+                    temperature_c: None,
+                    utilization_pct: None,
+                    memory_used_mb: 0,
+                    memory_total_mb: dev.memory_mb,
+                    jobs_completed: 0,
+                    jobs_failed: 0,
+                    last_error: None,
+                    last_checked: Self::unix_timestamp(),
+                });
+                Arc::new(dev)
+            })
+            .collect();
+
+        GpuDevicePool {
+            devices: arc_devices,
+            next_device: Arc::new(AtomicUsize::new(0)),
+            health: Arc::new(RwLock::new(health_map)),
+        }
+    }
+
+    /// Return the next healthy device using round-robin selection.
+    /// Skips devices whose status is `Failed`. Returns the first healthy
+    /// device found, or the first device if all are unhealthy.
+    pub fn next(&self) -> Arc<GpuDevice> {
+        let len = self.devices.len();
+        if len == 0 {
+            panic!("GpuDevicePool has no devices");
+        }
+
+        let health = self.health.read().expect("Device health lock poisoned");
+        let start = self.next_device.fetch_add(1, Ordering::Relaxed) % len;
+
+        // Try to find a healthy device starting from `start`.
+        for offset in 0..len {
+            let idx = (start + offset) % len;
+            if let Some(h) = health.get(&idx) {
+                if h.status != DeviceStatus::Failed {
+                    // Advance counter past any skipped devices.
+                    if offset > 0 {
+                        self.next_device.fetch_add(offset, Ordering::Relaxed);
+                    }
+                    return Arc::clone(&self.devices[idx]);
+                }
+            } else {
+                // No health entry means we haven't marked it, treat as healthy.
+                return Arc::clone(&self.devices[idx]);
+            }
+        }
+
+        // All devices are failed; return the one at `start` anyway (caller
+        // should handle errors).
+        Arc::clone(&self.devices[start % len])
+    }
+
+    /// Return a snapshot of all device health information.
+    pub fn health_snapshot(&self) -> Vec<DeviceHealthSnapshot> {
+        let health = self.health.read().expect("Device health lock poisoned");
+        let mut snapshots: Vec<DeviceHealthSnapshot> = health
+            .values()
+            .map(DeviceHealthSnapshot::from)
+            .collect();
+        snapshots.sort_by_key(|s| s.device_id);
+        snapshots
+    }
+
+    /// Mark a device as unhealthy (Failed) with a reason string.
+    pub fn mark_unhealthy(&self, device_id: usize, reason: &str) {
+        let mut health = self.health.write().expect("Device health lock poisoned");
+        if let Some(h) = health.get_mut(&device_id) {
+            h.status = DeviceStatus::Failed;
+            h.last_error = Some(reason.to_string());
+            h.jobs_failed += 1;
+            h.last_checked = Self::unix_timestamp();
+        }
+    }
+
+    /// Mark a device as healthy, clearing any previous error.
+    pub fn mark_healthy(&self, device_id: usize) {
+        let mut health = self.health.write().expect("Device health lock poisoned");
+        if let Some(h) = health.get_mut(&device_id) {
+            h.status = DeviceStatus::Healthy;
+            h.last_error = None;
+            h.last_checked = Self::unix_timestamp();
+        }
+    }
+
+    /// Simulate polling device health. Generates realistic mock values for
+    /// temperature, utilization, and memory usage.
+    pub fn poll_device_health(&self) {
+        let mut health = self.health.write().expect("Device health lock poisoned");
+        let now = Self::unix_timestamp();
+
+        for (idx, h) in health.iter_mut() {
+            // Use a simple deterministic-ish source seeded from timestamp + id
+            // to produce varying but plausible mock values.
+            let seed = now.wrapping_add(*idx as u64);
+
+            // Temperature: 45-85 C (skip for CPU backend)
+            if h.backend != "CPU" {
+                let temp = 45.0 + ((seed % 401) as f32) / 10.0; // 45.0 .. 85.0
+                h.temperature_c = Some(temp);
+
+                // Mark as degraded if temperature is very high
+                if temp > 80.0 && h.status == DeviceStatus::Healthy {
+                    h.status = DeviceStatus::Degraded;
+                }
+            }
+
+            // Utilization: 0-100%
+            if h.backend != "CPU" {
+                let util = ((seed.wrapping_mul(31) % 1001) as f32) / 10.0; // 0.0 .. 100.0
+                h.utilization_pct = Some(util);
+            }
+
+            // Memory usage: simulate as fraction of total
+            if h.memory_total_mb > 0 {
+                let frac = ((seed.wrapping_mul(17) % 100) as f32) / 100.0;
+                h.memory_used_mb = (h.memory_total_mb as f32 * frac) as usize;
+            }
+
+            h.last_checked = now;
+        }
+    }
+
+    /// Record a successfully completed job for a device.
+    pub fn record_job_completed(&self, device_id: usize) {
+        let mut health = self.health.write().expect("Device health lock poisoned");
+        if let Some(h) = health.get_mut(&device_id) {
+            h.jobs_completed += 1;
+            h.last_checked = Self::unix_timestamp();
+        }
+    }
+
+    /// Number of devices in the pool.
+    pub fn len(&self) -> usize {
+        self.devices.len()
+    }
+
+    /// Whether the pool is empty.
+    pub fn is_empty(&self) -> bool {
+        self.devices.is_empty()
+    }
+
+    /// Helper: current unix timestamp in seconds.
+    fn unix_timestamp() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
     }
 }
 
