@@ -61,9 +61,10 @@ fn build_parameters_arg() -> Arg<'static, 'static> {
 		.help(
 			"Sets which built-in parameters to use with the neural net. Default: natural\n\
              Values: natural, anime, bilinear, waifu2x\n\
-             Waifu2x variants (noise-level + scale): waifu2x-noise{0..3}-scale{1,2}\n\
+             Waifu2x variants: waifu2x-anime (anime/cartoon), waifu2x-photo (photo denoise+upscale)\n\
+             Waifu2x fine-tuned (noise-level + scale): waifu2x-noise{0..3}-scale{1,2}\n\
              Real-ESRGAN variants: real-esrgan (×4 photos), real-esrgan-anime (×4 anime), real-esrgan-x2 (×2 photos)\n\
-             Examples: waifu2x, waifu2x-noise1-scale2, real-esrgan, real-esrgan-anime",
+             Examples: waifu2x-anime, waifu2x-photo, waifu2x-noise1-scale2, real-esrgan",
 		)
 		.short("p")
 		.long("parameters")
@@ -73,6 +74,8 @@ fn build_parameters_arg() -> Arg<'static, 'static> {
 			"anime",
 			"bilinear",
 			"waifu2x",
+			"waifu2x-anime",
+			"waifu2x-photo",
 			"waifu2x-noise0-scale1",
 			"waifu2x-noise0-scale2",
 			"waifu2x-noise1-scale1",

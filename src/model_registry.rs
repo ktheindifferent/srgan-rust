@@ -131,6 +131,26 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             builtin: true,
         },
         RegistryEntry {
+            name: "waifu2x-anime".to_string(),
+            display_name: "Waifu2x Anime".to_string(),
+            model_type: ModelType::Waifu2x,
+            scale_factors: vec![2],
+            description: "Waifu2x optimised for anime/cartoon content — noise=1, scale=2×, anime style sharpening (built-in)"
+                .to_string(),
+            weight_path: String::new(),
+            builtin: true,
+        },
+        RegistryEntry {
+            name: "waifu2x-photo".to_string(),
+            display_name: "Waifu2x Photo".to_string(),
+            model_type: ModelType::Waifu2x,
+            scale_factors: vec![2],
+            description: "Waifu2x optimised for photographs — noise=2, scale=2×, photo-tuned denoise+upscale (built-in)"
+                .to_string(),
+            weight_path: String::new(),
+            builtin: true,
+        },
+        RegistryEntry {
             name: "real-esrgan".to_string(),
             display_name: "Real-ESRGAN ×4".to_string(),
             model_type: ModelType::Esrgan,

@@ -329,12 +329,12 @@ impl UpscalingNetwork {
 			.map_err(|e| crate::error::SrganError::Network(e))
 	}
 
-	/// Accepts labels: [natural, natural_L1, natural_rgb, anime, anime_L1, bilinear,
-	///                   waifu2x, waifu2x-noise{0..3}-scale{1,2}]
+	/// Accepts labels: [natural, anime, bilinear,
+	///                   waifu2x, waifu2x-anime, waifu2x-photo,
+	///                   waifu2x-noise{0..3}-scale{1,2}]
 	///
-	/// Waifu2x labels (`"waifu2x"` and `"waifu2x-noise{N}-scale{M}"`) currently
-	/// fall back to the built-in anime model.
-	/// TODO: replace with real waifu2x weights once weight conversion is implemented.
+	/// Waifu2x labels fall back to the built-in anime/natural model when
+	/// native waifu2x weight files are not available on disk.
 	pub fn from_label(label: &str, bilinear_factor: Option<usize>) -> ::std::result::Result<Self, String> {
 		match label {
 			"natural" => {
@@ -433,11 +433,17 @@ impl UpscalingNetwork {
 						}
 					}
 				} else {
-					// No CNN weights — use built-in anime model as proxy.
-					let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
+					// No CNN weights — use built-in proxy model.
+					// Photo style uses the natural model; anime/artwork use the anime model.
+					let (proxy_params, proxy_name) = if wnet.style() == crate::config::Waifu2xStyle::Photo {
+						(L1_SRGB_NATURAL_PARAMS, "natural")
+					} else {
+						(L1_SRGB_ANIME_PARAMS, "anime")
+					};
+					let desc = network_from_bytes(proxy_params)?;
 					let display = format!(
-						"waifu2x-compat ({}) — backed by anime model (no waifu2x weights on disk)",
-						label
+						"waifu2x-compat ({}) — backed by {} model (no waifu2x weights on disk)",
+						label, proxy_name
 					);
 					Ok(UpscalingNetwork {
 						graph: inference_sr_net(

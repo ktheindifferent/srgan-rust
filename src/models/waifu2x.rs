@@ -102,11 +102,16 @@ impl Waifu2xVariant {
 
     /// Attempt to parse a label string into a `Waifu2xVariant`.
     ///
-    /// Accepts `"waifu2x"` (returns the default variant) or
+    /// Accepts `"waifu2x"` (returns the default variant),
+    /// `"waifu2x-anime"` (noise=1, scale=2),
+    /// `"waifu2x-photo"` (noise=2, scale=2), or
     /// `"waifu2x-noise{N}-scale{M}"`.
     pub fn from_label(label: &str) -> Option<Self> {
-        if label == "waifu2x" {
+        if label == "waifu2x" || label == "waifu2x-anime" {
             return Some(Self::default_variant());
+        }
+        if label == "waifu2x-photo" {
+            return Some(Self { noise_level: 2, scale: 2 });
         }
         let rest = label.strip_prefix("waifu2x-")?;
         let parts: Vec<&str> = rest.split('-').collect();

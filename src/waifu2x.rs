@@ -434,11 +434,21 @@ fn unsharp_mask(img: &image::DynamicImage, amount: f32) -> image::DynamicImage {
 /// Parse a waifu2x label into a [`Waifu2xConfig`].
 ///
 /// Accepted formats:
-/// - `"waifu2x"` → noise=1, scale=2 (defaults)
+/// - `"waifu2x"` → noise=1, scale=2, style=Anime (defaults)
+/// - `"waifu2x-anime"` → noise=1, scale=2, style=Anime
+/// - `"waifu2x-photo"` → noise=2, scale=2, style=Photo
 /// - `"waifu2x-noise{0..3}-scale{1,2}"` → explicit parameters
 fn parse_label(label: &str) -> Result<Waifu2xConfig> {
     if label == "waifu2x" {
         return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::default() });
+    }
+
+    // Style-based convenience labels
+    if label == "waifu2x-anime" {
+        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::Anime });
+    }
+    if label == "waifu2x-photo" {
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 2, style: Waifu2xStyle::Photo });
     }
 
     if let Some(rest) = label.strip_prefix("waifu2x-") {
@@ -460,8 +470,8 @@ fn parse_label(label: &str) -> Result<Waifu2xConfig> {
     }
 
     Err(SrganError::Network(format!(
-        "invalid waifu2x label '{}'; expected 'waifu2x' or \
-         'waifu2x-noise{{0..3}}-scale{{1,2}}'",
+        "invalid waifu2x label '{}'; expected 'waifu2x', 'waifu2x-anime', \
+         'waifu2x-photo', or 'waifu2x-noise{{0..3}}-scale{{1,2}}'",
         label
     )))
 }
@@ -471,6 +481,8 @@ fn parse_label(label: &str) -> Result<Waifu2xConfig> {
 /// All canonical waifu2x labels accepted by the CLI and API.
 pub const WAIFU2X_LABELS: &[&str] = &[
     "waifu2x",
+    "waifu2x-anime",
+    "waifu2x-photo",
     "waifu2x-noise0-scale1",
     "waifu2x-noise0-scale2",
     "waifu2x-noise1-scale1",
@@ -506,6 +518,22 @@ mod tests {
         let c = parse_label("waifu2x-noise3-scale2").unwrap();
         assert_eq!(c.noise_level, 3);
         assert_eq!(c.scale, 2);
+    }
+
+    #[test]
+    fn parse_anime_label() {
+        let c = parse_label("waifu2x-anime").unwrap();
+        assert_eq!(c.noise_level, 1);
+        assert_eq!(c.scale, 2);
+        assert_eq!(c.style, Waifu2xStyle::Anime);
+    }
+
+    #[test]
+    fn parse_photo_label() {
+        let c = parse_label("waifu2x-photo").unwrap();
+        assert_eq!(c.noise_level, 2);
+        assert_eq!(c.scale, 2);
+        assert_eq!(c.style, Waifu2xStyle::Photo);
     }
 
     #[test]
@@ -589,6 +617,26 @@ mod tests {
                 assert_eq!(result.height(), 10, "height mismatch for {}", label);
             }
         }
+    }
+
+    #[test]
+    fn compat_anime_label_upscales() {
+        let net = Waifu2xNetwork::from_label("waifu2x-anime").unwrap();
+        assert_eq!(net.style(), Waifu2xStyle::Anime);
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 32);
+        assert_eq!(result.height(), 32);
+    }
+
+    #[test]
+    fn compat_photo_label_upscales() {
+        let net = Waifu2xNetwork::from_label("waifu2x-photo").unwrap();
+        assert_eq!(net.style(), Waifu2xStyle::Photo);
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 32);
+        assert_eq!(result.height(), 32);
     }
 
     #[test]
