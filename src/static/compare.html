@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Image Comparison — SRGAN Rust</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,monospace;background:#0d1117;color:#c9d1d9;min-height:100vh;display:flex;flex-direction:column;align-items:center}
+header{width:100%;background:#161b22;border-bottom:1px solid #30363d;padding:16px 24px;text-align:center}
+header h1{font-size:20px;font-weight:600;color:#58a6ff}
+.container{max-width:1000px;width:100%;padding:24px;flex:1}
+.compare-wrapper{position:relative;width:100%;overflow:hidden;border:1px solid #30363d;border-radius:8px;cursor:col-resize;user-select:none;-webkit-user-select:none;background:#161b22}
+.compare-wrapper img{display:block;width:100%;height:auto}
+.img-before,.img-after{position:absolute;top:0;left:0;width:100%;height:100%}
+.img-after{z-index:1}
+.img-before{z-index:2;overflow:hidden;width:50%}
+.img-before img,.img-after img{width:100%;height:100%;object-fit:contain}
+.slider-line{position:absolute;top:0;bottom:0;width:3px;background:#58a6ff;z-index:3;left:50%;transform:translateX(-50%);pointer-events:none}
+.slider-handle{position:absolute;top:50%;left:50%;width:40px;height:40px;border-radius:50%;background:#58a6ff;border:3px solid #fff;z-index:4;transform:translate(-50%,-50%);cursor:col-resize;display:flex;align-items:center;justify-content:center}
+.slider-handle::before{content:'\2194';color:#fff;font-size:18px;font-weight:700}
+.labels{display:flex;justify-content:space-between;padding:12px 0;font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:1px}
+.error{text-align:center;padding:60px 24px;color:#f85149;font-size:16px}
+.hint{text-align:center;color:#484f58;font-size:12px;margin-top:16px}
+</style>
+</head>
+<body>
+<header><h1>Image Comparison</h1></header>
+<div class="container" id="app"></div>
+<script>
+(function(){
+  var params = new URLSearchParams(window.location.search);
+  var original = params.get('original');
+  var upscaled = params.get('upscaled');
+  var app = document.getElementById('app');
+
+  if(!original || !upscaled){
+    app.innerHTML = '<div class="error">Missing query params.<br><code>?original=URL&amp;upscaled=URL</code></div>';
+    return;
+  }
+
+  app.innerHTML =
+    '<div class="labels"><span>Original</span><span>Upscaled</span></div>' +
+    '<div class="compare-wrapper" id="cw">' +
+      '<div class="img-after"><img id="imgAfter" alt="Upscaled"></div>' +
+      '<div class="img-before" id="before"><img id="imgBefore" alt="Original"></div>' +
+      '<div class="slider-line" id="line"></div>' +
+      '<div class="slider-handle" id="handle"></div>' +
+    '</div>' +
+    '<p class="hint">Drag the slider to compare original vs upscaled</p>';
+
+  var imgBefore = document.getElementById('imgBefore');
+  var imgAfter = document.getElementById('imgAfter');
+  imgBefore.src = original;
+  imgAfter.src = original; // placeholder until after loads
+  imgAfter.src = upscaled;
+
+  var cw = document.getElementById('cw');
+  var before = document.getElementById('before');
+  var line = document.getElementById('line');
+  var handle = document.getElementById('handle');
+  var dragging = false;
+
+  function setPosition(pct){
+    pct = Math.max(0, Math.min(100, pct));
+    before.style.width = pct + '%';
+    line.style.left = pct + '%';
+    handle.style.left = pct + '%';
+  }
+
+  function getPercent(e){
+    var rect = cw.getBoundingClientRect();
+    var x = (e.touches ? e.touches[0].clientX : e.clientX) - rect.left;
+    return (x / rect.width) * 100;
+  }
+
+  cw.addEventListener('mousedown', function(e){ dragging = true; setPosition(getPercent(e)); });
+  cw.addEventListener('touchstart', function(e){ dragging = true; setPosition(getPercent(e)); }, {passive:true});
+  window.addEventListener('mousemove', function(e){ if(dragging) setPosition(getPercent(e)); });
+  window.addEventListener('touchmove', function(e){ if(dragging) setPosition(getPercent(e)); }, {passive:true});
+  window.addEventListener('mouseup', function(){ dragging = false; });
+  window.addEventListener('touchend', function(){ dragging = false; });
+})();
+</script>
+</body>
+</html>
