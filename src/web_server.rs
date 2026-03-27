@@ -518,6 +518,8 @@ impl WebServer {
         info!("  GET  /admin                  - Admin dashboard (HTML)");
         info!("  GET  /api/admin/stats        - Admin analytics (JSON)");
         info!("  GET  /api/admin/users        - User listing (JSON)");
+        info!("  GET  /api/v1/admin/keys      - Per-key rate limit dashboard (JSON)");
+        info!("  POST /webhooks/stripe        - Stripe webhook endpoint");
         info!("  (Legacy /api/* routes also supported)");
         
         if let Some(ref _api_key) = self.config.api_key {
@@ -1554,12 +1556,14 @@ function refresh(){
     fetch('/api/admin/users',{headers:h}).then(function(r){return r.ok?r.json():null;}),
     fetch('/api/v1/stats',{headers:h}).then(function(r){return r.ok?r.json():null;}),
     fetch('/api/v1/jobs',{headers:h}).then(function(r){return r.ok?r.json():null;}),
-    fetch('/api/admin/stats',{headers:h}).then(function(r){return r.ok?r.json():null;})
+    fetch('/api/admin/stats',{headers:h}).then(function(r){return r.ok?r.json():null;}),
+    fetch('/api/v1/admin/keys',{headers:h}).then(function(r){return r.ok?r.json():null;})
   ]).then(function(res){
     if(res[0])renderUsers(res[0].users||[]);
     if(res[1])renderMetrics(res[1]);
     if(res[2])renderJobs(res[2].jobs||[]);
     if(res[3])renderAdminStats(res[3]);
+    if(res[4])renderKeys(res[4].keys||[]);
   }).catch(function(){});
 }
 
@@ -1664,6 +1668,23 @@ function renderEndpointMetrics(metrics){
   });
   html+='</tbody></table>';
   document.getElementById('metricsTbl').innerHTML=html;
+}
+
+function renderKeys(keys){
+  if(!keys.length){document.getElementById('keysTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No API keys</div>';return;}
+  var html='<table><thead><tr><th>Key ID</th><th>Plan</th><th>Usage Today</th><th>Daily Quota</th><th>Status</th></tr></thead><tbody>';
+  keys.forEach(function(k){
+    var stCls=k.status==='active'?'bc':'bf';
+    html+='<tr>'
+      +'<td><code>'+(k.key_id||k.user_id.slice(0,8)+'...')+'</code></td>'
+      +'<td><span class="badge tier-'+k.tier+'">'+k.tier+'</span></td>'
+      +'<td>'+(k.credits_consumed_today||0)+'</td>'
+      +'<td>'+(k.daily_quota||'–')+'</td>'
+      +'<td><span class="badge '+stCls+'">'+(k.status||'active')+'</span></td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('keysTbl').innerHTML=html;
 }
 </script>
 </body>
