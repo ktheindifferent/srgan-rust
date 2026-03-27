@@ -440,6 +440,8 @@ pub struct WebServer {
     stripe_dunning: Arc<Mutex<StripeDunningManager>>,
     /// Model version registry (v1=2x, v2=4x, v3=8x)
     model_version_registry: Arc<crate::model_versioning::ModelVersionRegistry>,
+    /// Named model version store (CRUD for srgan-v1, real-esrgan-v1, etc.)
+    model_version_store: Arc<crate::model_version::ModelVersionStore>,
 }
 
 /// Cached result
@@ -528,6 +530,7 @@ impl WebServer {
             key_usage_dashboard: Arc::new(Mutex::new(KeyUsageDashboard::new())),
             stripe_dunning: Arc::new(Mutex::new(StripeDunningManager::new())),
             model_version_registry,
+            model_version_store: Arc::new(crate::model_version::ModelVersionStore::new()),
         })
     }
     
@@ -708,8 +711,10 @@ impl WebServer {
             let response = match (method, path) {
                 ("GET", "/") | ("GET", "/landing") => self.handle_landing_page(),
                 ("GET", "/app") => self.handle_public_ui(),
-                ("GET", "/docs") => self.handle_docs_page(),
+                ("GET", "/docs") => self.handle_swagger_ui(),
+                ("GET", "/docs/legacy") => self.handle_docs_page(),
                 ("GET", "/docs/openapi.json") => self.handle_openapi_spec(),
+                ("GET", "/openapi.json") => self.handle_openapi_json(),
                 ("GET", "/docs/webhooks") => self.handle_webhook_docs_page(),
                 ("GET", "/docs/sdk") => self.handle_sdk_docs_page(),
                 ("GET", "/pricing") => self.handle_pricing_page(),
@@ -724,6 +729,8 @@ impl WebServer {
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
                 ("GET", "/api/v1/models/versions") => self.handle_model_versions(),
+                ("GET", "/v1/models") => self.handle_list_model_versions(),
+                ("POST", "/v1/models") => self.handle_create_model_version(&request),
                 ("GET", "/api/v1/stats") => self.handle_stats(),
                 ("GET", "/api/v1/jobs") | ("GET", "/api/jobs") => self.handle_jobs(&request),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
@@ -786,6 +793,8 @@ impl WebServer {
                     && (path.starts_with("/api/jobs/") || path.starts_with("/api/v1/jobs/"))
                     && path.ends_with("/cancel") => self.handle_cancel_job(path),
                 _ if method == "GET" && path.starts_with("/compare/") => self.handle_compare_viewer(path),
+                _ if method == "GET" && path.starts_with("/v1/models/") => self.handle_get_model_version(path),
+                _ if method == "DELETE" && path.starts_with("/v1/models/") => self.handle_delete_model_version(path),
                 _ => self.handle_not_found(),
             };
 
@@ -951,6 +960,77 @@ impl WebServer {
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
             response
         )
+    }
+
+    /// GET /docs — Swagger UI page.
+    fn handle_swagger_ui(&self) -> String {
+        let html = crate::openapi::render_swagger_ui();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET /openapi.json — full OpenAPI 3.0 spec (new module).
+    fn handle_openapi_json(&self) -> String {
+        let json = crate::openapi::render_openapi_json();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            json.len(), json
+        )
+    }
+
+    /// GET /v1/models — list all registered model versions.
+    fn handle_list_model_versions(&self) -> String {
+        let models = self.model_version_store.list();
+        let json = serde_json::to_string(&models).unwrap_or_else(|_| "[]".into());
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            json
+        )
+    }
+
+    /// GET /v1/models/{id} — get a single model version.
+    fn handle_get_model_version(&self, path: &str) -> String {
+        let id = path.trim_start_matches("/v1/models/");
+        match self.model_version_store.get(id) {
+            Some(model) => {
+                let json = serde_json::to_string(&model).unwrap_or_default();
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    json
+                )
+            }
+            None => self.error_response(404, &format!("Model '{}' not found", id)),
+        }
+    }
+
+    /// POST /v1/models — create a new model version (admin).
+    fn handle_create_model_version(&self, request: &str) -> String {
+        let body = self.extract_body(request);
+        match serde_json::from_str::<crate::model_version::CreateModelVersionRequest>(&body) {
+            Ok(req) => match self.model_version_store.create(req) {
+                Ok(model) => {
+                    let json = serde_json::to_string(&model).unwrap_or_default();
+                    format!(
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n\r\n{}",
+                        json
+                    )
+                }
+                Err(e) => self.error_response(409, &e),
+            },
+            Err(e) => self.error_response(400, &format!("Invalid request: {}", e)),
+        }
+    }
+
+    /// DELETE /v1/models/{id} — delete a model version.
+    fn handle_delete_model_version(&self, path: &str) -> String {
+        let id = path.trim_start_matches("/v1/models/");
+        if self.model_version_store.delete(id) {
+            "HTTP/1.1 204 No Content\r\n\r\n".to_string()
+        } else {
+            self.error_response(404, &format!("Model '{}' not found", id))
+        }
     }
 
     /// Handle synchronous upscale
