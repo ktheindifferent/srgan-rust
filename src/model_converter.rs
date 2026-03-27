@@ -16,6 +16,8 @@ mod pytorch;
 mod tensorflow;
 #[path = "model_converter/onnx_simple.rs"]
 mod onnx;
+#[path = "model_converter/onnx_loader.rs"]
+pub mod onnx_loader;
 #[path = "model_converter/common.rs"]
 mod common;
 #[cfg(feature = "keras-support")]

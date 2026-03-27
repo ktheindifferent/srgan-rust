@@ -32,6 +32,7 @@ fn main() {
 		("server", Some(sub_m)) => commands::start_server(sub_m),
 		("models", Some(sub_m)) => commands::models_command(sub_m),
 		("download-model", Some(sub_m)) => commands::download_model(sub_m),
+		("download-models", Some(sub_m)) => commands::download_models(sub_m),
 		("compare", Some(sub_m)) => commands::compare(sub_m),
 		("classify", Some(sub_m)) => commands::classify(sub_m),
 		("batch-status", Some(sub_m)) => commands::batch_status(sub_m),

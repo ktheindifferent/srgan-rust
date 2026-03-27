@@ -34,6 +34,7 @@ pub fn build_cli() -> ArgMatches<'static> {
 		.subcommand(build_analyze_memory_subcommand())
 		.subcommand(build_server_subcommand())
 		.subcommand(build_download_model_subcommand())
+		.subcommand(build_download_models_subcommand())
 		.subcommand(build_models_subcommand())
 		.subcommand(build_compare_subcommand())
 		.subcommand(build_completions_subcommand())
@@ -87,6 +88,7 @@ fn build_parameters_arg() -> Arg<'static, 'static> {
 			"real-esrgan",
 			"real-esrgan-anime",
 			"real-esrgan-x2",
+			"real-esrgan-x4",
 		])
 		.empty_values(false)
 }
@@ -97,7 +99,7 @@ fn build_custom_arg() -> Arg<'static, 'static> {
 		.short("c")
 		.long("custom")
 		.value_name("PARAMETER_FILE")
-		.help("Sets a custom parameter file (.rsr) to use with the neural net")
+		.help("Sets a custom parameter file to use with the neural net (.rsr, .onnx, or .pth)")
 		.empty_values(false)
 }
 
@@ -280,7 +282,7 @@ fn build_batch_subcommand() -> App<'static, 'static> {
 				.short("c")
 				.long("custom")
 				.value_name("PARAMETER_FILE")
-				.help("Sets a custom parameter file (.rsr) to use with the neural net")
+				.help("Sets a custom parameter file to use with the neural net (.rsr, .onnx, or .pth)")
 				.empty_values(false),
 		)
 		.arg(
@@ -920,6 +922,50 @@ fn build_analyze_memory_subcommand() -> App<'static, 'static> {
 				.short("i")
 				.long("interval")
 				.default_value("100"),
+		)
+}
+
+fn build_download_models_subcommand() -> App<'static, 'static> {
+	SubCommand::with_name("download-models")
+		.about("Fetch Real-ESRGAN ONNX weights and built-in models to disk")
+		.long_about(
+			"Download pre-trained model weights to the local models directory.\n\n\
+			 By default, downloads all available models (built-in .rsr + ONNX).\n\
+			 Use --name to download a specific model.\n\
+			 Use --url to override the download URL (e.g. for a local mirror).\n\
+			 If the URL is unreachable, synthetic test weights are generated.\n\n\
+			 Examples:\n\
+			 \x20 srgan download-models --list\n\
+			 \x20 srgan download-models\n\
+			 \x20 srgan download-models --name real-esrgan-x4\n\
+			 \x20 srgan download-models --url http://localhost:8080/models/",
+		)
+		.arg(
+			Arg::with_name("name")
+				.help("Download only this model (omit to download all)")
+				.short("n")
+				.long("name")
+				.value_name("MODEL"),
+		)
+		.arg(
+			Arg::with_name("dir")
+				.help("Directory to save models (default: ~/.srgan/models/)")
+				.short("d")
+				.long("dir")
+				.value_name("DIR"),
+		)
+		.arg(
+			Arg::with_name("url")
+				.help("Override the download URL for ONNX models")
+				.long("url")
+				.value_name("URL"),
+		)
+		.arg(
+			Arg::with_name("list")
+				.help("List all available models and exit")
+				.short("l")
+				.long("list")
+				.takes_value(false),
 		)
 }
 

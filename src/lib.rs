@@ -461,14 +461,27 @@ impl UpscalingNetwork {
 					})
 				}
 			},
-			// Real-ESRGAN: three variants, currently backed by built-in proxy models.
-		// TODO: replace with dedicated Real-ESRGAN weights once ONNX → .rsr
-		//       conversion is available.
-		label if label == "real-esrgan" || label == "real-esrgan-x2" => {
+			// Real-ESRGAN: try loading ONNX weights from the models directory,
+		// falling back to built-in proxy models if not available.
+		label if label == "real-esrgan" || label == "real-esrgan-x2" || label == "real-esrgan-x4" => {
+			let onnx_name = if label == "real-esrgan" { "real-esrgan-x4" } else { label };
+			let onnx_filename = format!("{}.onnx", onnx_name);
+			let onnx_path = model_downloader::default_onnx_models_dir().join(&onnx_filename);
+
+			if onnx_path.exists() {
+				match Self::load_from_file(&onnx_path) {
+					Ok(net) => return Ok(net),
+					Err(e) => {
+						log::warn!("Failed to load ONNX weights from {}: {}", onnx_path.display(), e);
+					}
+				}
+			}
+
+			// Fallback to built-in natural model
 			let desc = network_from_bytes(L1_SRGB_NATURAL_PARAMS)?;
 			let display = format!(
-				"{} (backed by built-in natural model — TODO: real Real-ESRGAN weights)",
-				label
+				"{} (built-in natural model fallback, download ONNX weights for {})",
+				label, onnx_name
 			);
 			Ok(UpscalingNetwork {
 				graph: inference_sr_net(
@@ -483,9 +496,20 @@ impl UpscalingNetwork {
 			})
 		},
 		"real-esrgan-anime" => {
+			let onnx_path = model_downloader::default_onnx_models_dir().join("real-esrgan-anime.onnx");
+
+			if onnx_path.exists() {
+				match Self::load_from_file(&onnx_path) {
+					Ok(net) => return Ok(net),
+					Err(e) => {
+						log::warn!("Failed to load ONNX weights from {}: {}", onnx_path.display(), e);
+					}
+				}
+			}
+
 			let desc = network_from_bytes(L1_SRGB_ANIME_PARAMS)?;
 			let display =
-				"real-esrgan-anime (backed by built-in anime model — TODO: real Real-ESRGAN-Anime weights)"
+				"real-esrgan-anime (built-in anime model fallback, download ONNX weights for real-esrgan-anime)"
 					.to_string();
 			Ok(UpscalingNetwork {
 				graph: inference_sr_net(
@@ -507,22 +531,71 @@ impl UpscalingNetwork {
 		(&self.graph, &self.parameters)
 	}
 	
-	/// Load network from file
+	/// Load network from file, auto-detecting the format (.rsr, .onnx, .pth).
+	///
+	/// - `.rsr` / `.bin`: native SRGAN-Rust format (XZ-compressed bincode).
+	/// - `.onnx`: ONNX protobuf — weights are extracted from graph initializers
+	///   and mapped into the inference graph.
+	/// - `.pth` / `.pt`: PyTorch checkpoint — converted on load via the model
+	///   converter pipeline.
 	pub fn load_from_file(path: &std::path::Path) -> ::std::result::Result<Self, crate::error::SrganError> {
 		use std::fs::File;
 		use std::io::Read;
-		
+
+		let format = crate::model_downloader::detect_model_format(path);
+
 		let mut file = File::open(path)
-			.map_err(|e| crate::error::SrganError::Io(e))?;
+			.map_err(crate::error::SrganError::Io)?;
 		let mut data = Vec::new();
 		file.read_to_end(&mut data)
-			.map_err(|e| crate::error::SrganError::Io(e))?;
-			
-		let desc = network_from_bytes(&data)
-			.map_err(|e| crate::error::SrganError::Network(e))?;
-			
-		Self::new(desc, "custom network")
-			.map_err(|e| crate::error::SrganError::Network(e))
+			.map_err(crate::error::SrganError::Io)?;
+
+		// If extension was ambiguous, try content-based detection
+		let format = if format == crate::model_downloader::ModelFileFormat::Unknown {
+			crate::model_downloader::detect_model_format_from_bytes(&data)
+		} else {
+			format
+		};
+
+		match format {
+			crate::model_downloader::ModelFileFormat::Rsr | crate::model_downloader::ModelFileFormat::Unknown => {
+				// Native .rsr format
+				let desc = network_from_bytes(&data)
+					.map_err(crate::error::SrganError::Network)?;
+				Self::new(desc, &format!("custom network from {}", path.display()))
+					.map_err(crate::error::SrganError::Network)
+			}
+			crate::model_downloader::ModelFileFormat::Onnx => {
+				Self::load_from_onnx_bytes(&data, path)
+			}
+			crate::model_downloader::ModelFileFormat::PyTorch => {
+				Self::load_from_pytorch(path)
+			}
+		}
+	}
+
+	/// Load network weights from ONNX protobuf bytes.
+	///
+	/// Extracts initializer tensors from the ONNX graph and converts them into
+	/// `ndarray::ArrayD<f32>` parameters that the alumina inference graph can
+	/// consume.
+	fn load_from_onnx_bytes(data: &[u8], path: &std::path::Path) -> ::std::result::Result<Self, crate::error::SrganError> {
+		use crate::model_converter::onnx_loader;
+
+		let (desc, display) = onnx_loader::load_onnx_as_network_description(data)
+			.map_err(crate::error::SrganError::Network)?;
+
+		let display = format!("{} (from {})", display, path.display());
+		Self::new(desc, &display)
+			.map_err(crate::error::SrganError::Network)
+	}
+
+	/// Load network from a PyTorch .pth/.pt file via the model converter.
+	fn load_from_pytorch(path: &std::path::Path) -> ::std::result::Result<Self, crate::error::SrganError> {
+		let mut converter = crate::model_converter::ModelConverter::new();
+		converter.load_pytorch(path)?;
+		let network = converter.convert_to_srgan()?;
+		Ok(network)
 	}
 	
 	/// Save network to file
