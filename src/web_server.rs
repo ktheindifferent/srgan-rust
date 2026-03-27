@@ -632,7 +632,10 @@ impl WebServer {
 
             // Route request
             let response = match (method, path) {
-                ("GET", "/") => self.handle_public_ui(),
+                ("GET", "/") | ("GET", "/landing") => self.handle_landing_page(),
+                ("GET", "/app") => self.handle_public_ui(),
+                ("GET", "/docs") => self.handle_docs_page(),
+                ("GET", "/pricing") => self.handle_pricing_page(),
                 ("GET", "/demo") => self.handle_demo_page(),
                 ("GET", "/preview") => self.handle_wasm_preview_page(),
                 ("GET", "/dashboard") => self.handle_root_dashboard(),
@@ -1190,6 +1193,33 @@ impl WebServer {
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
             HTML.len(), HTML
+        )
+    }
+
+    /// GET /docs — API documentation page
+    fn handle_docs_page(&self) -> String {
+        let html = crate::web::docs::render_docs_page();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET /pricing — pricing plans page
+    fn handle_pricing_page(&self) -> String {
+        let html = crate::web::docs::render_pricing_page();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
+        )
+    }
+
+    /// GET / or GET /landing — marketing landing page
+    fn handle_landing_page(&self) -> String {
+        let html = crate::web::docs::render_landing_page();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
+            html.len(), html
         )
     }
 
