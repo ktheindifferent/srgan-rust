@@ -185,13 +185,15 @@ impl PriorityJobQueue {
     /// Enqueue a new job and return its ID.
     pub fn enqueue(&self, job: JobRecord) -> String {
         let id = job.id.clone();
-        self.jobs.lock().unwrap().insert(id.clone(), job);
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.insert(id.clone(), job);
+        }
         id
     }
 
     /// Pop the highest-priority pending job (Enterprise > Pro > Free).
     pub fn pop_next(&self) -> Option<JobRecord> {
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = self.jobs.lock().ok()?;
         let id = jobs
             .values()
             .filter(|j| j.status == JobStatus::Pending)
@@ -203,7 +205,9 @@ impl PriorityJobQueue {
             job.started_at = Some(unix_now());
             let job = job.clone();
             // Record start instant for timeout tracking
-            self.timers.lock().unwrap().insert(id, Instant::now());
+            if let Ok(mut timers) = self.timers.lock() {
+                timers.insert(id, Instant::now());
+            }
             return Some(job);
         }
         None
@@ -212,7 +216,10 @@ impl PriorityJobQueue {
     /// Mark a job as completed (with result data) and fire the webhook if set.
     pub fn complete(&self, id: &str, result_data: String) {
         let webhook_config = {
-            let mut jobs = self.jobs.lock().unwrap();
+            let mut jobs = match self.jobs.lock() {
+                Ok(j) => j,
+                Err(_) => return,
+            };
             if let Some(job) = jobs.get_mut(id) {
                 job.status = JobStatus::Completed;
                 job.result_data = Some(result_data);
@@ -222,7 +229,9 @@ impl PriorityJobQueue {
                 None
             }
         };
-        self.timers.lock().unwrap().remove(id);
+        if let Ok(mut timers) = self.timers.lock() {
+            timers.remove(id);
+        }
         if let Some(config) = webhook_config {
             self.fire_webhook_with_retry(id, "completed", config);
         }
@@ -231,7 +240,10 @@ impl PriorityJobQueue {
     /// Mark a job as failed and fire the webhook if set.
     pub fn fail(&self, id: &str, reason: String) {
         let webhook_config = {
-            let mut jobs = self.jobs.lock().unwrap();
+            let mut jobs = match self.jobs.lock() {
+                Ok(j) => j,
+                Err(_) => return,
+            };
             if let Some(job) = jobs.get_mut(id) {
                 job.status = JobStatus::Failed(reason);
                 job.completed_at = Some(unix_now());
@@ -240,7 +252,9 @@ impl PriorityJobQueue {
                 None
             }
         };
-        self.timers.lock().unwrap().remove(id);
+        if let Ok(mut timers) = self.timers.lock() {
+            timers.remove(id);
+        }
         if let Some(config) = webhook_config {
             self.fire_webhook_with_retry(id, "failed", config);
         }
@@ -276,13 +290,16 @@ impl PriorityJobQueue {
 
     /// Get a snapshot of a job by ID.
     pub fn get(&self, id: &str) -> Option<JobRecord> {
-        self.jobs.lock().unwrap().get(id).cloned()
+        self.jobs.lock().ok()?.get(id).cloned()
     }
 
     /// Cancel jobs that have been processing longer than `JOB_TIMEOUT`.
     pub fn timeout_stale_jobs(&self) {
         let stale: Vec<String> = {
-            let timers = self.timers.lock().unwrap();
+            let timers = match self.timers.lock() {
+                Ok(t) => t,
+                Err(_) => return,
+            };
             timers
                 .iter()
                 .filter(|(_, start)| start.elapsed() > JOB_TIMEOUT)
@@ -291,19 +308,25 @@ impl PriorityJobQueue {
         };
 
         for id in stale {
-            let mut jobs = self.jobs.lock().unwrap();
-            if let Some(job) = jobs.get_mut(&id) {
-                job.status = JobStatus::TimedOut;
-                job.completed_at = Some(unix_now());
+            if let Ok(mut jobs) = self.jobs.lock() {
+                if let Some(job) = jobs.get_mut(&id) {
+                    job.status = JobStatus::TimedOut;
+                    job.completed_at = Some(unix_now());
+                }
             }
-            self.timers.lock().unwrap().remove(&id);
+            if let Ok(mut timers) = self.timers.lock() {
+                timers.remove(&id);
+            }
         }
     }
 
     /// Delete completed / failed / timed-out jobs older than `JOB_RETAIN`.
     pub fn cleanup_old_jobs(&self) {
         let cutoff = unix_now().saturating_sub(JOB_RETAIN.as_secs());
-        let mut jobs = self.jobs.lock().unwrap();
+        let mut jobs = match self.jobs.lock() {
+            Ok(j) => j,
+            Err(_) => return,
+        };
         jobs.retain(|_, job| {
             let is_terminal = matches!(
                 job.status,
@@ -319,7 +342,7 @@ impl PriorityJobQueue {
 
     /// List all jobs (used by GET /api/v1/jobs).
     pub fn all_jobs(&self) -> Vec<JobRecord> {
-        self.jobs.lock().unwrap().values().cloned().collect()
+        self.jobs.lock().map(|j| j.values().cloned().collect()).unwrap_or_default()
     }
 }
 

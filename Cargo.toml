@@ -95,6 +95,10 @@ path = "src/bin/upscale.rs"
 name = "srgan"
 path = "src/bin/srgan_cli.rs"
 
+[[bin]]
+name = "srgan-benchmark"
+path = "src/bin/benchmark.rs"
+
 [[bench]]
 name = "thread_safety_bench"
 harness = false

@@ -216,3 +216,295 @@ fn url_encode(s: &str) -> String {
     }
     out
 }
+
+// ── S3 Multipart Upload ──────────────────────────────────────────────────────
+
+/// Minimum part size for S3 multipart upload (5 MB).
+const MULTIPART_THRESHOLD: usize = 5 * 1024 * 1024;
+/// Part size for splitting large uploads (5 MB).
+const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
+
+/// Upload data to S3, automatically using multipart upload for files > 5 MB.
+/// Returns a presigned GET URL for the uploaded object.
+pub fn upload_result_auto(
+    config: &S3Config,
+    key: &str,
+    data: &[u8],
+    content_type: &str,
+) -> Result<String, String> {
+    if data.len() <= MULTIPART_THRESHOLD {
+        return upload_result(config, key, data, content_type);
+    }
+    multipart_upload(config, key, data, content_type)
+}
+
+/// Perform S3 multipart upload: initiate, upload parts in parallel, complete.
+fn multipart_upload(
+    config: &S3Config,
+    key: &str,
+    data: &[u8],
+    content_type: &str,
+) -> Result<String, String> {
+    let client = reqwest::blocking::Client::new();
+    let upload_id = initiate_multipart(config, &client, key, content_type)?;
+
+    // Split data into parts
+    let parts: Vec<&[u8]> = data.chunks(MULTIPART_PART_SIZE).collect();
+    let mut etags: Vec<(usize, String)> = Vec::with_capacity(parts.len());
+
+    // Upload parts (sequentially with blocking client; could use rayon for parallelism)
+    for (idx, part_data) in parts.iter().enumerate() {
+        let part_number = idx + 1;
+        let etag = upload_part(config, &client, key, &upload_id, part_number, part_data)?;
+        etags.push((part_number, etag));
+    }
+
+    // Complete multipart upload
+    complete_multipart(config, &client, key, &upload_id, &etags)?;
+
+    generate_presigned_url(config, key, 86400)
+}
+
+/// Initiate a multipart upload and return the UploadId.
+fn initiate_multipart(
+    config: &S3Config,
+    client: &reqwest::blocking::Client,
+    key: &str,
+    content_type: &str,
+) -> Result<String, String> {
+    let now = Utc::now();
+    let datetime = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.format("%Y%m%d").to_string();
+
+    let url = format!(
+        "{}/{}/{}?uploads",
+        config.endpoint.trim_end_matches('/'),
+        config.bucket,
+        key
+    );
+    let host = extract_host(&config.endpoint);
+    let content_sha256 = hex::encode(Sha256::digest(b""));
+
+    let canonical_uri = format!("/{}/{}", config.bucket, key);
+    let canonical_headers = format!(
+        "content-type:{}\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        content_type, host, content_sha256, datetime
+    );
+    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+    let canonical_request = format!(
+        "POST\n{}\nuploads=\n{}\n{}\n{}",
+        canonical_uri, canonical_headers, signed_headers, content_sha256
+    );
+
+    let signature = compute_signature(
+        &config.secret_key, &date, &config.region, "s3", &datetime, &canonical_request,
+    )?;
+
+    let credential_scope = format!("{}/{}/s3/aws4_request", date, config.region);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
+        config.access_key, credential_scope, signed_headers, signature
+    );
+
+    let response = client
+        .post(&url)
+        .header("Content-Type", content_type)
+        .header("x-amz-date", &datetime)
+        .header("x-amz-content-sha256", &content_sha256)
+        .header("Authorization", &authorization)
+        .send()
+        .map_err(|e| format!("Initiate multipart failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        return Err(format!("Initiate multipart returned HTTP {}: {}", status, body));
+    }
+
+    let body = response.text().unwrap_or_default();
+    // Parse UploadId from XML response
+    extract_xml_value(&body, "UploadId")
+        .ok_or_else(|| "Failed to parse UploadId from response".to_string())
+}
+
+/// Upload a single part of a multipart upload. Returns the ETag.
+fn upload_part(
+    config: &S3Config,
+    client: &reqwest::blocking::Client,
+    key: &str,
+    upload_id: &str,
+    part_number: usize,
+    data: &[u8],
+) -> Result<String, String> {
+    let now = Utc::now();
+    let datetime = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.format("%Y%m%d").to_string();
+
+    let url = format!(
+        "{}/{}/{}?partNumber={}&uploadId={}",
+        config.endpoint.trim_end_matches('/'),
+        config.bucket,
+        key,
+        part_number,
+        url_encode(upload_id)
+    );
+    let host = extract_host(&config.endpoint);
+    let content_sha256 = hex::encode(Sha256::digest(data));
+
+    let canonical_uri = format!("/{}/{}", config.bucket, key);
+    let canonical_query = format!("partNumber={}&uploadId={}", part_number, url_encode(upload_id));
+    let canonical_headers = format!(
+        "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        host, content_sha256, datetime
+    );
+    let signed_headers = "host;x-amz-content-sha256;x-amz-date";
+    let canonical_request = format!(
+        "PUT\n{}\n{}\n{}\n{}\n{}",
+        canonical_uri, canonical_query, canonical_headers, signed_headers, content_sha256
+    );
+
+    let signature = compute_signature(
+        &config.secret_key, &date, &config.region, "s3", &datetime, &canonical_request,
+    )?;
+
+    let credential_scope = format!("{}/{}/s3/aws4_request", date, config.region);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
+        config.access_key, credential_scope, signed_headers, signature
+    );
+
+    let response = client
+        .put(&url)
+        .header("x-amz-date", &datetime)
+        .header("x-amz-content-sha256", &content_sha256)
+        .header("Authorization", &authorization)
+        .body(data.to_vec())
+        .send()
+        .map_err(|e| format!("Upload part {} failed: {}", part_number, e))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        return Err(format!("Upload part {} returned HTTP {}: {}", part_number, status, body));
+    }
+
+    // ETag is in the response header
+    let etag = response
+        .headers()
+        .get("etag")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim_matches('"')
+        .to_string();
+
+    if etag.is_empty() {
+        return Err(format!("No ETag returned for part {}", part_number));
+    }
+
+    Ok(etag)
+}
+
+/// Complete a multipart upload by sending the part list.
+fn complete_multipart(
+    config: &S3Config,
+    client: &reqwest::blocking::Client,
+    key: &str,
+    upload_id: &str,
+    etags: &[(usize, String)],
+) -> Result<(), String> {
+    let now = Utc::now();
+    let datetime = now.format("%Y%m%dT%H%M%SZ").to_string();
+    let date = now.format("%Y%m%d").to_string();
+
+    // Build completion XML
+    let mut xml = String::from("<CompleteMultipartUpload>");
+    for (part_number, etag) in etags {
+        xml.push_str(&format!(
+            "<Part><PartNumber>{}</PartNumber><ETag>{}</ETag></Part>",
+            part_number, etag
+        ));
+    }
+    xml.push_str("</CompleteMultipartUpload>");
+
+    let url = format!(
+        "{}/{}/{}?uploadId={}",
+        config.endpoint.trim_end_matches('/'),
+        config.bucket,
+        key,
+        url_encode(upload_id)
+    );
+    let host = extract_host(&config.endpoint);
+    let content_sha256 = hex::encode(Sha256::digest(xml.as_bytes()));
+
+    let canonical_uri = format!("/{}/{}", config.bucket, key);
+    let canonical_query = format!("uploadId={}", url_encode(upload_id));
+    let canonical_headers = format!(
+        "content-type:application/xml\nhost:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
+        host, content_sha256, datetime
+    );
+    let signed_headers = "content-type;host;x-amz-content-sha256;x-amz-date";
+    let canonical_request = format!(
+        "POST\n{}\n{}\n{}\n{}\n{}",
+        canonical_uri, canonical_query, canonical_headers, signed_headers, content_sha256
+    );
+
+    let signature = compute_signature(
+        &config.secret_key, &date, &config.region, "s3", &datetime, &canonical_request,
+    )?;
+
+    let credential_scope = format!("{}/{}/s3/aws4_request", date, config.region);
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential={}/{},SignedHeaders={},Signature={}",
+        config.access_key, credential_scope, signed_headers, signature
+    );
+
+    let response = client
+        .post(&url)
+        .header("Content-Type", "application/xml")
+        .header("x-amz-date", &datetime)
+        .header("x-amz-content-sha256", &content_sha256)
+        .header("Authorization", &authorization)
+        .body(xml)
+        .send()
+        .map_err(|e| format!("Complete multipart failed: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().unwrap_or_default();
+        return Err(format!("Complete multipart returned HTTP {}: {}", status, body));
+    }
+
+    Ok(())
+}
+
+/// Simple XML value extractor (avoids pulling in an XML parser dependency).
+fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = xml.find(&open)? + open.len();
+    let end = xml[start..].find(&close)? + start;
+    Some(xml[start..end].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_extract_xml_value() {
+        let xml = "<Root><UploadId>abc123</UploadId></Root>";
+        assert_eq!(extract_xml_value(xml, "UploadId"), Some("abc123".to_string()));
+        assert_eq!(extract_xml_value(xml, "Missing"), None);
+    }
+
+    #[test]
+    fn test_multipart_threshold() {
+        assert_eq!(MULTIPART_THRESHOLD, 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_url_encode() {
+        assert_eq!(url_encode("hello world"), "hello%20world");
+        assert_eq!(url_encode("a/b+c"), "a%2Fb%2Bc");
+    }
+}

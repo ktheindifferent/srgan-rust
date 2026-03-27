@@ -117,6 +117,8 @@ pub struct ServerConfig {
     pub rate_limit: Option<usize>,  // Requests per minute
     pub model_path: Option<PathBuf>,
     pub log_requests: bool,
+    /// Number of worker threads for handling connections (default: 4)
+    pub connection_pool_size: usize,
 }
 
 impl Default for ServerConfig {
@@ -132,6 +134,7 @@ impl Default for ServerConfig {
             rate_limit: Some(60),
             model_path: None,
             log_requests: true,
+            connection_pool_size: 4,
         }
     }
 }
@@ -551,25 +554,60 @@ impl WebServer {
         Ok(())
     }
     
-    /// Handle incoming requests (simplified)
+    /// Handle incoming requests using a connection pool
     fn handle_requests(&self, addr: SocketAddr) -> Result<(), SrganError> {
-        // This is a simplified implementation
-        // In production, use a proper web framework
-        
         use std::net::TcpListener;
-        use std::io::Read;
-        
+
         let listener = TcpListener::bind(addr)
             .map_err(|e| SrganError::Io(e))?;
-        
-        for stream in listener.incoming() {
-            let mut stream = match stream {
-                Ok(s) => s,
-                Err(e) => {
-                    warn!("Connection error: {}", e);
-                    continue;
+
+        let pool_size = self.config.connection_pool_size.max(1);
+        info!("Connection pool: {} worker threads", pool_size);
+
+        // Channel to distribute connections to worker threads
+        let (tx, rx) = std::sync::mpsc::sync_channel::<std::net::TcpStream>(pool_size * 2);
+        let rx = Arc::new(Mutex::new(rx));
+
+        std::thread::scope(|scope| {
+            // Spawn worker threads that process connections concurrently
+            for i in 0..pool_size {
+                let rx = Arc::clone(&rx);
+                scope.spawn(move || {
+                    log::debug!("Connection pool worker {} started", i);
+                    loop {
+                        let stream = match rx.lock() {
+                            Ok(guard) => match guard.recv() {
+                                Ok(s) => s,
+                                Err(_) => break,
+                            },
+                            Err(_) => break,
+                        };
+                        self.handle_single_connection(stream);
+                    }
+                    log::debug!("Connection pool worker {} stopped", i);
+                });
+            }
+
+            // Accept loop in main thread distributes to workers
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        if tx.send(s).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => warn!("Connection error: {}", e),
                 }
-            };
+            }
+            drop(tx);
+        });
+
+        Ok(())
+    }
+
+    /// Handle a single TCP connection (called by pool workers)
+    fn handle_single_connection(&self, mut stream: std::net::TcpStream) {
+        use std::io::Read;
 
             // Set a generous read timeout so large uploads don't block forever
             let _ = stream.set_read_timeout(Some(Duration::from_secs(60)));
@@ -577,7 +615,7 @@ impl WebServer {
             // Read the full HTTP request: headers via BufReader on a cloned fd,
             // then body up to Content-Length (max_file_size cap).
             let request: String = match stream.try_clone() {
-                Err(_) => continue,
+                Err(_) => return,
                 Ok(cloned) => {
                     let mut rdr = BufReader::new(cloned);
                     let mut head = String::with_capacity(4096);
@@ -611,12 +649,12 @@ impl WebServer {
             let lines: Vec<&str> = request.lines().collect();
 
             if lines.is_empty() {
-                continue;
+                return;
             }
 
             let parts: Vec<&str> = lines[0].split_whitespace().collect();
             if parts.len() < 2 {
-                continue;
+                return;
             }
 
             let method = parts[0];
@@ -631,13 +669,13 @@ impl WebServer {
             {
                 let path_owned = path.to_string();
                 self.handle_job_stream(stream, &path_owned);
-                continue;
+                return;
             }
 
             // Dashboard SSE stream — pushes live queue stats every second.
             if method == "GET" && (path == "/api/v1/dashboard/stream" || path == "/api/dashboard/stream") {
                 self.handle_dashboard_stream(stream);
-                continue;
+                return;
             }
 
             // Metrics: start timing
@@ -731,9 +769,6 @@ impl WebServer {
 
             // Send response
             let _ = stream.write_all(response.as_bytes());
-        }
-        
-        Ok(())
     }
     
     /// Handle health check
@@ -4930,15 +4965,12 @@ setInterval(refreshAll, 5000);
                         self.network.upscale_image(&lr_img)
                     }
                 } else {
-                    let net_result = crate::thread_safe_network::ThreadSafeNetwork::from_label(
+                    let net = crate::thread_safe_network::ThreadSafeNetwork::from_label(
                         model_label,
                         None,
-                    );
-                    let net = net_result.unwrap_or_else(|_| {
-                        // Shadow-load the default network as fallback
+                    ).or_else(|_| {
                         crate::thread_safe_network::ThreadSafeNetwork::load_builtin_natural()
-                            .expect("built-in natural model must always load")
-                    });
+                    })?;
                     if use_tiling {
                         net.upscale_image_tiled(&lr_img, tile_size)
                     } else {
@@ -5002,8 +5034,8 @@ setInterval(refreshAll, 5000);
             .filter(|r| r.psnr_db.is_some())
             .max_by(|a, b| {
                 a.psnr_db
-                    .unwrap()
-                    .partial_cmp(&b.psnr_db.unwrap())
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .partial_cmp(&b.psnr_db.unwrap_or(f64::NEG_INFINITY))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|r| r.model.clone());
@@ -5013,8 +5045,8 @@ setInterval(refreshAll, 5000);
             .filter(|r| r.ssim.is_some())
             .max_by(|a, b| {
                 a.ssim
-                    .unwrap()
-                    .partial_cmp(&b.ssim.unwrap())
+                    .unwrap_or(f64::NEG_INFINITY)
+                    .partial_cmp(&b.ssim.unwrap_or(f64::NEG_INFINITY))
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|r| r.model.clone());

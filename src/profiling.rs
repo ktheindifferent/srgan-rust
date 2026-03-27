@@ -613,8 +613,9 @@ impl TrackingAllocator {
             freed.insert(ptr_addr);
             
             if freed.len() > 10000 {
-                let oldest = *freed.iter().next().unwrap();
-                freed.remove(&oldest);
+                if let Some(&oldest) = freed.iter().next() {
+                    freed.remove(&oldest);
+                }
             }
         }
         

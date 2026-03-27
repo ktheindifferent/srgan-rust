@@ -85,7 +85,8 @@ impl BillingDb {
             let account = UserAccount::new_free(api_key.to_string());
             self.users.insert(api_key.to_string(), account);
         }
-        self.users.get(api_key).unwrap()
+        // Safe: we just inserted above if missing
+        self.users.get(api_key).expect("entry was just inserted")
     }
 
     pub fn upgrade_to_pro(&mut self, user_id: &str) {

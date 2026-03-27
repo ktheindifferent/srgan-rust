@@ -1,12 +1,14 @@
-//! Webhook delivery system.
+//! Webhook delivery system with enterprise-grade reliability.
 //!
 //! Users register webhook URLs via `POST /api/v1/webhooks` and receive signed
 //! JSON payloads for events: `job.completed`, `job.failed`, `batch.completed`.
 //!
 //! - HMAC-SHA256 signature in `X-SRGAN-Signature` header
-//! - Exponential backoff retry (3 attempts by default)
+//! - Exponential backoff retry (5 attempts: 1m → 5m → 15m → 1h → 4h)
+//! - Dead letter queue for permanently failed deliveries
 //! - `GET /api/v1/webhooks` — list registered webhooks
 //! - `DELETE /api/v1/webhooks/:id` — remove a webhook
+//! - `POST /api/v1/webhooks/test` — fire a test ping
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -16,6 +18,11 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Retry delays in seconds: 1m, 5m, 15m, 1h, 4h.
+const RETRY_DELAYS_SECS: [u64; 5] = [60, 300, 900, 3600, 14400];
+/// Maximum delivery attempts before dead-lettering.
+const MAX_DELIVERY_ATTEMPTS: u32 = 5;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -86,6 +93,20 @@ pub struct DeliveryAttempt {
     pub status_code: Option<u16>,
     pub success: bool,
     pub timestamp: u64,
+    pub error_message: Option<String>,
+}
+
+/// A failed delivery that has exhausted all retries.
+#[derive(Debug, Clone, Serialize)]
+pub struct DeadLetterEntry {
+    pub id: String,
+    pub webhook_id: String,
+    pub endpoint_url: String,
+    pub event: String,
+    pub payload: String,
+    pub attempts: Vec<DeliveryAttempt>,
+    pub created_at: u64,
+    pub dead_lettered_at: u64,
 }
 
 /// Payload sent to a webhook endpoint.
@@ -107,15 +128,17 @@ pub struct RegisterWebhookResponse {
 
 // ── Webhook store ────────────────────────────────────────────────────────────
 
-/// Thread-safe in-memory webhook registry.
+/// Thread-safe in-memory webhook registry with dead letter queue.
 pub struct WebhookStore {
     endpoints: Mutex<HashMap<String, WebhookEndpoint>>,
+    dead_letter_queue: Mutex<Vec<DeadLetterEntry>>,
 }
 
 impl WebhookStore {
     pub fn new() -> Self {
         Self {
             endpoints: Mutex::new(HashMap::new()),
+            dead_letter_queue: Mutex::new(Vec::new()),
         }
     }
 
@@ -208,6 +231,60 @@ impl WebhookStore {
             }
         }
     }
+
+    /// Add a failed delivery to the dead letter queue.
+    pub fn dead_letter(
+        &self,
+        webhook_id: &str,
+        endpoint_url: &str,
+        event: &str,
+        payload: &str,
+        attempts: Vec<DeliveryAttempt>,
+    ) {
+        let entry = DeadLetterEntry {
+            id: format!("dlq_{}", Uuid::new_v4()),
+            webhook_id: webhook_id.to_string(),
+            endpoint_url: endpoint_url.to_string(),
+            event: event.to_string(),
+            payload: payload.to_string(),
+            created_at: attempts.first().map(|a| a.timestamp).unwrap_or(0),
+            dead_lettered_at: unix_now(),
+            attempts,
+        };
+        if let Ok(mut dlq) = self.dead_letter_queue.lock() {
+            dlq.push(entry);
+        }
+    }
+
+    /// List dead letter queue entries for a given API key's webhooks.
+    pub fn list_dead_letters(&self, api_key: &str) -> Vec<DeadLetterEntry> {
+        let webhook_ids: Vec<String> = self.endpoints
+            .lock()
+            .ok()
+            .map(|eps| {
+                eps.values()
+                    .filter(|ep| ep.api_key == api_key)
+                    .map(|ep| ep.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.dead_letter_queue
+            .lock()
+            .ok()
+            .map(|dlq| {
+                dlq.iter()
+                    .filter(|entry| webhook_ids.contains(&entry.webhook_id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Count of entries in the dead letter queue.
+    pub fn dead_letter_count(&self) -> usize {
+        self.dead_letter_queue.lock().ok().map(|dlq| dlq.len()).unwrap_or(0)
+    }
 }
 
 // ── Delivery logic ───────────────────────────────────────────────────────────
@@ -220,7 +297,11 @@ pub fn compute_signature(secret: &str, payload: &str) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Deliver a webhook payload to an endpoint with retry logic.
+/// Deliver a webhook payload to an endpoint with exponential backoff retry.
+///
+/// Retry schedule: 1m → 5m → 15m → 1h → 4h (5 attempts total).
+/// Failed deliveries after all retries are moved to the dead letter queue.
+///
 /// Spawns a background thread; does not block the caller.
 pub fn deliver_webhook_event(
     endpoint: WebhookEndpoint,
@@ -240,10 +321,9 @@ pub fn deliver_webhook_event(
             Err(_) => return,
         };
 
-        let max_attempts: u32 = 3;
-        let mut delay_secs: u64 = 5;
+        let mut attempts: Vec<DeliveryAttempt> = Vec::new();
 
-        for attempt in 0..max_attempts {
+        for attempt_idx in 0..MAX_DELIVERY_ATTEMPTS {
             let mut req = ureq::post(&endpoint.url)
                 .set("Content-Type", "application/json")
                 .set("User-Agent", "srgan-rust-webhooks/0.2.0");
@@ -257,25 +337,53 @@ pub fn deliver_webhook_event(
             match req.send_string(&body) {
                 Ok(resp) => {
                     let status = resp.status();
-                    if status >= 200 && status < 300 {
+                    let attempt = DeliveryAttempt {
+                        webhook_id: endpoint.id.clone(),
+                        event: event.to_string(),
+                        attempt: attempt_idx + 1,
+                        status_code: Some(status),
+                        success: status >= 200 && status < 300,
+                        timestamp: unix_now(),
+                        error_message: None,
+                    };
+                    let success = attempt.success;
+                    attempts.push(attempt);
+
+                    if success {
                         store.record_delivery(&endpoint.id, true);
                         return;
                     }
                     // Non-2xx — retry
                 }
-                Err(_) => {
-                    // Transport error — retry
+                Err(e) => {
+                    attempts.push(DeliveryAttempt {
+                        webhook_id: endpoint.id.clone(),
+                        event: event.to_string(),
+                        attempt: attempt_idx + 1,
+                        status_code: None,
+                        success: false,
+                        timestamp: unix_now(),
+                        error_message: Some(e.to_string()),
+                    });
                 }
             }
 
-            if attempt + 1 < max_attempts {
-                std::thread::sleep(std::time::Duration::from_secs(delay_secs));
-                delay_secs *= 2; // exponential backoff
+            // Wait before next retry (if not the last attempt)
+            if (attempt_idx as usize) < RETRY_DELAYS_SECS.len() {
+                let delay = RETRY_DELAYS_SECS[attempt_idx as usize];
+                std::thread::sleep(std::time::Duration::from_secs(delay));
             }
         }
 
-        // All attempts failed
+        // All attempts failed — dead letter the payload
         store.record_delivery(&endpoint.id, false);
+        store.dead_letter(
+            &endpoint.id,
+            &endpoint.url,
+            &event.to_string(),
+            &body,
+            attempts,
+        );
     });
 }
 
@@ -380,5 +488,49 @@ mod tests {
         let eps = store.endpoints_for_event("key-1", &WebhookEvent::JobCompleted);
         assert_eq!(eps.len(), 1);
         assert_eq!(eps[0].url, "https://a.com/hook");
+    }
+
+    #[test]
+    fn test_dead_letter_queue() {
+        let store = WebhookStore::new();
+        let req = RegisterWebhookRequest {
+            url: "https://example.com/hook".into(),
+            secret: None,
+            events: vec![WebhookEvent::JobCompleted],
+        };
+        let resp = store.register(&req, "key-1");
+
+        assert_eq!(store.dead_letter_count(), 0);
+        store.dead_letter(
+            &resp.id,
+            "https://example.com/hook",
+            "job.completed",
+            r#"{"event":"job.completed"}"#,
+            vec![DeliveryAttempt {
+                webhook_id: resp.id.clone(),
+                event: "job.completed".into(),
+                attempt: 1,
+                status_code: Some(500),
+                success: false,
+                timestamp: unix_now(),
+                error_message: None,
+            }],
+        );
+        assert_eq!(store.dead_letter_count(), 1);
+
+        let dlq = store.list_dead_letters("key-1");
+        assert_eq!(dlq.len(), 1);
+        assert_eq!(dlq[0].webhook_id, resp.id);
+    }
+
+    #[test]
+    fn test_retry_delays_config() {
+        assert_eq!(RETRY_DELAYS_SECS.len(), 5);
+        assert_eq!(RETRY_DELAYS_SECS[0], 60);   // 1 minute
+        assert_eq!(RETRY_DELAYS_SECS[1], 300);  // 5 minutes
+        assert_eq!(RETRY_DELAYS_SECS[2], 900);  // 15 minutes
+        assert_eq!(RETRY_DELAYS_SECS[3], 3600); // 1 hour
+        assert_eq!(RETRY_DELAYS_SECS[4], 14400); // 4 hours
+        assert_eq!(MAX_DELIVERY_ATTEMPTS, 5);
     }
 }

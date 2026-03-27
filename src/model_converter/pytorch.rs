@@ -613,7 +613,10 @@ impl PyTorchParser {
             // Float32
             let mut weights = Vec::with_capacity(bytes.len() / 4);
             for chunk in bytes.chunks_exact(4) {
-                let arr: [u8; 4] = chunk.try_into().unwrap();
+                let arr: [u8; 4] = match chunk.try_into() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
                 let val = f32::from_le_bytes(arr);
                 if val.is_finite() || (weights.len() < 10 && !val.is_finite()) {
                     weights.push(val);
@@ -628,7 +631,10 @@ impl PyTorchParser {
             // Float64
             let mut weights = Vec::with_capacity(bytes.len() / 8);
             for chunk in bytes.chunks_exact(8) {
-                let arr: [u8; 8] = chunk.try_into().unwrap();
+                let arr: [u8; 8] = match chunk.try_into() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
                 weights.push(f64::from_le_bytes(arr) as f32);
             }
             Ok(weights)
@@ -636,7 +642,10 @@ impl PyTorchParser {
             // Float16
             let mut weights = Vec::with_capacity(bytes.len() / 2);
             for chunk in bytes.chunks_exact(2) {
-                let arr: [u8; 2] = chunk.try_into().unwrap();
+                let arr: [u8; 2] = match chunk.try_into() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
                 weights.push(self.float16_to_float32(u16::from_le_bytes(arr)));
             }
             Ok(weights)

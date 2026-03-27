@@ -122,8 +122,10 @@ impl ModelConverter {
         };
         
         self.metadata = Some(metadata);
-        info!("Loaded PyTorch model from {:?} with {} parameters", 
-              path, self.metadata.as_ref().unwrap().parameters.len());
+        if let Some(ref meta) = self.metadata {
+            info!("Loaded PyTorch model from {:?} with {} parameters",
+                  path, meta.parameters.len());
+        }
         Ok(())
     }
 
@@ -789,8 +791,10 @@ impl ModelConverter {
         };
         
         self.metadata = Some(metadata);
-        info!("Parsed TensorFlow model with {} parameters", 
-              self.metadata.as_ref().unwrap().parameters.len());
+        if let Some(ref meta) = self.metadata {
+            info!("Parsed TensorFlow model with {} parameters",
+                  meta.parameters.len());
+        }
         Ok(())
     }
 
@@ -843,8 +847,10 @@ impl ModelConverter {
         };
         
         self.metadata = Some(metadata);
-        info!("Parsed ONNX model with {} parameters", 
-              self.metadata.as_ref().unwrap().parameters.len());
+        if let Some(ref meta) = self.metadata {
+            info!("Parsed ONNX model with {} parameters",
+                  meta.parameters.len());
+        }
         Ok(())
     }
 
@@ -896,8 +902,10 @@ impl ModelConverter {
         };
         
         self.metadata = Some(metadata);
-        info!("Parsed Keras model with {} parameters", 
-              self.metadata.as_ref().unwrap().parameters.len());
+        if let Some(ref meta) = self.metadata {
+            info!("Parsed Keras model with {} parameters",
+                  meta.parameters.len());
+        }
         Ok(())
     }
 

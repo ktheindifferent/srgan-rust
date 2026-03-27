@@ -218,7 +218,8 @@ impl KeyStore {
     }
 
     fn init_schema(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS users (
                 user_id       TEXT PRIMARY KEY,
@@ -256,7 +257,8 @@ impl KeyStore {
         let user_id = format!("usr_{}", Uuid::new_v4().to_string().replace('-', ""));
         let now = Utc::now().timestamp();
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         conn.execute(
             "INSERT INTO users (user_id, email, password_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
             params![user_id, email, hash, now],
@@ -276,7 +278,8 @@ impl KeyStore {
 
     /// Authenticate a user by email + password. Returns (user_id, email).
     pub fn authenticate_user(&self, email: &str, password: &str) -> Result<(String, String)> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         let row: Option<(String, String)> = conn
             .query_row(
                 "SELECT user_id, password_hash FROM users WHERE email = ?1",
@@ -303,7 +306,8 @@ impl KeyStore {
     /// Look up the user_id that owns a given API key (active, non-revoked).
     pub fn user_id_for_key(&self, key: &str) -> Result<Option<String>> {
         let now = Utc::now().timestamp();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         conn.query_row(
             "SELECT user_id FROM api_keys
              WHERE key = ?1 AND (revoked = 0 OR (grace_expires_at IS NOT NULL AND grace_expires_at > ?2))",
@@ -332,7 +336,8 @@ impl KeyStore {
         let id = format!("key_{}", &Uuid::new_v4().to_string().replace('-', "")[..12]);
         let now = Utc::now().timestamp();
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         conn.execute(
             "INSERT INTO api_keys (key, id, tier, label, user_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![key, id, tier.as_str(), label, user_id, now],
@@ -355,7 +360,8 @@ impl KeyStore {
     /// Look up a key; returns `None` if not found or revoked (past grace period).
     pub fn get_key(&self, key: &str) -> Result<Option<ApiKey>> {
         let now = Utc::now().timestamp();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT key, id, tier, label, user_id, created_at, last_used_at, revoked, grace_expires_at
@@ -405,7 +411,8 @@ impl KeyStore {
     /// List all active (non-revoked) keys for a user.
     pub fn list_keys_for_user(&self, user_id: &str) -> Result<Vec<ApiKey>> {
         let now = Utc::now().timestamp();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT key, id, tier, label, user_id, created_at, last_used_at, revoked, grace_expires_at
@@ -441,7 +448,8 @@ impl KeyStore {
 
     /// Revoke a key by its short id, scoped to a user. Returns true if found.
     pub fn revoke_key(&self, key_id: &str, user_id: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         let rows = conn
             .execute(
                 "UPDATE api_keys SET revoked = 1 WHERE id = ?1 AND user_id = ?2",
@@ -456,7 +464,8 @@ impl KeyStore {
     pub fn rotate_key(&self, key_id: &str, user_id: &str) -> Result<Option<(ApiKey, i64)>> {
         let grace_until = Utc::now().timestamp() + 86400; // 24 h
 
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
 
         // Find the old key
         let old: Option<(String, String, Option<String>)> = conn
@@ -510,7 +519,8 @@ impl KeyStore {
     /// Increment usage counter for today and return the new count.
     pub fn record_usage(&self, key: &str) -> Result<u64> {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
 
         conn.execute(
             "INSERT INTO key_usage (key, date_utc, count) VALUES (?1, ?2, 1)
@@ -533,7 +543,10 @@ impl KeyStore {
     /// Today's usage for `key`.
     pub fn today_usage(&self, key: &str) -> u64 {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return 0,
+        };
         conn.query_row(
             "SELECT count FROM key_usage WHERE key = ?1 AND date_utc = ?2",
             params![key, today],
@@ -544,7 +557,8 @@ impl KeyStore {
 
     /// All registered keys (for admin endpoint).
     pub fn all_keys(&self) -> Result<Vec<ApiKey>> {
-        let conn = self.conn.lock().unwrap();
+        let conn = self.conn.lock()
+            .map_err(|_| SrganError::Network("auth store mutex poisoned".into()))?;
         let mut stmt = conn
             .prepare(
                 "SELECT key, id, tier, label, user_id, created_at, last_used_at, revoked, grace_expires_at
@@ -578,7 +592,10 @@ impl KeyStore {
     /// Usage today, grouped by tier.
     pub fn usage_today_by_tier(&self) -> std::collections::HashMap<String, u64> {
         let today = Utc::now().format("%Y-%m-%d").to_string();
-        let conn = self.conn.lock().unwrap();
+        let conn = match self.conn.lock() {
+            Ok(c) => c,
+            Err(_) => return std::collections::HashMap::new(),
+        };
         let mut stmt = match conn.prepare(
             "SELECT k.tier, COALESCE(SUM(u.count), 0)
              FROM api_keys k

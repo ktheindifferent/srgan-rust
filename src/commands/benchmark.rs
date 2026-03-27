@@ -271,7 +271,7 @@ fn print_table(results: &[BenchmarkResult]) {
     println!();
     for &(w, h) in TEST_RESOLUTIONS {
         let at_res: Vec<_> = results.iter().filter(|r| r.input_size == (w, h)).collect();
-        if let Some(fastest) = at_res.iter().min_by(|a, b| a.avg_time.partial_cmp(&b.avg_time).unwrap()) {
+        if let Some(fastest) = at_res.iter().min_by(|a, b| a.avg_time.partial_cmp(&b.avg_time).unwrap_or(std::cmp::Ordering::Equal)) {
             println!(
                 "  {}×{}: fastest = {} ({:.1} ms/img, {:.2} img/s)",
                 w, h,
@@ -332,7 +332,8 @@ pub fn run_quality_benchmark(app_m: &ArgMatches) -> Result<()> {
             "--input <IMAGE> is required when using --output-dir".to_string(),
         ))?;
 
-    let output_dir = app_m.value_of("output-dir").unwrap();
+    let output_dir = app_m.value_of("output-dir")
+        .ok_or_else(|| SrganError::InvalidParameter("--output-dir is required".to_string()))?;
 
     let scale: usize = app_m
         .value_of("scale")
