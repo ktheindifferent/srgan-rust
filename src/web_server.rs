@@ -191,6 +191,11 @@ pub struct UpscaleRequest {
     /// natural).  Overrides `model` and `auto_detect` when set.
     #[serde(default)]
     pub auto_enhance: bool,
+    /// Model version tag (e.g. "v1", "v2", "v3").
+    /// v1 = 2x upscaling, v2 = 4x (default), v3 = 8x.
+    /// When set, overrides `scale_factor` with the version's native factor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_version: Option<String>,
 }
 
 /// Request body for the `/api/v1/detect` endpoint.
@@ -433,6 +438,8 @@ pub struct WebServer {
     key_usage_dashboard: Arc<Mutex<KeyUsageDashboard>>,
     /// Stripe dunning manager
     stripe_dunning: Arc<Mutex<StripeDunningManager>>,
+    /// Model version registry (v1=2x, v2=4x, v3=8x)
+    model_version_registry: Arc<crate::model_versioning::ModelVersionRegistry>,
 }
 
 /// Cached result
@@ -497,6 +504,11 @@ impl WebServer {
                 format!("KeyStore init: {}", e),
             )))?;
 
+        let models_base = std::env::var("SRGAN_MODELS_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("models"));
+        let model_version_registry = Arc::new(crate::model_versioning::ModelVersionRegistry::new(&models_base));
+
         Ok(Self {
             config,
             network: Arc::new(network),
@@ -515,6 +527,7 @@ impl WebServer {
             rate_limit_dashboard: Arc::new(Mutex::new(RateLimitDashboard::new())),
             key_usage_dashboard: Arc::new(Mutex::new(KeyUsageDashboard::new())),
             stripe_dunning: Arc::new(Mutex::new(StripeDunningManager::new())),
+            model_version_registry,
         })
     }
     
@@ -710,6 +723,7 @@ impl WebServer {
                 ("GET", "/api/admin/stats") => self.handle_admin_stats(&request),
                 ("GET", "/api/health") | ("GET", "/api/v1/health") => self.handle_health_check(),
                 ("GET", "/api/models") | ("GET", "/api/v1/models") => self.handle_list_models(),
+                ("GET", "/api/v1/models/versions") => self.handle_model_versions(),
                 ("GET", "/api/v1/stats") => self.handle_stats(),
                 ("GET", "/api/v1/jobs") | ("GET", "/api/jobs") => self.handle_jobs(&request),
                 ("POST", "/api/upscale") | ("POST", "/api/v1/upscale") => self.handle_upscale_sync(&request),
@@ -912,6 +926,33 @@ impl WebServer {
         )
     }
     
+    /// GET /api/v1/models/versions — list available model versions.
+    fn handle_model_versions(&self) -> String {
+        let versions: Vec<serde_json::Value> = self
+            .model_version_registry
+            .list()
+            .iter()
+            .map(|v| {
+                serde_json::json!({
+                    "version": v.tag,
+                    "scale_factor": v.scale_factor,
+                    "description": v.description,
+                    "available": v.available,
+                })
+            })
+            .collect();
+
+        let response = serde_json::json!({
+            "versions": versions,
+            "default": self.model_version_registry.default_tag(),
+        });
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            response
+        )
+    }
+
     /// Handle synchronous upscale
     fn handle_upscale_sync(&self, request: &str) -> String {
         let body = self.extract_body(request);
@@ -991,7 +1032,11 @@ impl WebServer {
                         .map(|img| format!("{}x{}", img.width(), img.height()));
                     (m, sz)
                 };
-                let job_scale = req.scale_factor.unwrap_or(self.network.factor() as u32);
+                let job_scale = if let Some(ref ver) = req.model_version {
+                    self.model_version_registry.scale_factor_for(Some(ver))
+                } else {
+                    req.scale_factor.unwrap_or(self.network.factor() as u32)
+                };
                 let job_output_size = job_input_size.as_ref().and_then(|s| {
                     let parts: Vec<&str> = s.split('x').collect();
                     if parts.len() == 2 {
@@ -2965,7 +3010,11 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
 
         let original_size = (img.width(), img.height());
         let network_factor = self.network.factor();
-        let requested_factor = request.scale_factor.unwrap_or(network_factor);
+        let requested_factor = if let Some(ref ver) = request.model_version {
+            self.model_version_registry.scale_factor_for(Some(ver))
+        } else {
+            request.scale_factor.unwrap_or(network_factor)
+        };
 
         // ── Content-aware auto-enhance shortcut ─────────────────────────
         if request.auto_enhance {

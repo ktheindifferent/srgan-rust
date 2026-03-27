@@ -45,6 +45,7 @@ pub mod metrics_wrapper;
 pub mod model_converter;
 pub mod model_downloader;
 pub mod model_manager;
+pub mod model_versioning;
 pub mod model_registry;
 pub mod network;
 pub mod parallel;
