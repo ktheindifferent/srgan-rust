@@ -661,6 +661,7 @@ impl WebServer {
                 ("POST", "/webhooks/stripe") => self.handle_stripe_webhook_v2(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 ("GET", "/api/v1/admin/keys") => self.handle_admin_keys(&request),
+                ("GET", "/admin/rate-limits") => self.handle_admin_rate_limits(&request),
                 ("GET", "/api/v1/rate-limit") => self.handle_rate_limit_self(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
                 ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
@@ -700,6 +701,7 @@ impl WebServer {
                 _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
                 _ if method == "GET" && path.starts_with("/preview/pkg/") => self.handle_wasm_pkg_file(path),
+                _ if method == "PUT" && path.starts_with("/admin/rate-limits/") => self.handle_update_rate_limit(&request, path),
                 _ => self.handle_not_found(),
             };
 
@@ -1541,6 +1543,17 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bord
       <div class="card"><div class="card-val" id="cEnt">–</div><div class="card-lbl">Enterprise consumed</div></div>
     </div>
     <div class="sec-ttl">API Key Rate Limits</div>
+    <div style="margin-bottom:.6rem">
+      <button class="btn" id="rlTabBtn" style="width:auto;padding:.25rem .65rem;font-size:.78rem;background:var(--accent);color:#000;font-weight:600" onclick="toggleRlTab()">Show Detailed Rate Limits</button>
+    </div>
+    <div id="rateLimitsPanel" style="display:none">
+      <div style="margin-bottom:.8rem">
+        <input type="text" id="rlSearch" placeholder="Filter by key ID or tier..."
+          style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r);
+          padding:.4rem .65rem;color:var(--text);font-family:var(--font);font-size:.82rem;width:260px">
+      </div>
+      <div class="tbl-wrap" id="rlDetailTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    </div>
     <div class="tbl-wrap" id="keysTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Top Users by Job Count</div>
     <div class="tbl-wrap" id="topUsersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
@@ -1599,6 +1612,7 @@ function refresh(){
     if(res[2])renderJobs(res[2].jobs||[]);
     if(res[3])renderAdminStats(res[3]);
     if(res[4])renderKeys(res[4].keys||[]);
+    if(document.getElementById('rateLimitsPanel').style.display!=='none')fetchRateLimits();
   }).catch(function(){});
 }
 
@@ -1721,6 +1735,48 @@ function renderKeys(keys){
   html+='</tbody></table>';
   document.getElementById('keysTbl').innerHTML=html;
 }
+function toggleRlTab(){
+  var p=document.getElementById('rateLimitsPanel');
+  var b=document.getElementById('rlTabBtn');
+  if(p.style.display==='none'){p.style.display='block';b.textContent='Hide Detailed Rate Limits';fetchRateLimits();}
+  else{p.style.display='none';b.textContent='Show Detailed Rate Limits';}
+}
+function fetchRateLimits(){
+  fetch('/admin/rate-limits',{headers:{Authorization:'Bearer '+tok}}).then(function(r){return r.ok?r.json():null;}).then(function(d){
+    if(d)renderRateLimitsDetail(d.keys||[]);
+  }).catch(function(){});
+}
+function renderRateLimitsDetail(keys){
+  if(!keys.length){document.getElementById('rlDetailTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No rate limit data</div>';return;}
+  var html='<table><thead><tr><th>Key</th><th>Tier</th><th>Today</th><th>Month</th><th>RPM</th><th>Daily Limit</th><th>Overages</th><th>Last Seen</th><th>Usage</th><th>Edit</th></tr></thead><tbody>';
+  keys.forEach(function(k){
+    var pct=k.pct_daily||0;var bc=pct>90?'var(--red)':pct>70?'var(--yellow)':'var(--green)';
+    var ls=k.last_seen?new Date(k.last_seen*1000).toLocaleString():'–';
+    var kd=k.api_key.length>16?k.api_key.slice(0,12)+'...':k.api_key;
+    html+='<tr><td><code>'+kd+'</code></td>'
+      +'<td><span class="badge tier-'+k.tier+'">'+k.tier+'</span></td>'
+      +'<td>'+k.requests_today+'</td>'
+      +'<td>'+k.requests_this_month+'</td>'
+      +'<td>'+k.rate_limit_rpm+'/min</td>'
+      +'<td>'+k.rate_limit_daily+'</td>'
+      +'<td style="color:'+(k.overage_count>0?'var(--red)':'var(--muted)')+'">'+k.overage_count+'</td>'
+      +'<td style="font-size:.75rem">'+ls+'</td>'
+      +'<td><div style="background:var(--bg3);border-radius:3px;height:14px;width:70px;overflow:hidden">'
+      +'<div style="background:'+bc+';height:100%;width:'+Math.min(pct,100)+'%"></div></div></td>'
+      +'<td><button class="btn" style="width:auto;padding:.12rem .35rem;font-size:.7rem;background:var(--bg3);color:var(--accent);border:1px solid var(--border)" onclick="editRL(\''+k.api_key+'\','+k.rate_limit_rpm+','+k.rate_limit_daily+')">Edit</button></td></tr>';
+  });
+  html+='</tbody></table>';document.getElementById('rlDetailTbl').innerHTML=html;
+}
+function editRL(k,rpm,daily){
+  var r=prompt('RPM limit for '+k.slice(0,12)+'...?',rpm);if(r===null)return;
+  var d=prompt('Daily limit?',daily);if(d===null)return;
+  fetch('/admin/rate-limits/'+encodeURIComponent(k),{method:'PUT',headers:{Authorization:'Bearer '+tok,'Content-Type':'application/json'},
+    body:JSON.stringify({rate_limit_rpm:parseInt(r)||60,rate_limit_daily:parseInt(d)||0})
+  }).then(function(r){return r.json();}).then(function(d){if(d.ok){fetchRateLimits();refresh();}else alert('Error: '+(d.error||'unknown'));}).catch(function(e){alert(e.message);});
+}
+if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addEventListener('input',function(e){
+  var q=e.target.value.toLowerCase();document.querySelectorAll('#rlDetailTbl tbody tr').forEach(function(r){r.style.display=r.textContent.toLowerCase().includes(q)?'':'none';});
+});}
 </script>
 </body>
 </html>"##;
@@ -3332,6 +3388,8 @@ function renderKeys(keys){
                         format!("suspended:{}", id),
                     crate::billing::stripe::WebhookAction::Revoked(id) =>
                         format!("revoked:{}", id),
+                    crate::billing::stripe::WebhookAction::DunningStarted(id) =>
+                        format!("dunning_started:{}", id),
                     crate::billing::stripe::WebhookAction::Ignored(reason) =>
                         format!("ignored:{}", reason),
                 };
@@ -3421,6 +3479,57 @@ function renderKeys(keys){
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
             body
+        )
+    }
+
+    /// GET /admin/rate-limits — JSON of all API keys with usage, limits, overages
+    fn handle_admin_rate_limits(&self, request: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return self.error_response(401, "Unauthorized");
+        }
+
+        let stats = self.rate_limit_dashboard.lock().ok().and_then(|dash| {
+            self.billing_db.lock().ok().map(|db| dash.get_all_stats(&db))
+        });
+
+        let keys = stats.unwrap_or_default();
+        let body = serde_json::json!({ "keys": keys });
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            body
+        )
+    }
+
+    /// PUT /admin/rate-limits/:key_id — update rate limits for a specific key
+    fn handle_update_rate_limit(&self, request: &str, path: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return self.error_response(401, "Unauthorized");
+        }
+
+        let key_id = path.strip_prefix("/admin/rate-limits/").unwrap_or("");
+        if key_id.is_empty() {
+            return self.error_response(400, "Missing key_id");
+        }
+
+        let body = self.extract_body(request);
+        let update: crate::api::rate_limit_dashboard::UpdateRateLimitRequest = match serde_json::from_str(&body) {
+            Ok(u) => u,
+            Err(e) => return self.error_response(400, &format!("Invalid JSON: {}", e)),
+        };
+
+        if let Ok(mut dashboard) = self.rate_limit_dashboard.lock() {
+            dashboard.update_rate_limits(key_id, &update);
+        }
+
+        let resp = serde_json::json!({
+            "ok": true,
+            "key_id": key_id,
+            "rate_limit_rpm": update.rate_limit_rpm,
+            "rate_limit_daily": update.rate_limit_daily,
+        });
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            resp
         )
     }
 

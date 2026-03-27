@@ -349,6 +349,64 @@ docs/                     API, pricing, deployment guides, Grafana dashboard
 
 ---
 
+## WASM Browser Preview
+
+The WASM preview module provides instant in-browser image upscaling (2x Lanczos/bicubic) before submitting to the full SRGAN API. This gives users immediate visual feedback.
+
+### Building the WASM module
+
+```bash
+# Install wasm-pack
+cargo install wasm-pack
+
+# Build with the wasm feature flag
+wasm-pack build --target web --features wasm -- --lib
+
+# Or build the standalone wasm crate
+cd wasm && wasm-pack build --target web
+```
+
+### Integrating in your frontend
+
+```html
+<script type="module">
+  import init, { upscale_preview } from './pkg/srgan_rust.js';
+
+  await init();
+
+  // Pass PNG/JPEG bytes as Uint8Array, get back upscaled PNG bytes
+  const inputBytes = new Uint8Array(await file.arrayBuffer());
+  const outputPng = upscale_preview(inputBytes);
+
+  // Display the preview
+  const blob = new Blob([outputPng], { type: 'image/png' });
+  previewImg.src = URL.createObjectURL(blob);
+</script>
+```
+
+### Server-side fallback
+
+When not compiling to WASM, use the native shim:
+
+```rust
+use srgan_rust::wasm::wasm_shim::WasmShim;
+
+let shim = WasmShim::new();
+let output_png = shim.upscale_preview_bytes(&input_png_bytes);
+```
+
+### Interpolation methods
+
+| Method          | Quality | Speed   |
+|-----------------|---------|---------|
+| Lanczos3        | Best    | ~50ms   |
+| Bicubic         | Good    | ~30ms   |
+| NearestNeighbor | Low     | ~5ms    |
+
+The default is Lanczos3 with 0.3 sharpening strength, which provides the best preview quality.
+
+---
+
 ## Contributing
 
 1. Fork the repo and create a feature branch.

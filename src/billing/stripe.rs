@@ -2,7 +2,8 @@
 //!
 //! Supported events:
 //! - `checkout.session.completed` — provision API key (upgrade to Pro)
-//! - `invoice.payment_failed`     — suspend API key
+//! - `invoice.payment_failed`     — suspend API key, enter dunning
+//! - `charge.failed`              — enter dunning on charge failure
 //! - `customer.subscription.deleted` — revoke API key (downgrade to Free)
 //!
 //! The webhook signature is verified against the `STRIPE_WEBHOOK_SECRET`
@@ -64,6 +65,8 @@ pub enum WebhookAction {
     Suspended(String),
     /// API key revoked / downgraded (subscription deleted).
     Revoked(String),
+    /// Charge failed — entered dunning.
+    DunningStarted(String),
     /// Received but not actionable.
     Ignored(String),
 }
@@ -132,6 +135,34 @@ pub fn handle_webhook(
                 db.set_status(&user_id, AccountStatus::Active);
             }
             Ok(WebhookAction::Revoked(user_id))
+        }
+
+        // ── charge.failed ────────────────────────────────────────────────
+        // Enter dunning: log the charge failure for the dunning engine to process.
+        "charge.failed" => {
+            let user_id = extract_user_id_from_event(&event);
+            if user_id.is_empty() {
+                return Err("charge.failed: cannot determine user_id".into());
+            }
+            let charge_id = event["data"]["object"]["id"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            let failure_message = event["data"]["object"]["failure_message"]
+                .as_str()
+                .unwrap_or("unknown failure");
+
+            log::warn!(
+                "[DUNNING] charge.failed for user={} charge={} reason={}",
+                user_id, charge_id, failure_message
+            );
+
+            // Set account to suspended in billing DB
+            if let Ok(mut db) = billing_db.lock() {
+                db.set_status(&user_id, AccountStatus::Suspended);
+            }
+
+            Ok(WebhookAction::DunningStarted(user_id))
         }
 
         other => Ok(WebhookAction::Ignored(format!("unhandled: {}", other))),

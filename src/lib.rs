@@ -61,6 +61,7 @@ pub mod models;
 pub mod waifu2x;
 pub mod image_pipeline;
 pub mod output_options;
+pub mod wasm;
 pub mod web;
 pub mod web_server;
 pub mod web_server_improved;
