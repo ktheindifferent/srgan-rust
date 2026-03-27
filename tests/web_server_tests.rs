@@ -89,6 +89,9 @@ fn test_job_info_creation() {
         output_file_size: None,
         scale_factor: None,
         input_data: None,
+        progress: None,
+        total_frames: None,
+        frames_processed: None,
     };
     
     assert_eq!(job.id, "job_123");
@@ -118,6 +121,9 @@ fn test_job_info_with_result() {
         output_file_size: None,
         scale_factor: None,
         input_data: None,
+        progress: None,
+        total_frames: None,
+        frames_processed: None,
     };
     
     assert_eq!(job.id, "job_456");
@@ -147,6 +153,9 @@ fn test_job_info_with_error() {
         output_file_size: None,
         scale_factor: None,
         input_data: None,
+        progress: None,
+        total_frames: None,
+        frames_processed: None,
     };
     
     assert_eq!(job.id, "job_789");

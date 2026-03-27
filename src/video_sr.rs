@@ -359,9 +359,9 @@ pub struct MockVideoSr;
 
 impl MockVideoSr {
     /// Simulate the pipeline: creates empty output file and reports progress.
-    pub fn process<F>(config: &VideoSrConfig, on_progress: F) -> Result<(), SrganError>
+    pub fn process<F>(config: &VideoSrConfig, mut on_progress: F) -> Result<(), SrganError>
     where
-        F: Fn(VideoSrProgress),
+        F: FnMut(VideoSrProgress),
     {
         let fake_frames = 30;
         for i in 1..=fake_frames {

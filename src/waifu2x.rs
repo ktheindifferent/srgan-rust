@@ -443,12 +443,12 @@ fn parse_label(label: &str) -> Result<Waifu2xConfig> {
         return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::default() });
     }
 
-    // Style-based convenience labels
+    // Style-based convenience labels (scale=1 = denoise only)
     if label == "waifu2x-anime" {
-        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::Anime });
+        return Ok(Waifu2xConfig { noise_level: 1, scale: 1, style: Waifu2xStyle::Anime });
     }
     if label == "waifu2x-photo" {
-        return Ok(Waifu2xConfig { noise_level: 2, scale: 2, style: Waifu2xStyle::Photo });
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 1, style: Waifu2xStyle::Photo });
     }
 
     if let Some(rest) = label.strip_prefix("waifu2x-") {

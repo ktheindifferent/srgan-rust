@@ -1,7 +1,8 @@
 use profiling::TrackingAllocator;
 
-#[global_allocator]
-static GLOBAL: TrackingAllocator = TrackingAllocator;
+// TODO: Disabled for test debugging - the custom allocator has memory issues
+// #[global_allocator]
+// static GLOBAL: TrackingAllocator = TrackingAllocator;
 
 #[macro_use]
 extern crate alumina;
