@@ -1,11 +1,18 @@
 [package]
 name = "srgan-wasm-preview"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "WASM-based bilinear upscaling preview for SRGAN-Rust"
+description = "In-browser WASM image upscaling preview for SRGAN-Rust"
+license = "MIT"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
+
+# Note: we do NOT depend on the parent srgan-rust lib directly because its
+# heavy native dependencies (alumina, xz2, hdf5, rusqlite, …) cannot compile
+# to wasm32-unknown-unknown.  Instead this crate ships a lightweight bilinear/
+# Lanczos preview that runs entirely in the browser.  For full neural-network
+# upscaling the JS frontend calls the server API.
 
 [dependencies]
 wasm-bindgen = "0.2"

@@ -398,39 +398,51 @@ docs/                     API, pricing, deployment guides, Grafana dashboard
 
 ---
 
-## WASM Browser Preview
+## WASM In-Browser Live Preview
 
-The WASM preview module provides instant in-browser image upscaling (2x Lanczos/bicubic) before submitting to the full SRGAN API. This gives users immediate visual feedback.
+The WASM preview module provides instant in-browser image upscaling (2x/4x bilinear) entirely in the browser via WebAssembly. No data leaves the user's machine. For full SRGAN neural-network quality, the demo page can also call the server API.
+
+### Live demo
+
+Start the server and visit **`/demo`** for a drag-drop demo page with:
+- Drag-and-drop or file-picker image upload
+- 2x / 4x scale selector
+- Side-by-side before/after comparison
+- One-click download of the upscaled result
+
+```bash
+./srgan-rust server --port 8080
+# Open http://localhost:8080/demo
+```
 
 ### Building the WASM module
 
 ```bash
-# Install wasm-pack
+# Install wasm-pack (one-time)
 cargo install wasm-pack
 
-# Build with the wasm feature flag
-wasm-pack build --target web --features wasm -- --lib
+# Build the standalone WASM crate
+cd wasm && ./build.sh
 
-# Or build the standalone wasm crate
-cd wasm && wasm-pack build --target web
+# Or manually:
+cd wasm && wasm-pack build --target web --out-dir pkg --release
 ```
 
-### Integrating in your frontend
+The build output lands in `wasm/pkg/` and is served by the HTTP server at `/demo/pkg/*` and `/preview/pkg/*`.
 
-```html
-<script type="module">
-  import init, { upscale_preview } from './pkg/srgan_rust.js';
+### WASM API
 
-  await init();
+```js
+import init, { upscale_image, model_info, version } from './pkg/srgan_wasm_preview.js';
 
-  // Pass PNG/JPEG bytes as Uint8Array, get back upscaled PNG bytes
-  const inputBytes = new Uint8Array(await file.arrayBuffer());
-  const outputPng = upscale_preview(inputBytes);
+await init();
 
-  // Display the preview
-  const blob = new Blob([outputPng], { type: 'image/png' });
-  previewImg.src = URL.createObjectURL(blob);
-</script>
+// Upscale a PNG — returns PNG bytes
+const result = upscale_image(pngBytes, 4);  // 4x scale
+
+// Get module info
+console.log(version());     // "0.2.0"
+console.log(model_info());  // JSON with supported scales, method, etc.
 ```
 
 ### Server-side fallback
@@ -444,15 +456,14 @@ let shim = WasmShim::new();
 let output_png = shim.upscale_preview_bytes(&input_png_bytes);
 ```
 
-### Interpolation methods
+### HTTP routes
 
-| Method          | Quality | Speed   |
-|-----------------|---------|---------|
-| Lanczos3        | Best    | ~50ms   |
-| Bicubic         | Good    | ~30ms   |
-| NearestNeighbor | Low     | ~5ms    |
-
-The default is Lanczos3 with 0.3 sharpening strength, which provides the best preview quality.
+| Route | Description |
+|-------|-------------|
+| `GET /demo` | WASM live preview demo page |
+| `GET /demo/pkg/*` | WASM package assets (JS glue, `.wasm` binary) |
+| `GET /preview` | Alternate preview page |
+| `GET /preview/pkg/*` | Alternate asset path |
 
 ---
 

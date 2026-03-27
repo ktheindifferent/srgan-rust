@@ -600,8 +600,23 @@ pub fn upscale_preview(image_bytes: &[u8], model: &str, scale: u32) -> Result<Ve
     Ok(png)
 }
 
+/// Upscale an image (simplified API).
+///
+/// Accepts raw PNG/image bytes and a scale factor, returns PNG bytes.
+/// This is the primary entry point for the in-browser demo.
+#[wasm_bindgen]
+pub fn upscale_image(input: &[u8], scale: u32) -> Result<Vec<u8>, JsValue> {
+    upscale_preview(input, "bilinear", scale)
+}
+
+/// Returns JSON-encoded model information for the WASM preview module.
+#[wasm_bindgen]
+pub fn model_info() -> String {
+    r#"{"name":"srgan-wasm-preview","method":"bilinear","supported_scales":[2,3,4],"max_scale":8,"description":"In-browser bilinear upscaling preview. For neural-network quality, use the server API."}"#.to_string()
+}
+
 /// Returns the version of the WASM preview module.
 #[wasm_bindgen]
 pub fn version() -> String {
-    "0.1.0".to_string()
+    "0.2.0".to_string()
 }

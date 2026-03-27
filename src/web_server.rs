@@ -335,6 +335,15 @@ pub struct JobInfo {
     /// Base64-encoded input image data (kept for preview/compare).
     #[serde(skip_serializing)]
     pub input_data: Option<String>,
+    /// Progress percentage (0-100) for long-running jobs like video upscaling.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<u8>,
+    /// Total frames for video jobs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_frames: Option<usize>,
+    /// Frames processed so far for video jobs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub frames_processed: Option<usize>,
 }
 
 /// Request for POST /api/v1/compare
@@ -690,7 +699,7 @@ impl WebServer {
                 ("GET", "/docs/webhooks") => self.handle_webhook_docs_page(),
                 ("GET", "/docs/sdk") => self.handle_sdk_docs_page(),
                 ("GET", "/pricing") => self.handle_pricing_page(),
-                ("GET", "/demo") => self.handle_demo_page(),
+                ("GET", "/demo") => self.handle_wasm_demo_page(),
                 ("GET", "/preview") => self.handle_wasm_preview_page(),
                 ("GET", "/dashboard") => self.handle_root_dashboard(),
                 ("GET", "/admin") => self.handle_admin_panel(),
@@ -753,6 +762,7 @@ impl WebServer {
                 _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
                 _ if method == "GET" && path.starts_with("/preview/pkg/") => self.handle_wasm_pkg_file(path),
+                _ if method == "GET" && path.starts_with("/demo/pkg/") => self.handle_demo_pkg_file(path),
                 _ if method == "GET" && path.starts_with("/admin/api-keys/") && path.ends_with("/usage") => self.handle_admin_key_usage(&request, path),
                 _ if method == "PUT" && path.starts_with("/admin/rate-limits/") => self.handle_update_rate_limit(&request, path),
                 _ => self.handle_not_found(),
@@ -1016,6 +1026,9 @@ impl WebServer {
                     output_file_size: None,
                     scale_factor: Some(job_scale),
                     input_data: Some(req.image_data.clone()),
+                    progress: None,
+                    total_frames: None,
+                    frames_processed: None,
                 };
 
                 if let Ok(mut jobs) = self.jobs.lock() {
@@ -1245,6 +1258,9 @@ impl WebServer {
             output_file_size: None,
             scale_factor: Some(req.scale),
             input_data: None,
+            total_frames: None,
+            frames_processed: None,
+            progress: None,
         };
 
         if let Ok(mut jobs) = self.jobs.lock() {
@@ -1473,13 +1489,22 @@ impl WebServer {
         )
     }
 
-    /// GET /demo — demo gallery with pre-baked before/after examples
-    fn handle_demo_page(&self) -> String {
-        const HTML: &str = include_str!("static/demo.html");
+    /// GET /demo — WASM in-browser live preview (drag-drop demo page)
+    fn handle_wasm_demo_page(&self) -> String {
+        const HTML: &str = include_str!("../wasm/index.html");
+        // Rewrite asset paths: the demo page references ./pkg/ but we serve from /demo/pkg/
+        let html = HTML.replace("'./pkg/srgan_wasm_preview.js'", "'/demo/pkg/srgan_wasm_preview.js'");
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\n\r\n{}",
-            HTML.len(), HTML
+            html.len(), html
         )
+    }
+
+    /// GET /demo/pkg/* — serve WASM package files for the demo route
+    fn handle_demo_pkg_file(&self, path: &str) -> String {
+        // Rewrite /demo/pkg/foo -> /preview/pkg/foo and delegate
+        let remapped = path.replacen("/demo/pkg/", "/preview/pkg/", 1);
+        self.handle_wasm_pkg_file(&remapped)
     }
 
     /// GET /docs — full API reference page
