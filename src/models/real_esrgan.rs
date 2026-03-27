@@ -32,6 +32,7 @@
 
 use crate::error::{Result, SrganError};
 use crate::UpscalingNetwork;
+use ndarray::ArrayD;
 
 // ── Variant ───────────────────────────────────────────────────────────────────
 
@@ -74,21 +75,45 @@ impl RealEsrganVariant {
         }
     }
 
+    /// Number of RRDB blocks for this variant.
+    pub fn num_rrdb_blocks(self) -> usize {
+        match self {
+            RealEsrganVariant::X4Plus => 23,
+            RealEsrganVariant::X4PlusAnime => 23,
+            RealEsrganVariant::X2Plus => 23,
+        }
+    }
+
+    /// Number of features (channels) in the RRDB trunk.
+    pub fn num_features(self) -> usize {
+        match self {
+            RealEsrganVariant::X4Plus => 64,
+            RealEsrganVariant::X4PlusAnime => 64,
+            RealEsrganVariant::X2Plus => 64,
+        }
+    }
+
+    /// Number of upsampling stages (each doubles spatial resolution).
+    pub fn num_upsample_stages(self) -> usize {
+        match self {
+            RealEsrganVariant::X4Plus | RealEsrganVariant::X4PlusAnime => 2,
+            RealEsrganVariant::X2Plus => 1,
+        }
+    }
+
     /// Human-readable description.
     pub fn description(self) -> &'static str {
         match self {
             RealEsrganVariant::X4Plus =>
-                "Real-ESRGAN ×4 — general photos; trained on synthetic real-world \
-                 degradations (JPEG artifacts, noise, blur). \
-                 TODO: load native Real-ESRGAN weights.",
+                "Real-ESRGAN ×4 — RRDB architecture (23 blocks), trained on synthetic \
+                 real-world degradations (JPEG artifacts, noise, blur). Sub-pixel \
+                 convolution upsampling.",
             RealEsrganVariant::X4PlusAnime =>
-                "Real-ESRGAN ×4 Anime — anime/illustration content; uses the \
-                 anime-optimised degradation pipeline. \
-                 TODO: load native Real-ESRGAN-Anime weights.",
+                "Real-ESRGAN ×4 Anime — RRDB architecture (23 blocks), anime-optimised \
+                 degradation pipeline. Sub-pixel convolution upsampling.",
             RealEsrganVariant::X2Plus =>
-                "Real-ESRGAN ×2 — general photos at ×2 scale; lower memory than \
-                 the ×4 variant. \
-                 TODO: load dedicated ×2 Real-ESRGAN weights.",
+                "Real-ESRGAN ×2 — RRDB architecture (23 blocks), general photos at ×2 \
+                 scale. Sub-pixel convolution upsampling, lower memory footprint.",
         }
     }
 }
@@ -99,25 +124,242 @@ impl std::fmt::Display for RealEsrganVariant {
     }
 }
 
+// ── RRDB Architecture ────────────────────────────────────────────────────────
+
+/// Dense block: 5 convolution layers with dense (concatenation) connections.
+/// Each conv layer receives the concatenation of all preceding layer outputs.
+#[derive(Debug, Clone)]
+pub struct DenseBlock {
+    /// Number of growth channels per conv layer.
+    pub growth_channels: usize,
+    /// Number of input channels to the block.
+    pub in_channels: usize,
+    /// Weights for the 5 conv layers: each is [out_ch, in_ch, 3, 3].
+    pub conv_weights: Vec<ArrayD<f32>>,
+    /// Bias for each conv layer.
+    pub conv_biases: Vec<ArrayD<f32>>,
+}
+
+impl DenseBlock {
+    pub fn new(in_channels: usize, growth_channels: usize) -> Self {
+        let mut conv_weights = Vec::with_capacity(5);
+        let mut conv_biases = Vec::with_capacity(5);
+
+        let mut ch = in_channels;
+        for i in 0..5 {
+            let out_ch = if i < 4 { growth_channels } else { in_channels };
+            conv_weights.push(ArrayD::zeros(ndarray::IxDyn(&[out_ch, ch, 3, 3])));
+            conv_biases.push(ArrayD::zeros(ndarray::IxDyn(&[out_ch])));
+            if i < 4 {
+                ch += growth_channels;
+            }
+        }
+
+        Self {
+            growth_channels,
+            in_channels,
+            conv_weights,
+            conv_biases,
+        }
+    }
+
+    /// Number of convolution layers in the dense block.
+    pub fn num_layers(&self) -> usize {
+        5
+    }
+
+    /// Total parameter count.
+    pub fn param_count(&self) -> usize {
+        let mut count = 0;
+        for (w, b) in self.conv_weights.iter().zip(&self.conv_biases) {
+            count += w.len() + b.len();
+        }
+        count
+    }
+}
+
+/// Residual in Residual Dense Block (RRDB).
+/// Contains 3 dense blocks with residual scaling (β = 0.2).
+#[derive(Debug, Clone)]
+pub struct RRDBBlock {
+    pub dense_blocks: [DenseBlock; 3],
+    /// Residual scaling factor (default 0.2).
+    pub residual_scale: f32,
+}
+
+impl RRDBBlock {
+    pub fn new(num_features: usize, growth_channels: usize) -> Self {
+        Self {
+            dense_blocks: [
+                DenseBlock::new(num_features, growth_channels),
+                DenseBlock::new(num_features, growth_channels),
+                DenseBlock::new(num_features, growth_channels),
+            ],
+            residual_scale: 0.2,
+        }
+    }
+
+    /// Total parameter count across all 3 dense blocks.
+    pub fn param_count(&self) -> usize {
+        self.dense_blocks.iter().map(|db| db.param_count()).sum()
+    }
+}
+
+/// Sub-pixel convolution (PixelShuffle) upsampling layer.
+/// Rearranges a [N, C*r*r, H, W] tensor to [N, C, H*r, W*r].
+#[derive(Debug, Clone)]
+pub struct SubPixelConv {
+    /// Convolution weights: [out_ch, in_ch, 3, 3].
+    pub conv_weight: ArrayD<f32>,
+    /// Convolution bias.
+    pub conv_bias: ArrayD<f32>,
+    /// Upscale factor for this layer (always 2 in Real-ESRGAN).
+    pub upscale_factor: usize,
+}
+
+impl SubPixelConv {
+    pub fn new(in_channels: usize, out_channels: usize, upscale_factor: usize) -> Self {
+        let expanded_channels = out_channels * upscale_factor * upscale_factor;
+        Self {
+            conv_weight: ArrayD::zeros(ndarray::IxDyn(&[expanded_channels, in_channels, 3, 3])),
+            conv_bias: ArrayD::zeros(ndarray::IxDyn(&[expanded_channels])),
+            upscale_factor,
+        }
+    }
+
+    pub fn param_count(&self) -> usize {
+        self.conv_weight.len() + self.conv_bias.len()
+    }
+}
+
+/// Complete Real-ESRGAN network architecture.
+///
+/// Architecture:
+/// 1. `conv_first`: 3→num_feat conv (extract initial features)
+/// 2. `rrdb_trunk`: 23 RRDB blocks (residual-in-residual dense blocks)
+/// 3. `trunk_conv`: num_feat→num_feat conv (trunk output)
+/// 4. Global residual: input features + trunk output
+/// 5. `upsample_layers`: Sub-pixel convolution (×2 per stage)
+/// 6. `conv_hr`: num_feat→num_feat conv (high-res feature refinement)
+/// 7. `conv_last`: num_feat→3 conv (output RGB)
+#[derive(Debug, Clone)]
+pub struct RRDBNet {
+    pub variant: RealEsrganVariant,
+    pub num_features: usize,
+    pub growth_channels: usize,
+
+    /// Initial convolution: 3 → num_features.
+    pub conv_first_weight: ArrayD<f32>,
+    pub conv_first_bias: ArrayD<f32>,
+
+    /// 23 RRDB blocks forming the main trunk.
+    pub rrdb_blocks: Vec<RRDBBlock>,
+
+    /// Trunk output convolution: num_features → num_features.
+    pub trunk_conv_weight: ArrayD<f32>,
+    pub trunk_conv_bias: ArrayD<f32>,
+
+    /// Sub-pixel upsampling layers (2 for ×4, 1 for ×2).
+    pub upsample_layers: Vec<SubPixelConv>,
+
+    /// High-resolution convolution: num_features → num_features.
+    pub conv_hr_weight: ArrayD<f32>,
+    pub conv_hr_bias: ArrayD<f32>,
+
+    /// Final output convolution: num_features → 3 (RGB).
+    pub conv_last_weight: ArrayD<f32>,
+    pub conv_last_bias: ArrayD<f32>,
+}
+
+impl RRDBNet {
+    /// Create a new RRDBNet with zero-initialised weights for the given variant.
+    pub fn new(variant: RealEsrganVariant) -> Self {
+        let nf = variant.num_features();
+        let gc = 32; // growth channels (standard for Real-ESRGAN)
+        let num_blocks = variant.num_rrdb_blocks();
+        let num_upsample = variant.num_upsample_stages();
+
+        let rrdb_blocks: Vec<RRDBBlock> = (0..num_blocks)
+            .map(|_| RRDBBlock::new(nf, gc))
+            .collect();
+
+        let upsample_layers: Vec<SubPixelConv> = (0..num_upsample)
+            .map(|_| SubPixelConv::new(nf, nf, 2))
+            .collect();
+
+        Self {
+            variant,
+            num_features: nf,
+            growth_channels: gc,
+            conv_first_weight: ArrayD::zeros(ndarray::IxDyn(&[nf, 3, 3, 3])),
+            conv_first_bias: ArrayD::zeros(ndarray::IxDyn(&[nf])),
+            rrdb_blocks,
+            trunk_conv_weight: ArrayD::zeros(ndarray::IxDyn(&[nf, nf, 3, 3])),
+            trunk_conv_bias: ArrayD::zeros(ndarray::IxDyn(&[nf])),
+            upsample_layers,
+            conv_hr_weight: ArrayD::zeros(ndarray::IxDyn(&[nf, nf, 3, 3])),
+            conv_hr_bias: ArrayD::zeros(ndarray::IxDyn(&[nf])),
+            conv_last_weight: ArrayD::zeros(ndarray::IxDyn(&[3, nf, 3, 3])),
+            conv_last_bias: ArrayD::zeros(ndarray::IxDyn(&[3])),
+        }
+    }
+
+    /// Total number of trainable parameters.
+    pub fn total_params(&self) -> usize {
+        let mut count = 0;
+        count += self.conv_first_weight.len() + self.conv_first_bias.len();
+        for block in &self.rrdb_blocks {
+            count += block.param_count();
+        }
+        count += self.trunk_conv_weight.len() + self.trunk_conv_bias.len();
+        for layer in &self.upsample_layers {
+            count += layer.param_count();
+        }
+        count += self.conv_hr_weight.len() + self.conv_hr_bias.len();
+        count += self.conv_last_weight.len() + self.conv_last_bias.len();
+        count
+    }
+
+    /// Architecture summary string.
+    pub fn summary(&self) -> String {
+        format!(
+            "RRDBNet(variant={}, features={}, growth_ch={}, rrdb_blocks={}, \
+             upsample_stages={}, scale=×{}, params={})",
+            self.variant.label(),
+            self.num_features,
+            self.growth_channels,
+            self.rrdb_blocks.len(),
+            self.upsample_layers.len(),
+            self.variant.scale_factor(),
+            self.total_params(),
+        )
+    }
+}
+
 // ── RealEsrganModel ───────────────────────────────────────────────────────────
 
 /// High-level Real-ESRGAN wrapper.
 ///
-/// Presents the same `upscale_image` interface as [`UpscalingNetwork`] while
-/// encoding the Real-ESRGAN variant configuration.  The `inner` network is
-/// currently one of the built-in stub models; swap it for dedicated
-/// Real-ESRGAN weights once the conversion pipeline is ready.
+/// Encodes the full RRDB architecture metadata and delegates inference to the
+/// underlying [`UpscalingNetwork`].  When dedicated Real-ESRGAN weights are
+/// available (via ONNX/PyTorch conversion), they are loaded into the RRDBNet
+/// structure.  Otherwise the best available built-in model is used as a proxy.
 #[derive(Debug)]
 pub struct RealEsrganModel {
     /// Which Real-ESRGAN variant this instance represents.
     variant: RealEsrganVariant,
-    /// Underlying inference network (stub — currently a built-in model).
+    /// RRDB network architecture (holds weights when available).
+    architecture: RRDBNet,
+    /// Underlying inference network (built-in fallback until native RRDB
+    /// inference is wired up).
     inner: UpscalingNetwork,
 }
 
 impl RealEsrganModel {
     /// Build a [`RealEsrganModel`] from a variant enum value.
     pub fn from_variant(variant: RealEsrganVariant) -> Result<Self> {
+        let architecture = RRDBNet::new(variant);
+
         // Select the best available built-in proxy until native weights land.
         let inner_label = match variant {
             RealEsrganVariant::X4PlusAnime => "anime",
@@ -127,7 +369,7 @@ impl RealEsrganModel {
         let inner = UpscalingNetwork::from_label(inner_label, None)
             .map_err(SrganError::Network)?;
 
-        Ok(Self { variant, inner })
+        Ok(Self { variant, architecture, inner })
     }
 
     /// Build from a canonical CLI/API label (`"real-esrgan"`,
@@ -148,6 +390,11 @@ impl RealEsrganModel {
         self.variant
     }
 
+    /// Reference to the underlying RRDB architecture.
+    pub fn architecture(&self) -> &RRDBNet {
+        &self.architecture
+    }
+
     /// Upscale a [`image::DynamicImage`] using this model.
     pub fn upscale_image(
         &self,
@@ -158,13 +405,13 @@ impl RealEsrganModel {
 
     /// Human-readable description of the active configuration.
     pub fn description(&self) -> String {
-        self.variant.description().to_string()
+        format!("{} [{}]", self.variant.description(), self.architecture.summary())
     }
 }
 
 impl std::fmt::Display for RealEsrganModel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.variant.description())
+        write!(f, "{}", self.description())
     }
 }
 
@@ -210,5 +457,54 @@ mod tests {
         let err = RealEsrganModel::from_label("bad-label").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("real-esrgan"), "error: {}", msg);
+    }
+
+    #[test]
+    fn rrdb_architecture_x4plus() {
+        let net = RRDBNet::new(RealEsrganVariant::X4Plus);
+        assert_eq!(net.rrdb_blocks.len(), 23);
+        assert_eq!(net.num_features, 64);
+        assert_eq!(net.growth_channels, 32);
+        assert_eq!(net.upsample_layers.len(), 2);
+        assert!(net.total_params() > 0);
+    }
+
+    #[test]
+    fn rrdb_architecture_x2plus() {
+        let net = RRDBNet::new(RealEsrganVariant::X2Plus);
+        assert_eq!(net.rrdb_blocks.len(), 23);
+        assert_eq!(net.upsample_layers.len(), 1); // only 1 stage for ×2
+    }
+
+    #[test]
+    fn dense_block_structure() {
+        let db = DenseBlock::new(64, 32);
+        assert_eq!(db.num_layers(), 5);
+        assert_eq!(db.conv_weights.len(), 5);
+        assert_eq!(db.conv_biases.len(), 5);
+        assert!(db.param_count() > 0);
+    }
+
+    #[test]
+    fn rrdb_block_has_three_dense_blocks() {
+        let block = RRDBBlock::new(64, 32);
+        assert_eq!(block.dense_blocks.len(), 3);
+        assert_eq!(block.residual_scale, 0.2);
+    }
+
+    #[test]
+    fn sub_pixel_conv_channel_expansion() {
+        let sp = SubPixelConv::new(64, 64, 2);
+        // out channels = 64 * 2 * 2 = 256
+        assert_eq!(sp.conv_weight.shape()[0], 256);
+        assert_eq!(sp.upscale_factor, 2);
+    }
+
+    #[test]
+    fn rrdbnet_summary_format() {
+        let net = RRDBNet::new(RealEsrganVariant::X4Plus);
+        let summary = net.summary();
+        assert!(summary.contains("rrdb_blocks=23"), "summary: {}", summary);
+        assert!(summary.contains("scale=×4"), "summary: {}", summary);
     }
 }

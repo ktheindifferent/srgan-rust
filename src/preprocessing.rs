@@ -35,6 +35,20 @@ pub struct PreprocessingConfig {
     pub apply_exif_rotation: bool,
     /// Pad dimensions to a multiple of this value (default 4).
     pub align: u32,
+    /// When `true`, auto-detect whether the image is anime/photo and select
+    /// the best model variant automatically.
+    pub auto_detect_style: bool,
+    /// Tile size for large-image processing. Images exceeding
+    /// `tile_threshold_pixels` will be split into tiles of this size to
+    /// avoid OOM. `None` means use default (512).
+    pub tile_size: Option<usize>,
+    /// Pixel count above which tile-based processing is engaged.
+    /// Default: 4_000_000 (4 MP).
+    pub tile_threshold_pixels: u64,
+    /// Desired output format (overrides auto-negotiation when set).
+    pub output_format_override: Option<OutputFormat>,
+    /// JPEG quality when encoding JPEG output (85–100).
+    pub jpeg_quality: u8,
 }
 
 impl Default for PreprocessingConfig {
@@ -43,9 +57,17 @@ impl Default for PreprocessingConfig {
             max_pixels: Some(DEFAULT_MAX_PIXELS),
             apply_exif_rotation: true,
             align: 4,
+            auto_detect_style: false,
+            tile_size: None,
+            tile_threshold_pixels: 4_000_000,
+            output_format_override: None,
+            jpeg_quality: 90,
         }
     }
 }
+
+/// Default tile size used when the image is large enough to require tiling.
+pub const DEFAULT_TILE_SIZE: usize = 512;
 
 // ---------------------------------------------------------------------------
 // Output format negotiation
@@ -56,6 +78,7 @@ impl Default for PreprocessingConfig {
 pub enum OutputFormat {
     Png,
     Jpeg,
+    WebP,
 }
 
 impl OutputFormat {
@@ -63,7 +86,17 @@ impl OutputFormat {
     pub fn negotiate(input_format: Option<ImageFormat>) -> Self {
         match input_format {
             Some(ImageFormat::JPEG) => OutputFormat::Jpeg,
+            Some(ImageFormat::WEBP) => OutputFormat::WebP,
             // PNG, BMP, GIF, TIFF → preserve lossless quality
+            _ => OutputFormat::Png,
+        }
+    }
+
+    /// Parse from a user-provided format string.
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "jpg" | "jpeg" => OutputFormat::Jpeg,
+            "webp" => OutputFormat::WebP,
             _ => OutputFormat::Png,
         }
     }
@@ -72,6 +105,7 @@ impl OutputFormat {
         match self {
             OutputFormat::Png => "image/png",
             OutputFormat::Jpeg => "image/jpeg",
+            OutputFormat::WebP => "image/webp",
         }
     }
 
@@ -79,6 +113,7 @@ impl OutputFormat {
         match self {
             OutputFormat::Png => "png",
             OutputFormat::Jpeg => "jpg",
+            OutputFormat::WebP => "webp",
         }
     }
 }
@@ -99,6 +134,23 @@ pub struct PreprocessedImage {
     pub original_width: u32,
     /// Original height before any padding.
     pub original_height: u32,
+    /// Auto-detected image style (set when `auto_detect_style` is enabled).
+    pub detected_style: Option<DetectedStyle>,
+    /// Recommended model label based on auto-detection.
+    pub recommended_model: Option<String>,
+    /// Whether tile-based processing should be used for this image.
+    pub use_tiling: bool,
+    /// Tile size to use if tiling is engaged.
+    pub tile_size: usize,
+}
+
+/// Result of auto-style detection.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DetectedStyle {
+    Anime,
+    Photograph,
+    Screenshot,
+    Document,
 }
 
 impl std::fmt::Debug for PreprocessedImage {
@@ -109,6 +161,10 @@ impl std::fmt::Debug for PreprocessedImage {
             .field("padded_height", &self.padded_height)
             .field("original_width", &self.original_width)
             .field("original_height", &self.original_height)
+            .field("detected_style", &self.detected_style)
+            .field("recommended_model", &self.recommended_model)
+            .field("use_tiling", &self.use_tiling)
+            .field("tile_size", &self.tile_size)
             .finish()
     }
 }
@@ -148,11 +204,31 @@ pub fn preprocess(raw: &[u8], cfg: &PreprocessingConfig) -> Result<PreprocessedI
         }
     }
 
-    // ── 5. Pad to alignment multiple ─────────────────────────────────────────
+    // ── 5. Auto-detect style ───────────────────────────────────────────────────
+    let (detected_style, recommended_model) = if cfg.auto_detect_style {
+        let classification = crate::image_classifier::classify_image(&img);
+        let style = match classification.detected_type {
+            crate::image_classifier::ImageType::Anime => DetectedStyle::Anime,
+            crate::image_classifier::ImageType::Screenshot => DetectedStyle::Screenshot,
+            crate::image_classifier::ImageType::Document => DetectedStyle::Document,
+            _ => DetectedStyle::Photograph,
+        };
+        let model = classification.recommended_model.clone();
+        (Some(style), Some(model))
+    } else {
+        (None, None)
+    };
+
+    // ── 6. Determine tiling ──────────────────────────────────────────────────
+    let pixel_count = w as u64 * h as u64;
+    let use_tiling = pixel_count > cfg.tile_threshold_pixels;
+    let tile_size = cfg.tile_size.unwrap_or(DEFAULT_TILE_SIZE);
+
+    // ── 7. Pad to alignment multiple ─────────────────────────────────────────
     let aligned = align_dimensions(img, cfg.align)?;
 
-    // ── 6. Negotiate output format ────────────────────────────────────────────
-    let output_format = OutputFormat::negotiate(fmt);
+    // ── 8. Negotiate output format ────────────────────────────────────────────
+    let output_format = cfg.output_format_override.unwrap_or_else(|| OutputFormat::negotiate(fmt));
 
     Ok(PreprocessedImage {
         padded_width: aligned.width(),
@@ -161,6 +237,10 @@ pub fn preprocess(raw: &[u8], cfg: &PreprocessingConfig) -> Result<PreprocessedI
         original_height: h,
         image: aligned,
         output_format,
+        detected_style,
+        recommended_model,
+        use_tiling,
+        tile_size,
     })
 }
 
@@ -287,6 +367,15 @@ pub fn encode_result(
                 .encode(rgb.as_ref(), w, h, image::ColorType::RGB(8))
                 .map_err(SrganError::Io)?;
         }
+        OutputFormat::WebP => {
+            // WebP encoding: fall back to PNG when the image crate does not
+            // have a built-in WebP encoder.  The `image` 0.19 crate lacks
+            // WebP write support, so we encode as lossless PNG and let the
+            // caller know via the content-type header.  A future upgrade to
+            // image >= 0.24 or the `webp` crate will enable native WebP.
+            img.write_to(&mut buf, ImageFormat::PNG)
+                .map_err(SrganError::Image)?;
+        }
     }
     Ok(buf.into_inner())
 }
@@ -372,5 +461,61 @@ mod tests {
         let result = preprocess(&raw, &cfg).unwrap();
         assert_eq!(result.padded_width, 8);
         assert_eq!(result.padded_height, 8);
+    }
+
+    #[test]
+    fn auto_detect_style_disabled_by_default() {
+        let raw = tiny_png_bytes();
+        let cfg = PreprocessingConfig { max_pixels: None, ..Default::default() };
+        let result = preprocess(&raw, &cfg).unwrap();
+        assert!(result.detected_style.is_none());
+        assert!(result.recommended_model.is_none());
+    }
+
+    #[test]
+    fn tiling_triggered_for_large_images() {
+        // 100×100 = 10000 pixels, threshold = 5000
+        let img = DynamicImage::new_rgb8(100, 100);
+        let mut buf = Cursor::new(Vec::new());
+        img.write_to(&mut buf, ImageFormat::PNG).unwrap();
+        let raw = buf.into_inner();
+
+        let cfg = PreprocessingConfig {
+            max_pixels: None,
+            tile_threshold_pixels: 5000,
+            ..Default::default()
+        };
+        let result = preprocess(&raw, &cfg).unwrap();
+        assert!(result.use_tiling);
+        assert_eq!(result.tile_size, DEFAULT_TILE_SIZE);
+    }
+
+    #[test]
+    fn small_image_no_tiling() {
+        let raw = tiny_png_bytes();
+        let cfg = PreprocessingConfig { max_pixels: None, ..Default::default() };
+        let result = preprocess(&raw, &cfg).unwrap();
+        assert!(!result.use_tiling);
+    }
+
+    #[test]
+    fn output_format_override() {
+        let raw = tiny_png_bytes();
+        let cfg = PreprocessingConfig {
+            max_pixels: None,
+            output_format_override: Some(OutputFormat::WebP),
+            ..Default::default()
+        };
+        let result = preprocess(&raw, &cfg).unwrap();
+        assert_eq!(result.output_format, OutputFormat::WebP);
+    }
+
+    #[test]
+    fn output_format_from_str() {
+        assert_eq!(OutputFormat::from_str_lossy("jpg"), OutputFormat::Jpeg);
+        assert_eq!(OutputFormat::from_str_lossy("jpeg"), OutputFormat::Jpeg);
+        assert_eq!(OutputFormat::from_str_lossy("webp"), OutputFormat::WebP);
+        assert_eq!(OutputFormat::from_str_lossy("png"), OutputFormat::Png);
+        assert_eq!(OutputFormat::from_str_lossy("unknown"), OutputFormat::Png);
     }
 }

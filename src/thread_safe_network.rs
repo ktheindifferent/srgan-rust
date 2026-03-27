@@ -202,6 +202,32 @@ impl ThreadSafeNetwork {
                 );
                 Self::new_with_display(desc, &display)
             },
+            label if label.starts_with("real-esrgan") => {
+                // Route through Real-ESRGAN model (RRDB architecture).
+                // Falls back to built-in anime/natural weights until native
+                // RRDB weights are converted.
+                let variant = crate::models::RealEsrganVariant::from_label(label)
+                    .ok_or_else(|| SrganError::Network(format!(
+                        "Unknown Real-ESRGAN variant '{}'; expected one of: {}",
+                        label,
+                        crate::models::REAL_ESRGAN_LABELS.join(", ")
+                    )))?;
+                let inner_label = match variant {
+                    crate::models::RealEsrganVariant::X4PlusAnime => "anime",
+                    _ => "natural",
+                };
+                let data = match inner_label {
+                    "anime" => crate::L1_SRGB_ANIME_PARAMS,
+                    _       => crate::L1_SRGB_NATURAL_PARAMS,
+                };
+                let desc = crate::network_from_bytes(data)
+                    .map_err(|e| SrganError::Network(e))?;
+                let display = format!(
+                    "Real-ESRGAN {} (RRDB ×{}, {} blocks) — fallback to built-in",
+                    label, variant.scale_factor(), variant.num_rrdb_blocks()
+                );
+                Self::new_with_display(desc, &display)
+            },
             _ => Err(SrganError::Network(format!("Unsupported network type: {}", label))),
         }
     }

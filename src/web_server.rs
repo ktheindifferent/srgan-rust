@@ -1559,10 +1559,14 @@ input[type=password]{width:100%;background:var(--bg);border:1px solid var(--bord
     <div class="tbl-wrap" id="topUsersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Users</div>
     <div class="tbl-wrap" id="usersTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    <div class="sec-ttl">Model Performance</div>
+    <div class="tbl-wrap" id="modelMetricsTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Endpoint Metrics</div>
     <div class="tbl-wrap" id="metricsTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
     <div class="sec-ttl">Recent Jobs</div>
     <div class="tbl-wrap" id="jobsTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
+    <div class="sec-ttl">API Key Management</div>
+    <div class="tbl-wrap" id="keyMgmtTbl"><div style="padding:1.5rem;color:var(--muted);text-align:center">Loading…</div></div>
   </div>
 </div>
 <script>
@@ -1684,8 +1688,48 @@ function renderAdminStats(s){
   set('cFree',c.free?c.free.consumed:'0');
   set('cPro',c.pro?c.pro.consumed:'0');
   set('cEnt',c.enterprise?c.enterprise.consumed:'0');
+  if(s.system){
+    set('mMem',s.system.used_ram_mb+'/'+s.system.total_ram_mb+' MB');
+    set('mLoad',s.system.cpu_count+' cores');
+  }
   renderTopUsers(s.top_users||[]);
   renderEndpointMetrics(s.endpoint_metrics||[]);
+  renderModelMetrics(s.model_metrics||[]);
+  renderKeyMgmt(s.api_keys||[]);
+}
+
+function renderModelMetrics(metrics){
+  if(!metrics.length){document.getElementById('modelMetricsTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No model data yet</div>';return;}
+  var html='<table><thead><tr><th>Model</th><th>Total Inferences</th><th>Avg ms</th><th>Min ms</th><th>Max ms</th><th>Throughput/min</th></tr></thead><tbody>';
+  metrics.forEach(function(m){
+    html+='<tr>'
+      +'<td><code>'+m.model_name+'</code></td>'
+      +'<td>'+m.total_inferences+'</td>'
+      +'<td>'+m.avg_inference_ms.toFixed(1)+'</td>'
+      +'<td>'+m.min_inference_ms+'</td>'
+      +'<td>'+m.max_inference_ms+'</td>'
+      +'<td>'+m.throughput_per_min.toFixed(1)+'</td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('modelMetricsTbl').innerHTML=html;
+}
+
+function renderKeyMgmt(keys){
+  if(!keys.length){document.getElementById('keyMgmtTbl').innerHTML='<div style="padding:1.5rem;color:var(--muted);text-align:center">No API keys</div>';return;}
+  var html='<table><thead><tr><th>Key</th><th>Tier</th><th>Requests Today</th><th>Created</th><th>Status</th></tr></thead><tbody>';
+  keys.forEach(function(k){
+    var stCls=k.is_active?'bc':'bf';
+    html+='<tr>'
+      +'<td><code>'+k.key_prefix+'</code></td>'
+      +'<td><span class="badge tier-'+k.tier+'">'+k.tier+'</span></td>'
+      +'<td>'+k.requests_today+'</td>'
+      +'<td style="font-size:.75rem">'+k.created_at+'</td>'
+      +'<td><span class="badge '+stCls+'">'+(k.is_active?'active':'revoked')+'</span></td>'
+      +'</tr>';
+  });
+  html+='</tbody></table>';
+  document.getElementById('keyMgmtTbl').innerHTML=html;
 }
 
 function renderTopUsers(users){
@@ -2873,6 +2917,14 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
             return self.error_response(429, "Rate limit exceeded");
         }
 
+        if req.images.len() > crate::api::batch::MAX_BATCH_SIZE {
+            return self.error_response(400, &format!(
+                "Batch size {} exceeds maximum of {} images",
+                req.images.len(),
+                crate::api::batch::MAX_BATCH_SIZE,
+            ));
+        }
+
         if req.images.len() > 10 {
             return self.submit_async_batch(req);
         }
@@ -2973,54 +3025,89 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
         let bid        = batch_id.clone();
 
         thread::spawn(move || {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+
             let fmt = req.format.as_deref().unwrap_or("png");
             let img_format = match fmt {
                 "jpeg" | "jpg" => ImageFormat::JPEG,
                 _ => ImageFormat::PNG,
             };
 
-            let mut results: Vec<BatchImageResult> = Vec::new();
+            let total = req.images.len();
+            let done_counter = Arc::new(AtomicUsize::new(0));
+            let results_lock: Arc<Mutex<Vec<BatchImageResult>>> =
+                Arc::new(Mutex::new(Vec::with_capacity(total)));
 
-            for (i, img_b64) in req.images.iter().enumerate() {
-                let start = SystemTime::now();
+            // Process images in parallel using rayon
+            let handles: Vec<_> = req.images.iter().enumerate().map(|(i, img_b64)| {
+                let network = Arc::clone(&network);
+                let batch_jobs = Arc::clone(&batch_jobs);
+                let bid = bid.clone();
+                let done_counter = Arc::clone(&done_counter);
+                let results_lock = Arc::clone(&results_lock);
+                let img_b64 = img_b64.clone();
 
-                let result: std::result::Result<String, String> = (|| {
-                    let data = general_purpose::STANDARD.decode(img_b64)
-                        .map_err(|e| format!("Invalid base64: {}", e))?;
-                    if data.len() > max_size {
-                        return Err("Image exceeds max file size".to_string());
+                thread::spawn(move || {
+                    let start = SystemTime::now();
+
+                    let result: std::result::Result<String, String> = (|| {
+                        let data = general_purpose::STANDARD.decode(&img_b64)
+                            .map_err(|e| format!("Invalid base64: {}", e))?;
+                        if data.len() > max_size {
+                            return Err("Image exceeds max file size".to_string());
+                        }
+                        let img = image::load_from_memory(&data)
+                            .map_err(|e| format!("Invalid image: {}", e))?;
+                        let up = network.upscale_image(&img)
+                            .map_err(|e| format!("Upscaling failed: {}", e))?;
+                        let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
+                        up.write_to(&mut cursor, img_format)
+                            .map_err(|e| format!("Encode failed: {}", e))?;
+                        Ok(general_purpose::STANDARD.encode(cursor.into_inner()))
+                    })();
+
+                    let ms = start.elapsed().map(|d| d.as_millis() as u64).unwrap_or(0);
+                    let batch_result = match result {
+                        Ok(enc) => BatchImageResult { index: i, success: true, image_data: Some(enc), error: None, processing_time_ms: ms },
+                        Err(e)  => BatchImageResult { index: i, success: false, image_data: None, error: Some(e), processing_time_ms: ms },
+                    };
+
+                    if let Ok(mut r) = results_lock.lock() {
+                        r.push(batch_result);
                     }
-                    let img = image::load_from_memory(&data)
-                        .map_err(|e| format!("Invalid image: {}", e))?;
-                    let up = network.upscale_image(&img)
-                        .map_err(|e| format!("Upscaling failed: {}", e))?;
-                    let mut cursor = std::io::Cursor::new(Vec::<u8>::new());
-                    up.write_to(&mut cursor, img_format)
-                        .map_err(|e| format!("Encode failed: {}", e))?;
-                    Ok(general_purpose::STANDARD.encode(cursor.into_inner()))
-                })();
 
-                let ms = start.elapsed().map(|d| d.as_millis() as u64).unwrap_or(0);
-                results.push(match result {
-                    Ok(enc) => BatchImageResult { index: i, success: true, image_data: Some(enc), error: None, processing_time_ms: ms },
-                    Err(e)  => BatchImageResult { index: i, success: false, image_data: None, error: Some(e), processing_time_ms: ms },
-                });
+                    let completed_so_far = done_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                    let progress_pct = ((completed_so_far as f64 / total as f64) * 100.0).round() as usize;
 
-                // Update progress
-                if let Ok(mut jobs) = batch_jobs.lock() {
-                    if let Some(job) = jobs.get_mut(&bid) {
-                        job.status = BatchJobStatus::Processing { completed: i + 1, total: req.images.len() };
-                        job.results = results.clone();
-                        job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    // Update progress
+                    if let Ok(mut jobs) = batch_jobs.lock() {
+                        if let Some(job) = jobs.get_mut(&bid) {
+                            job.status = BatchJobStatus::Processing { completed: completed_so_far, total };
+                            if let Ok(r) = results_lock.lock() {
+                                job.results = r.clone();
+                            }
+                            job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                        }
                     }
-                }
+
+                    let _ = progress_pct; // used via batch_jobs above
+                })
+            }).collect();
+
+            // Wait for all spawned threads
+            for h in handles {
+                let _ = h.join();
             }
 
             // Mark done
             if let Ok(mut jobs) = batch_jobs.lock() {
                 if let Some(job) = jobs.get_mut(&bid) {
                     job.status = BatchJobStatus::Completed;
-                    job.results = results;
+                    if let Ok(r) = results_lock.lock() {
+                        let mut final_results = r.clone();
+                        final_results.sort_by_key(|r| r.index);
+                        job.results = final_results;
+                    }
                     job.updated_at = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
                 }
             }

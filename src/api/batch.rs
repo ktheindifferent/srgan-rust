@@ -13,6 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Maximum number of images accepted in a single batch request.
+pub const MAX_BATCH_SIZE: usize = 20;
+
 // ── Request / response types ─────────────────────────────────────────────────
 
 /// A single image in a batch request.
@@ -98,6 +101,8 @@ pub struct UrlBatchJob {
     pub total: usize,
     pub completed: usize,
     pub failed: usize,
+    /// Progress percentage (0–100) based on completed + failed vs total.
+    pub progress_pct: u8,
     pub api_key: String,
     pub created_at: u64,
     pub updated_at: u64,
@@ -129,11 +134,21 @@ impl BatchJobStore {
     }
 
     /// Create a new batch job and return the batch_id.
+    ///
+    /// Returns `Err` if the request exceeds [`MAX_BATCH_SIZE`].
     pub fn create_batch(
         &self,
         req: &CreateBatchRequest,
         api_key: &str,
-    ) -> String {
+    ) -> std::result::Result<String, String> {
+        if req.images.len() > MAX_BATCH_SIZE {
+            return Err(format!(
+                "Batch size {} exceeds maximum of {} images",
+                req.images.len(),
+                MAX_BATCH_SIZE,
+            ));
+        }
+
         let batch_id = format!("batch_{}", Uuid::new_v4());
         let now = unix_now();
 
@@ -162,6 +177,7 @@ impl BatchJobStore {
             total,
             completed: 0,
             failed: 0,
+            progress_pct: 0,
             api_key: api_key.to_string(),
             created_at: now,
             updated_at: now,
@@ -172,7 +188,7 @@ impl BatchJobStore {
             jobs.insert(batch_id.clone(), job);
         }
 
-        batch_id
+        Ok(batch_id)
     }
 
     /// Get a batch job by ID.
@@ -209,6 +225,11 @@ impl BatchJobStore {
                 }
                 job.completed = completed;
                 job.failed = failed;
+                job.progress_pct = if job.total > 0 {
+                    (((completed + failed) as f64 / job.total as f64) * 100.0).round() as u8
+                } else {
+                    0
+                };
                 job.updated_at = unix_now();
 
                 if completed + failed == job.total {
@@ -219,6 +240,7 @@ impl BatchJobStore {
                     } else {
                         UrlBatchJobStatus::Failed
                     };
+                    job.progress_pct = 100;
                 }
             }
         }
@@ -289,12 +311,13 @@ mod tests {
             webhook_secret: None,
         };
 
-        let id = store.create_batch(&req, "test-key");
+        let id = store.create_batch(&req, "test-key").unwrap();
         let job = store.get_batch(&id).unwrap();
         assert_eq!(job.total, 2);
         assert_eq!(job.items[0].model, "natural");
         assert_eq!(job.items[1].model, "anime");
         assert_eq!(job.status, UrlBatchJobStatus::Processing);
+        assert_eq!(job.progress_pct, 0);
     }
 
     #[test]
@@ -309,7 +332,7 @@ mod tests {
             webhook_secret: None,
         };
 
-        let id = store.create_batch(&req, "test-key");
+        let id = store.create_batch(&req, "test-key").unwrap();
         assert!(store.cancel_batch(&id));
         let job = store.get_batch(&id).unwrap();
         assert_eq!(job.status, UrlBatchJobStatus::Cancelled);
@@ -329,10 +352,62 @@ mod tests {
             webhook_secret: None,
         };
 
-        let id = store.create_batch(&req, "test-key");
+        let id = store.create_batch(&req, "test-key").unwrap();
         store.update_item(&id, 0, BatchItemStatus::Completed, Some("/result/abc".into()), Some(150));
         let job = store.get_batch(&id).unwrap();
         assert_eq!(job.status, UrlBatchJobStatus::Completed);
         assert_eq!(job.completed, 1);
+        assert_eq!(job.progress_pct, 100);
+    }
+
+    #[test]
+    fn test_progress_tracking() {
+        let store = BatchJobStore::new();
+        let req = CreateBatchRequest {
+            images: vec![
+                BatchItem { url: "https://example.com/a.jpg".into(), model: None },
+                BatchItem { url: "https://example.com/b.jpg".into(), model: None },
+                BatchItem { url: "https://example.com/c.jpg".into(), model: None },
+                BatchItem { url: "https://example.com/d.jpg".into(), model: None },
+            ],
+            model: "natural".into(),
+            scale: 4,
+            format: "png".into(),
+            webhook_url: None,
+            webhook_secret: None,
+        };
+
+        let id = store.create_batch(&req, "test-key").unwrap();
+        assert_eq!(store.get_batch(&id).unwrap().progress_pct, 0);
+
+        store.update_item(&id, 0, BatchItemStatus::Completed, None, Some(100));
+        assert_eq!(store.get_batch(&id).unwrap().progress_pct, 25);
+
+        store.update_item(&id, 1, BatchItemStatus::Completed, None, Some(100));
+        assert_eq!(store.get_batch(&id).unwrap().progress_pct, 50);
+
+        store.update_item(&id, 2, BatchItemStatus::Failed { error: "test".into() }, None, None);
+        assert_eq!(store.get_batch(&id).unwrap().progress_pct, 75);
+
+        store.update_item(&id, 3, BatchItemStatus::Completed, None, Some(100));
+        assert_eq!(store.get_batch(&id).unwrap().progress_pct, 100);
+    }
+
+    #[test]
+    fn test_batch_size_limit() {
+        let store = BatchJobStore::new();
+        let images: Vec<BatchItem> = (0..21)
+            .map(|i| BatchItem { url: format!("https://example.com/{}.jpg", i), model: None })
+            .collect();
+        let req = CreateBatchRequest {
+            images,
+            model: "natural".into(),
+            scale: 4,
+            format: "png".into(),
+            webhook_url: None,
+            webhook_secret: None,
+        };
+
+        assert!(store.create_batch(&req, "test-key").is_err());
     }
 }

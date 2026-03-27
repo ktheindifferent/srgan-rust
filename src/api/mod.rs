@@ -10,6 +10,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod batch;
 pub mod billing;
 pub mod jobs;
 pub mod middleware;
@@ -24,7 +25,10 @@ pub use auth::{
     issue_jwt, verify_jwt,
 };
 pub use rate_limit::{ApiRateLimiter, RateLimitResult};
-pub use admin::{AdminStats, check_admin_auth, get_stats};
+pub use admin::{
+    AdminStats, ApiKeyInfo, JobHistoryEntry, ModelMetrics, ModelMetricsTracker,
+    SystemStats, check_admin_auth, get_full_stats, get_stats,
+};
 pub use upscale::{
     deliver_webhook, unix_now,
     AsyncUpscaleRequest, AsyncUpscaleResponse,

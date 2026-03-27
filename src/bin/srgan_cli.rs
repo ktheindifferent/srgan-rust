@@ -30,25 +30,39 @@ fn main() {
                 )
                 .arg(
                     Arg::with_name("output")
-                        .required(true)
+                        .long("output")
+                        .short("o")
+                        .takes_value(true)
+                        .help("Output image path (default: <input>_upscaled.<format>)"),
+                )
+                .arg(
+                    Arg::with_name("output_pos")
                         .index(2)
-                        .help("Output image path"),
+                        .help("Output image path (positional, same as --output)"),
                 )
                 .arg(
                     Arg::with_name("scale")
                         .long("scale")
                         .takes_value(true)
-                        .default_value("4")
-                        .possible_values(&["2", "4"])
-                        .help("Scale factor"),
+                        .default_value("4x")
+                        .possible_values(&["2x", "4x"])
+                        .help("Scale factor (2x or 4x)"),
                 )
                 .arg(
                     Arg::with_name("model")
                         .long("model")
                         .takes_value(true)
                         .default_value("srgan")
-                        .possible_values(&["srgan", "waifu2x"])
+                        .possible_values(&["srgan", "real-esrgan", "waifu2x-anime"])
                         .help("Model to use for upscaling"),
+                )
+                .arg(
+                    Arg::with_name("format")
+                        .long("format")
+                        .takes_value(true)
+                        .default_value("png")
+                        .possible_values(&["png", "jpg", "webp"])
+                        .help("Output image format"),
                 )
                 .arg(
                     Arg::with_name("quality")
@@ -116,11 +130,33 @@ fn main() {
 
 fn run_upscale(matches: &clap::ArgMatches) -> Result<()> {
     let input = matches.value_of("input").unwrap();
-    let output = matches.value_of("output").unwrap();
-    let scale: usize = matches.value_of("scale").unwrap().parse().unwrap();
-    let model_label = match matches.value_of("model").unwrap() {
+    let out_format = matches.value_of("format").unwrap_or("png");
+
+    // Output path: --output flag > positional arg > auto-generated
+    let output_owned: String;
+    let output = if let Some(o) = matches.value_of("output").or(matches.value_of("output_pos")) {
+        o
+    } else {
+        let stem = Path::new(input)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output");
+        let ext = match out_format {
+            "jpg" | "jpeg" => "jpg",
+            "webp" => "webp",
+            _ => "png",
+        };
+        output_owned = format!("{}_upscaled.{}", stem, ext);
+        &output_owned
+    };
+
+    let scale_str = matches.value_of("scale").unwrap_or("4x");
+    let scale: usize = scale_str.trim_end_matches('x').parse().unwrap_or(4);
+
+    let model_label = match matches.value_of("model").unwrap_or("srgan") {
         "srgan" => "natural",
-        "waifu2x" => "waifu2x",
+        "waifu2x" | "waifu2x-anime" => "waifu2x",
+        "real-esrgan" => "real-esrgan",
         other => other,
     };
     let quality_metric = matches.value_of("quality"); // None, Some("psnr"), or Some("ssim")
@@ -133,7 +169,7 @@ fn run_upscale(matches: &clap::ArgMatches) -> Result<()> {
         )));
     }
 
-    println!("Loading {} model ({}x)...", matches.value_of("model").unwrap(), scale);
+    println!("Loading {} model ({}x)...", matches.value_of("model").unwrap_or("srgan"), scale);
     let network = ThreadSafeNetwork::from_label(model_label, Some(scale)).map_err(|e| {
         SrganError::InvalidInput(format!("Failed to load model '{}': {}", model_label, e))
     })?;
@@ -150,9 +186,24 @@ fn run_upscale(matches: &clap::ArgMatches) -> Result<()> {
     let elapsed = start.elapsed();
 
     let (out_w, out_h) = (upscaled.width(), upscaled.height());
-    upscaled.save(output).map_err(SrganError::Io)?;
 
-    println!("Output: {}x{}", out_w, out_h);
+    // Encode with the requested format
+    match out_format {
+        "jpg" | "jpeg" => {
+            let rgb = upscaled.to_rgb();
+            let fout = std::fs::File::create(output).map_err(SrganError::Io)?;
+            let mut bw = std::io::BufWriter::new(fout);
+            image::jpeg::JPEGEncoder::new_with_quality(&mut bw, 90)
+                .encode(rgb.as_ref(), out_w, out_h, image::ColorType::RGB(8))
+                .map_err(SrganError::Io)?;
+        }
+        _ => {
+            // PNG and WebP (WebP falls back to PNG with image 0.19)
+            upscaled.save(output).map_err(SrganError::Io)?;
+        }
+    }
+
+    println!("Output: {}x{} ({})", out_w, out_h, out_format);
     println!("Time: {:.2}s", elapsed.as_secs_f64());
     println!("Saved to {}", output);
 
@@ -222,6 +273,7 @@ fn run_benchmark(matches: &clap::ArgMatches) -> Result<()> {
     // Models to benchmark
     let models: &[(&str, &str)] = &[
         ("srgan", "natural"),
+        ("real-esrgan", "real-esrgan"),
         ("waifu2x", "waifu2x"),
     ];
 
@@ -353,8 +405,11 @@ fn run_info() -> Result<()> {
 
     // Models
     println!("Available models:");
-    println!("  {:<12} {}", "srgan", "Neural net trained on natural images (L1 loss, 4x)");
-    println!("  {:<12} {}", "waifu2x", "Anime/illustration optimised (Lanczos3 + unsharp, 4x)");
+    println!("  {:<16} {}", "srgan", "Neural net trained on natural images (L1 loss, 4x)");
+    println!("  {:<16} {}", "real-esrgan", "Real-ESRGAN RRDB (23 blocks, sub-pixel upsampling, 4x/2x)");
+    println!("  {:<16} {}", "waifu2x-anime", "Anime/illustration optimised (Lanczos3 + unsharp, 4x)");
+    println!();
+    println!("Output formats: png, jpg (quality 85-100), webp");
     println!();
 
     // Built-in model metadata
