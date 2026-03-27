@@ -165,6 +165,32 @@ pub fn handle_webhook(
             Ok(WebhookAction::DunningStarted(user_id))
         }
 
+        // ── invoice.paid ──────────────────────────────────────────────
+        // Payment recovered: restore key to active status.
+        "invoice.paid" => {
+            let user_id = extract_user_id_from_event(&event);
+            if user_id.is_empty() {
+                return Err("invoice.paid: cannot determine user_id".into());
+            }
+            if let Ok(mut db) = billing_db.lock() {
+                db.set_status(&user_id, AccountStatus::Active);
+            }
+            Ok(WebhookAction::Provisioned(user_id))
+        }
+
+        // ── customer.subscription.updated ────────────────────────────
+        // Subscription change: ensure key is active.
+        "customer.subscription.updated" => {
+            let user_id = extract_user_id_from_event(&event);
+            if user_id.is_empty() {
+                return Err("customer.subscription.updated: cannot determine user_id".into());
+            }
+            if let Ok(mut db) = billing_db.lock() {
+                db.set_status(&user_id, AccountStatus::Active);
+            }
+            Ok(WebhookAction::Provisioned(user_id))
+        }
+
         other => Ok(WebhookAction::Ignored(format!("unhandled: {}", other))),
     }
 }

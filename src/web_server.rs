@@ -16,6 +16,8 @@ use crate::api::billing::{BillingDb, BillingStatus, CheckoutRequest, Subscriptio
 use crate::api::middleware::TierRateLimiter;
 use crate::api::rate_limit_dashboard::RateLimitDashboard;
 use crate::api::upscale::{deliver_webhook, unix_now as api_unix_now, WebhookConfig, WebhookDeliveryState};
+use crate::rate_limit_dashboard::KeyUsageDashboard;
+use crate::stripe_dunning::StripeDunningManager;
 use crate::storage::S3Config;
 
 // ── Request metrics ──────────────────────────────────────────────────────────
@@ -415,6 +417,10 @@ pub struct WebServer {
     key_store: Arc<KeyStore>,
     /// Per-API-key rate-limit dashboard (daily usage + throttle counts)
     rate_limit_dashboard: Arc<Mutex<RateLimitDashboard>>,
+    /// Per-API-key usage dashboard (bandwidth, monthly limits)
+    key_usage_dashboard: Arc<Mutex<KeyUsageDashboard>>,
+    /// Stripe dunning manager
+    stripe_dunning: Arc<Mutex<StripeDunningManager>>,
 }
 
 /// Cached result
@@ -495,6 +501,8 @@ impl WebServer {
             org_db: Arc::new(Mutex::new(crate::api::org::OrgDb::new())),
             key_store: Arc::new(key_store),
             rate_limit_dashboard: Arc::new(Mutex::new(RateLimitDashboard::new())),
+            key_usage_dashboard: Arc::new(Mutex::new(KeyUsageDashboard::new())),
+            stripe_dunning: Arc::new(Mutex::new(StripeDunningManager::new())),
         })
     }
     
@@ -662,11 +670,12 @@ impl WebServer {
                 ("POST", "/webhooks/stripe") => self.handle_stripe_webhook_v2(&request),
                 ("GET", "/api/v1/billing/status") => self.handle_billing_status(&request),
                 ("GET", "/api/v1/admin/keys") => self.handle_admin_keys(&request),
-                ("GET", "/admin/rate-limits") => self.handle_admin_rate_limits(&request),
+                ("GET", "/admin/api-keys") => self.handle_admin_api_keys_list(&request),
+                ("GET", "/admin/rate-limits") => self.handle_admin_rate_limits_page(&request),
                 ("GET", "/api/v1/rate-limit") => self.handle_rate_limit_self(&request),
                 ("POST", "/api/v1/video/upscale") | ("POST", "/api/video/upscale") => self.handle_video_upscale(&request),
                 ("POST", "/api/v1/compare") => self.handle_compare(&request),
-                ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
+                ("POST", "/api/v1/webhooks/test") | ("POST", "/api/v1/webhook/test") => self.handle_webhook_test(&request),
                 // Registration & API key management
                 ("POST", "/api/register") | ("POST", "/api/v1/register") => self.handle_register(&request),
                 ("GET", "/api/keys") | ("GET", "/api/v1/keys") => self.handle_list_keys(&request),
@@ -703,6 +712,7 @@ impl WebServer {
                 _ if method == "GET" && (path.starts_with("/api/v1/batch/") || path.starts_with("/api/batch/")) && path.ends_with("/checkpoint") => self.handle_batch_checkpoint(path),
                 _ if method == "GET" && (path.starts_with("/api/batch/") || path.starts_with("/api/v1/batch/")) => self.handle_batch_status(path),
                 _ if method == "GET" && path.starts_with("/preview/pkg/") => self.handle_wasm_pkg_file(path),
+                _ if method == "GET" && path.starts_with("/admin/api-keys/") && path.ends_with("/usage") => self.handle_admin_key_usage(&request, path),
                 _ if method == "PUT" && path.starts_with("/admin/rate-limits/") => self.handle_update_rate_limit(&request, path),
                 _ => self.handle_not_found(),
             };
@@ -3700,14 +3710,45 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
         ) {
             Ok(action) => {
                 let msg = match &action {
-                    crate::billing::stripe::WebhookAction::Provisioned(id) =>
-                        format!("provisioned:{}", id),
-                    crate::billing::stripe::WebhookAction::Suspended(id) =>
-                        format!("suspended:{}", id),
-                    crate::billing::stripe::WebhookAction::Revoked(id) =>
-                        format!("revoked:{}", id),
-                    crate::billing::stripe::WebhookAction::DunningStarted(id) =>
-                        format!("dunning_started:{}", id),
+                    crate::billing::stripe::WebhookAction::Provisioned(id) => {
+                        // Payment recovered — clear dunning state
+                        if let Ok(mut dunning) = self.stripe_dunning.lock() {
+                            dunning.on_payment_recovered(id);
+                        }
+                        if let Ok(mut dash) = self.key_usage_dashboard.lock() {
+                            dash.set_payment_failed(id, false);
+                        }
+                        format!("provisioned:{}", id)
+                    }
+                    crate::billing::stripe::WebhookAction::Suspended(id) => {
+                        // Payment failed — enter dunning, downgrade, mark payment_failed
+                        if let Ok(mut dunning) = self.stripe_dunning.lock() {
+                            dunning.on_payment_failed(id, id, "", "pro");
+                        }
+                        if let Ok(mut dash) = self.key_usage_dashboard.lock() {
+                            dash.set_payment_failed(id, true);
+                        }
+                        format!("suspended:{}", id)
+                    }
+                    crate::billing::stripe::WebhookAction::Revoked(id) => {
+                        // Subscription deleted — clear dunning
+                        if let Ok(mut dunning) = self.stripe_dunning.lock() {
+                            dunning.on_payment_recovered(id);
+                        }
+                        if let Ok(mut dash) = self.key_usage_dashboard.lock() {
+                            dash.set_payment_failed(id, false);
+                        }
+                        format!("revoked:{}", id)
+                    }
+                    crate::billing::stripe::WebhookAction::DunningStarted(id) => {
+                        if let Ok(mut dunning) = self.stripe_dunning.lock() {
+                            dunning.on_payment_failed(id, id, "", "pro");
+                        }
+                        if let Ok(mut dash) = self.key_usage_dashboard.lock() {
+                            dash.set_payment_failed(id, true);
+                        }
+                        format!("dunning_started:{}", id)
+                    }
                     crate::billing::stripe::WebhookAction::Ignored(reason) =>
                         format!("ignored:{}", reason),
                 };
@@ -3848,6 +3889,75 @@ if(document.getElementById('rlSearch')){document.getElementById('rlSearch').addE
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
             resp
+        )
+    }
+
+    // ── New rate-limit dashboard + dunning handlers ────────────────────────────
+
+    /// GET /admin/api-keys — list all keys with usage stats (JSON)
+    fn handle_admin_api_keys_list(&self, request: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return self.error_response(401, "Unauthorized");
+        }
+
+        let body = if let Ok(dash) = self.key_usage_dashboard.lock() {
+            crate::rate_limit_dashboard::admin_api_keys_json(&dash)
+        } else {
+            serde_json::json!({ "keys": [] })
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            body
+        )
+    }
+
+    /// GET /admin/api-keys/{key_id}/usage — detailed usage for one key (JSON)
+    fn handle_admin_key_usage(&self, request: &str, path: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return self.error_response(401, "Unauthorized");
+        }
+
+        // Extract key_id from /admin/api-keys/{key_id}/usage
+        let key_id = path
+            .strip_prefix("/admin/api-keys/")
+            .and_then(|rest| rest.strip_suffix("/usage"))
+            .unwrap_or("");
+
+        if key_id.is_empty() {
+            return self.error_response(400, "Missing key_id");
+        }
+
+        let body = if let Ok(dash) = self.key_usage_dashboard.lock() {
+            match crate::rate_limit_dashboard::admin_key_usage_json(&dash, key_id) {
+                Some(json) => json,
+                None => return self.error_response(404, "API key not found"),
+            }
+        } else {
+            return self.error_response(500, "Failed to acquire dashboard lock");
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            body
+        )
+    }
+
+    /// GET /admin/rate-limits — HTML admin page with color-coded table
+    fn handle_admin_rate_limits_page(&self, request: &str) -> String {
+        if !self.verify_admin_token(request) {
+            return self.error_response(401, "Unauthorized");
+        }
+
+        let html = if let Ok(dash) = self.key_usage_dashboard.lock() {
+            crate::rate_limit_dashboard::admin_rate_limits_html(&dash)
+        } else {
+            "<html><body><h1>Error loading dashboard</h1></body></html>".to_string()
+        };
+
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+            html
         )
     }
 

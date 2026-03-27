@@ -49,6 +49,7 @@ pub mod model_registry;
 pub mod network;
 pub mod parallel;
 pub mod psnr;
+pub mod quality;
 pub mod ssim;
 pub mod profiling;
 pub mod thread_safe_network;
@@ -65,6 +66,8 @@ pub mod wasm;
 pub mod webhooks;
 pub mod cdn;
 pub mod web;
+pub mod rate_limit_dashboard;
+pub mod stripe_dunning;
 pub mod web_server;
 pub mod web_server_improved;
 
