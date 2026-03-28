@@ -1128,9 +1128,12 @@ mod tests {
 
     #[test]
     fn compat_unsharp_mask_modifies_pixels() {
-        // With noise=3 (aggressive sharpening), pixel values should differ
-        // from the input for non-edge pixels.
-        let img = test_image(16, 16);
+        // Use a checkerboard pattern so the unsharp mask has sharp edges to
+        // enhance (a smooth gradient may round-trip unchanged).
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_fn(16, 16, |x, y| {
+            let v = if (x + y) % 2 == 0 { 200u8 } else { 50u8 };
+            image::Rgba([v, v, v, 255])
+        }));
         let sharpened = unsharp_mask(&img, 0.8);
         let orig_rgba = img.to_rgba();
         let sharp_rgba = sharpened.to_rgba();
