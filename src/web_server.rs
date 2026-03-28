@@ -20,6 +20,12 @@ use crate::rate_limit_dashboard::KeyUsageDashboard;
 use crate::referral::ReferralStore;
 use crate::stripe_dunning::StripeDunningManager;
 use crate::storage::S3Config;
+use crate::billing::quota::QuotaDb;
+use crate::webhooks::stream::WebhookEventStore;
+use crate::web::observability::{
+    CacheStats, InferenceTracker, LatencyRing, ObservabilitySnapshot, OrgQuotaRow,
+    render_dashboard_html,
+};
 
 // ── Request metrics ──────────────────────────────────────────────────────────
 
@@ -457,6 +463,16 @@ pub struct WebServer {
     pub referral_store: Arc<ReferralStore>,
     /// Batch job analytics (per-job metrics in SQLite)
     batch_analytics_db: Arc<crate::analytics::BatchAnalyticsDb>,
+    /// Per-org monthly pixel quota enforcement
+    quota_db: Arc<QuotaDb>,
+    /// Webhook event store (all events, for replay/debugging)
+    webhook_event_store: Arc<WebhookEventStore>,
+    /// Observability: latency ring buffer (last 1000 requests)
+    obs_latency_ring: Arc<Mutex<LatencyRing>>,
+    /// Observability: cache hit/miss counters
+    obs_cache_stats: Arc<CacheStats>,
+    /// Observability: per-model inference time tracker
+    obs_inference_tracker: Arc<InferenceTracker>,
 }
 
 /// Cached result
@@ -555,6 +571,17 @@ impl WebServer {
                             .expect("in-memory analytics db must succeed")
                     }),
             ),
+            quota_db: Arc::new(
+                QuotaDb::open_in_memory()
+                    .expect("in-memory quota db must succeed"),
+            ),
+            webhook_event_store: Arc::new(
+                WebhookEventStore::open_in_memory()
+                    .expect("in-memory webhook event store must succeed"),
+            ),
+            obs_latency_ring: Arc::new(Mutex::new(LatencyRing::new(1000))),
+            obs_cache_stats: Arc::new(CacheStats::new()),
+            obs_inference_tracker: Arc::new(InferenceTracker::new()),
         })
     }
 
@@ -832,6 +859,18 @@ impl WebServer {
                 ("GET", "/api/v1/referrals/stats") => self.handle_referral_stats(&request),
                 _ if method == "GET"
                     && path.starts_with("/api/v1/referrals/validate/") => self.handle_referral_validate(path),
+                // v2 stubs — return version notice
+                ("POST", "/api/v2/upscale") => self.handle_v2_stub("upscale"),
+                ("POST", "/api/v2/upscale/async") => self.handle_v2_stub("upscale/async"),
+                ("POST", "/api/v2/batch") => self.handle_v2_stub("batch"),
+                // Quota admin endpoints
+                ("GET", "/api/v1/admin/quotas") => self.handle_admin_quota_get(&request),
+                ("PUT", "/api/v1/admin/quotas") => self.handle_admin_quota_update(&request),
+                // Webhook event stream replay
+                ("GET", "/api/v1/webhooks/events") => self.handle_webhook_events(&request),
+                // Observability dashboard
+                ("GET", "/admin/observability") => self.handle_observability_dashboard(),
+                ("GET", "/api/v1/admin/observability") => self.handle_observability_json(),
                 _ => self.handle_not_found(),
             };
 
@@ -840,12 +879,78 @@ impl WebServer {
             let is_error = response.starts_with("HTTP/1.1 4") || response.starts_with("HTTP/1.1 5");
             // Normalise dynamic path segments for grouping
             let metrics_key = Self::normalise_metrics_path(method, path);
+            if let Ok(mut ring) = self.obs_latency_ring.lock() {
+                ring.push(latency.as_micros() as u64);
+            }
             if let Ok(mut m) = self.request_metrics.lock() {
                 m.record(&metrics_key, latency, is_error);
             }
 
+            // Inject X-Api-Version header into response
+            let response = Self::inject_version_header(&response, path);
+
             // Send response
             let _ = stream.write_all(response.as_bytes());
+    }
+
+    /// Inject `X-Api-Version` response header based on the request path.
+    fn inject_version_header(response: &str, path: &str) -> String {
+        let version = if path.starts_with("/api/v2/") {
+            "2"
+        } else {
+            "1"
+        };
+        // Insert after the first line (HTTP status line)
+        if let Some(pos) = response.find("\r\n") {
+            let (status_line, rest) = response.split_at(pos);
+            format!("{}\r\nX-Api-Version: {}{}", status_line, version, rest)
+        } else {
+            response.to_string()
+        }
+    }
+
+    /// Verify HMAC-SHA256 request signature from `X-Signature` header.
+    /// Returns `true` if valid or if no signature was provided (optional).
+    /// Returns `false` only if a signature was provided but invalid.
+    fn verify_request_signature(request: &str, api_secret: Option<&str>) -> bool {
+        // If server has no secret configured, skip verification
+        let secret = match api_secret {
+            Some(s) => s,
+            None => return true,
+        };
+
+        // Extract X-Signature header
+        let sig_header = request
+            .lines()
+            .find(|l| l.to_lowercase().starts_with("x-signature:"))
+            .and_then(|l| l.splitn(2, ':').nth(1))
+            .map(|v| v.trim().to_string());
+
+        // If no signature header present, allow (it's optional)
+        let provided_sig = match sig_header {
+            Some(s) => s,
+            None => return true,
+        };
+
+        // Extract body (after \r\n\r\n)
+        let body = request
+            .splitn(2, "\r\n\r\n")
+            .nth(1)
+            .or_else(|| request.splitn(2, "\n\n").nth(1))
+            .unwrap_or("");
+
+        // Compute expected signature
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let mut mac = match Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
+            Ok(m) => m,
+            Err(_) => return false,
+        };
+        mac.update(body.as_bytes());
+        let expected = hex::encode(mac.finalize().into_bytes());
+
+        // Constant-time comparison
+        expected == provided_sig
     }
     
     /// Handle health check
@@ -6562,6 +6667,183 @@ th{{background:#161b22}}.stat{{background:#161b22;border-radius:8px;padding:1rem
         format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
             html
+        )
+    }
+
+    // ── v2 stub ──────────────────────────────────────────────────────────────
+
+    fn handle_v2_stub(&self, endpoint: &str) -> String {
+        let body = serde_json::json!({
+            "error": "not_implemented",
+            "message": format!("/api/v2/{} is reserved for a future API version", endpoint),
+            "current_version": 1,
+        });
+        format!(
+            "HTTP/1.1 501 Not Implemented\r\nContent-Type: application/json\r\n\r\n{}",
+            body
+        )
+    }
+
+    // ── Quota admin endpoints ────────────────────────────────────────────────
+
+    fn handle_admin_quota_get(&self, request: &str) -> String {
+        // Parse query string for org_id
+        let qs = request
+            .lines()
+            .next()
+            .and_then(|l| l.split('?').nth(1))
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("");
+
+        let org_id = qs
+            .split('&')
+            .find_map(|pair| {
+                let mut kv = pair.splitn(2, '=');
+                if kv.next() == Some("org_id") {
+                    kv.next().map(|v| v.to_string())
+                } else {
+                    None
+                }
+            });
+
+        match org_id {
+            Some(id) => {
+                let status = self.quota_db.status(&id);
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    serde_json::to_string(&status).unwrap_or_default()
+                )
+            }
+            None => {
+                // Return top 50 orgs
+                let top = self.quota_db.top_orgs(50);
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    serde_json::to_string(&top).unwrap_or_default()
+                )
+            }
+        }
+    }
+
+    fn handle_admin_quota_update(&self, request: &str) -> String {
+        let body = request
+            .splitn(2, "\r\n\r\n")
+            .nth(1)
+            .or_else(|| request.splitn(2, "\n\n").nth(1))
+            .unwrap_or("");
+
+        match serde_json::from_str::<crate::billing::quota::UpdateQuotaRequest>(body) {
+            Ok(req) => {
+                self.quota_db.set_limit(&req.org_id, req.pixels_limit);
+                let status = self.quota_db.status(&req.org_id);
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    serde_json::to_string(&status).unwrap_or_default()
+                )
+            }
+            Err(e) => {
+                let body = serde_json::json!({"error": "invalid_request", "message": e.to_string()});
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{}",
+                    body
+                )
+            }
+        }
+    }
+
+    // ── Webhook event stream ─────────────────────────────────────────────────
+
+    fn handle_webhook_events(&self, request: &str) -> String {
+        let qs = request
+            .lines()
+            .next()
+            .and_then(|l| l.split('?').nth(1))
+            .and_then(|s| s.split_whitespace().next())
+            .unwrap_or("");
+
+        match crate::webhooks::stream::EventQuery::from_query_string(qs) {
+            Some(query) => {
+                let events = self.webhook_event_store.query(&query);
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+                    serde_json::to_string(&events).unwrap_or_default()
+                )
+            }
+            None => {
+                let body = serde_json::json!({
+                    "error": "missing_parameter",
+                    "message": "org_id query parameter is required"
+                });
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n\r\n{}",
+                    body
+                )
+            }
+        }
+    }
+
+    // ── Observability dashboard ──────────────────────────────────────────────
+
+    fn build_observability_snapshot(&self) -> ObservabilitySnapshot {
+        let (histogram, p50, p95, p99) = if let Ok(ring) = self.obs_latency_ring.lock() {
+            (
+                ring.histogram(),
+                ring.percentile(50.0) as f64 / 1000.0,
+                ring.percentile(95.0) as f64 / 1000.0,
+                ring.percentile(99.0) as f64 / 1000.0,
+            )
+        } else {
+            (vec![], 0.0, 0.0, 0.0)
+        };
+
+        let model_inference = self.obs_inference_tracker.snapshot();
+        let cache = self.obs_cache_stats.snapshot();
+
+        let webhook_success_rate = self.webhook_event_store.success_rate();
+        let webhook_total_events = self.webhook_event_store.count() as u64;
+
+        let top_quota = self.quota_db.top_orgs(10);
+        let top_orgs: Vec<OrgQuotaRow> = top_quota
+            .into_iter()
+            .map(|q| OrgQuotaRow {
+                org_id: q.org_id,
+                pixels_used: q.pixels_used,
+                pixels_limit: q.pixels_limit,
+                usage_pct: if q.pixels_limit > 0 {
+                    q.pixels_used as f64 / q.pixels_limit as f64 * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect();
+
+        ObservabilitySnapshot {
+            latency_histogram: histogram,
+            latency_p50_ms: p50,
+            latency_p95_ms: p95,
+            latency_p99_ms: p99,
+            model_inference,
+            cache,
+            webhook_success_rate,
+            webhook_total_events,
+            top_orgs,
+        }
+    }
+
+    fn handle_observability_dashboard(&self) -> String {
+        let snap = self.build_observability_snapshot();
+        let html = render_dashboard_html(&snap);
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n{}",
+            html
+        )
+    }
+
+    fn handle_observability_json(&self) -> String {
+        let snap = self.build_observability_snapshot();
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            serde_json::to_string(&snap).unwrap_or_default()
         )
     }
 

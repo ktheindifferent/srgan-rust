@@ -10,6 +10,8 @@
 //! - `DELETE /api/v1/webhooks/:id` — remove a webhook
 //! - `POST /api/v1/webhooks/test` — fire a test ping
 
+pub mod stream;
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
