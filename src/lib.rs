@@ -1,3 +1,5 @@
+#![recursion_limit = "512"]
+
 use profiling::TrackingAllocator;
 
 // TODO: Disabled for test debugging - the custom allocator has memory issues
@@ -80,6 +82,10 @@ pub mod video_sr;
 pub mod web_server;
 pub mod web_server_improved;
 pub mod analytics;
+pub mod ensemble;
+pub mod inference;
+pub mod quantization;
+pub mod tiling;
 
 #[cfg(test)]
 mod error_handling_tests;
