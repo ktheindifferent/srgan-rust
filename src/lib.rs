@@ -354,10 +354,13 @@ impl UpscalingNetwork {
 
 	/// Accepts labels: [natural, anime, bilinear,
 	///                   waifu2x, waifu2x-anime, waifu2x-photo,
-	///                   waifu2x-noise{0..3}-scale{1,2}]
+	///                   waifu2x-enhance, waifu2x-enhance-anime, waifu2x-enhance-photo,
+	///                   waifu2x-noise{0..3}-scale{1..4}]
 	///
 	/// Waifu2x labels fall back to the built-in anime/natural model when
 	/// native waifu2x weight files are not available on disk.
+	/// Enhancement labels (`waifu2x-enhance*`) apply denoise + sharpen +
+	/// contrast at the original resolution without upscaling.
 	pub fn from_label(label: &str, bilinear_factor: Option<usize>) -> ::std::result::Result<Self, String> {
 		match label {
 			"natural" => {
@@ -456,6 +459,21 @@ impl UpscalingNetwork {
 							})
 						}
 					}
+				} else if wnet.is_enhance() {
+					// Enhancement mode without CNN weights: build a VGG7 denoise
+					// graph (scale=1) with no parameters.  The compat backend in
+					// Waifu2xNetwork handles the actual enhancement pipeline.
+					let graph = waifu2x_vgg7_net(1)
+						.map_err(|e| format!("{}", e))?;
+					let display = format!(
+						"waifu2x-enhance ({}) — denoise+sharpen+contrast (compat mode)",
+						label
+					);
+					Ok(UpscalingNetwork {
+						graph,
+						parameters: Vec::new(),
+						display,
+					})
 				} else {
 					// No CNN weights — use built-in proxy model.
 					// Photo style uses the natural model; anime/artwork use the anime model.

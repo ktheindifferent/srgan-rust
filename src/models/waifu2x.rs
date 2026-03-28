@@ -115,6 +115,13 @@ impl Waifu2xVariant {
         if label == "waifu2x-photo" {
             return Some(Self { noise_level: 2, scale: 2 });
         }
+        // Enhancement mode labels → scale=1, noise=2
+        if label == "waifu2x-enhance" || label == "waifu2x-enhance-anime" {
+            return Some(Self { noise_level: 2, scale: 1 });
+        }
+        if label == "waifu2x-enhance-photo" {
+            return Some(Self { noise_level: 2, scale: 1 });
+        }
         let rest = label.strip_prefix("waifu2x-")?;
         let parts: Vec<&str> = rest.split('-').collect();
         if parts.len() != 2 { return None; }

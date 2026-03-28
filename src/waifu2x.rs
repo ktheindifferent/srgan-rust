@@ -950,7 +950,9 @@ mod tests {
                 .unwrap_or_else(|e| panic!("from_label({}) failed: {}", label, e));
             let result = net.upscale_image(&img)
                 .unwrap_or_else(|e| panic!("upscale_image({}) failed: {}", label, e));
-            let expected_w = if label.contains("scale4") {
+            let expected_w = if label.contains("enhance") {
+                10 // enhance mode preserves dimensions
+            } else if label.contains("scale4") {
                 40
             } else if label.contains("scale3") {
                 30
@@ -1040,6 +1042,88 @@ mod tests {
     fn compat_invalid_label_errors() {
         assert!(Waifu2xNetwork::from_label("esrgan").is_err());
         assert!(Waifu2xNetwork::from_label("waifu2x-bad").is_err());
+    }
+
+    #[test]
+    fn parse_enhance_label() {
+        let c = parse_label("waifu2x-enhance").unwrap();
+        assert_eq!(c.mode, Waifu2xMode::Enhance);
+        assert_eq!(c.scale, 1);
+        assert_eq!(c.style, Waifu2xStyle::Anime);
+    }
+
+    #[test]
+    fn parse_enhance_anime_label() {
+        let c = parse_label("waifu2x-enhance-anime").unwrap();
+        assert_eq!(c.mode, Waifu2xMode::Enhance);
+        assert_eq!(c.style, Waifu2xStyle::Anime);
+    }
+
+    #[test]
+    fn parse_enhance_photo_label() {
+        let c = parse_label("waifu2x-enhance-photo").unwrap();
+        assert_eq!(c.mode, Waifu2xMode::Enhance);
+        assert_eq!(c.style, Waifu2xStyle::Photo);
+    }
+
+    #[test]
+    fn enhance_preserves_dimensions() {
+        let net = Waifu2xNetwork::from_label("waifu2x-enhance").unwrap();
+        assert!(net.is_enhance());
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 16);
+        assert_eq!(result.height(), 16);
+    }
+
+    #[test]
+    fn enhance_photo_preserves_dimensions() {
+        let net = Waifu2xNetwork::from_label("waifu2x-enhance-photo").unwrap();
+        assert!(net.is_enhance());
+        let img = test_image(20, 20);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 20);
+        assert_eq!(result.height(), 20);
+    }
+
+    #[test]
+    fn enhance_modifies_pixels() {
+        let net = Waifu2xNetwork::from_label("waifu2x-enhance").unwrap();
+        let img = test_image(16, 16);
+        let result = net.upscale_image(&img).unwrap();
+        let orig_rgba = img.to_rgba();
+        let res_rgba = result.to_rgba();
+        let mut differs = false;
+        for y in 1..15 {
+            for x in 1..15 {
+                if orig_rgba.get_pixel(x, y) != res_rgba.get_pixel(x, y) {
+                    differs = true;
+                    break;
+                }
+            }
+        }
+        assert!(differs, "enhance mode should modify pixel values");
+    }
+
+    #[test]
+    fn contrast_adjustment_modifies_midtones() {
+        let img = test_image(10, 10);
+        let adjusted = adjust_contrast(&img, Waifu2xStyle::Anime);
+        let orig_rgba = img.to_rgba();
+        let adj_rgba = adjusted.to_rgba();
+        // Midtone pixels (not 0 or 255) should be boosted
+        let mut any_changed = false;
+        for y in 0..10 {
+            for x in 0..10 {
+                let o = orig_rgba.get_pixel(x, y);
+                let a = adj_rgba.get_pixel(x, y);
+                if o != a {
+                    any_changed = true;
+                    break;
+                }
+            }
+        }
+        assert!(any_changed, "contrast adjustment should modify midtone pixels");
     }
 
     #[test]
