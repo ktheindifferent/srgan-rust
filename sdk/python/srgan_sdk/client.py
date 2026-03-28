@@ -34,7 +34,10 @@ DEFAULT_TIMEOUT = 120.0
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF = 1.0
 
-ModelLabel = Literal["esrgan", "esrgan-anime", "esrgan-x2", "natural", "anime", "waifu2x"]
+ModelLabel = Literal[
+    "esrgan", "esrgan-anime", "esrgan-x2", "natural", "anime", "bilinear",
+    "waifu2x", "waifu2x-anime", "waifu2x-photo",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +107,9 @@ class SrganClient:
         *,
         model: str = "esrgan",
         scale: int = 4,
+        waifu2x_noise_level: Optional[int] = None,
+        waifu2x_scale: Optional[int] = None,
+        waifu2x_style: Optional[str] = None,
         webhook_url: Optional[str] = None,
     ) -> UpscaleResult:
         """
@@ -118,9 +124,21 @@ class SrganClient:
             A file path (``str`` or :class:`pathlib.Path`) or raw image
             bytes.  File paths are read and base64-encoded automatically.
         model:
-            Model identifier to use (default: ``"esrgan"``).
+            Model identifier to use (default: ``"esrgan"``).  For waifu2x,
+            pass ``"waifu2x"`` or a variant label like
+            ``"waifu2x-noise2-scale4"``.
         scale:
             Upscaling factor — typically 2 or 4 (default: ``4``).
+        waifu2x_noise_level:
+            Waifu2x noise reduction level 0–3 (default: 1).  Only used
+            when *model* starts with ``"waifu2x"``.
+        waifu2x_scale:
+            Waifu2x scale factor: 1 (denoise-only), 2, 3, or 4.  Only
+            used when *model* starts with ``"waifu2x"``.
+        waifu2x_style:
+            Waifu2x content style: ``"anime"`` (default), ``"photo"``, or
+            ``"artwork"``.  Only used when *model* starts with
+            ``"waifu2x"``.
         webhook_url:
             Optional URL the server will POST the result to when the job
             finishes.
@@ -135,6 +153,12 @@ class SrganClient:
             "model": model,
             "scale": scale,
         }
+        if waifu2x_noise_level is not None:
+            payload["waifu2x_noise_level"] = waifu2x_noise_level
+        if waifu2x_scale is not None:
+            payload["waifu2x_scale"] = waifu2x_scale
+        if waifu2x_style is not None:
+            payload["waifu2x_style"] = waifu2x_style
         if webhook_url is not None:
             payload["webhook_url"] = webhook_url
 

@@ -20,6 +20,7 @@ export type ModelLabel =
   | "waifu2x"
   | "waifu2x-anime"
   | "waifu2x-photo"
+  | `waifu2x-noise${0 | 1 | 2 | 3}-scale${1 | 2 | 3 | 4}`
   | "real-esrgan"
   | "real-esrgan-anime"
   | "real-esrgan-x2"
@@ -89,8 +90,8 @@ export interface UpscaleRequest {
   model?: ModelLabel;
   /** Waifu2x noise-reduction level 0–3 (default: 1). Only used when model is "waifu2x". */
   waifu2x_noise_level?: 0 | 1 | 2 | 3;
-  /** Waifu2x scale factor: 1 (denoise-only) or 2 (upscale). Default: 2. Only used when model is "waifu2x". */
-  waifu2x_scale?: 1 | 2;
+  /** Waifu2x scale factor: 1 (denoise-only), 2, 3, or 4 (default: 2). Only used when model is "waifu2x". Scales 3× and 4× use iterative 2× passes. */
+  waifu2x_scale?: 1 | 2 | 3 | 4;
   /** Waifu2x content style hint: "anime" (default), "photo", or "artwork". Only used when model is "waifu2x". */
   waifu2x_style?: "anime" | "photo" | "artwork";
   /** JPEG quality 1–100 (only used when the output is JPEG). */

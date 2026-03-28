@@ -64,6 +64,30 @@ pub struct JobStatus {
     pub compare_url: Option<String>,
 }
 
+/// Waifu2x-specific upscale parameters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Waifu2xOptions {
+    /// Noise reduction level: 0 (none), 1 (low), 2 (medium), 3 (high).
+    pub noise_level: u8,
+    /// Upscaling factor: 1 (denoise-only), 2, 3, or 4.
+    pub scale: u8,
+    /// Content style: "anime", "photo", or "artwork".
+    pub style: String,
+    /// Output format: "png", "jpeg", or "webp".
+    pub format: String,
+}
+
+impl Default for Waifu2xOptions {
+    fn default() -> Self {
+        Self {
+            noise_level: 1,
+            scale: 2,
+            style: "anime".to_string(),
+            format: "png".to_string(),
+        }
+    }
+}
+
 /// SRGAN API client.
 pub struct SrganClient {
     base_url: String,
@@ -81,6 +105,75 @@ impl SrganClient {
                 .timeout(Duration::from_secs(300))
                 .build()
                 .expect("Failed to build HTTP client"),
+        }
+    }
+
+    /// Waifu2x-specific upscale options.
+    ///
+    /// When `model` is `"waifu2x"` or a waifu2x variant, these options
+    /// configure noise reduction, scale, and content style.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// let client = SrganClient::new("http://localhost:8080", "key");
+    /// let result = client.upscale_waifu2x("input.jpg", &Waifu2xOptions {
+    ///     noise_level: 2,
+    ///     scale: 4,
+    ///     style: "anime".to_string(),
+    ///     format: "png".to_string(),
+    /// }).unwrap();
+    /// std::fs::write("output.png", &result).unwrap();
+    /// ```
+    pub fn upscale_waifu2x(
+        &self,
+        path: &str,
+        opts: &Waifu2xOptions,
+    ) -> Result<Vec<u8>, SrganError> {
+        let file_bytes = std::fs::read(path)?;
+        let file_name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "image.jpg".to_string());
+
+        let part = multipart::Part::bytes(file_bytes)
+            .file_name(file_name)
+            .mime_str("application/octet-stream")
+            .unwrap();
+
+        let model_label = format!(
+            "waifu2x-noise{}-scale{}",
+            opts.noise_level.min(3),
+            opts.scale.max(1).min(4)
+        );
+
+        let mut form = multipart::Form::new()
+            .part("image", part)
+            .text("model", model_label)
+            .text("format", opts.format.clone())
+            .text("waifu2x_noise_level", opts.noise_level.to_string())
+            .text("waifu2x_scale", opts.scale.to_string());
+
+        if !opts.style.is_empty() {
+            form = form.text("waifu2x_style", opts.style.clone());
+        }
+
+        let resp = self
+            .client
+            .post(format!("{}/api/v1/upscale", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .multipart(form)
+            .send()?;
+
+        let status = resp.status().as_u16();
+        if status >= 200 && status < 300 {
+            Ok(resp.bytes()?.to_vec())
+        } else {
+            let msg = resp.text().unwrap_or_default();
+            Err(SrganError::Api {
+                status,
+                message: msg,
+            })
         }
     }
 

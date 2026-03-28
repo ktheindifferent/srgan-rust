@@ -76,15 +76,29 @@ pub enum Waifu2xScale {
     One,
     /// Upscale ×2.
     Two,
+    /// Upscale ×3 (achieved via ×2 upscale then downscale to ×3 target).
+    Three,
+    /// Upscale ×4 (achieved via two iterative ×2 passes).
+    Four,
 }
 
 impl Waifu2xScale {
     pub fn from_u8(v: u8) -> Self {
-        if v <= 1 { Waifu2xScale::One } else { Waifu2xScale::Two }
+        match v {
+            0 | 1 => Waifu2xScale::One,
+            2 => Waifu2xScale::Two,
+            3 => Waifu2xScale::Three,
+            _ => Waifu2xScale::Four,
+        }
     }
 
     pub fn as_u8(self) -> u8 {
-        match self { Waifu2xScale::One => 1, Waifu2xScale::Two => 2 }
+        match self {
+            Waifu2xScale::One => 1,
+            Waifu2xScale::Two => 2,
+            Waifu2xScale::Three => 3,
+            Waifu2xScale::Four => 4,
+        }
     }
 }
 
@@ -102,6 +116,16 @@ enum Waifu2xBackend {
     Cnn {
         graph: crate::GraphDef,
         parameters: Vec<ndarray::ArrayD<f32>>,
+    },
+    /// NCNN-Vulkan backend: delegates to an external `waifu2x-ncnn-vulkan`
+    /// binary for GPU-accelerated inference.  This is the preferred backend
+    /// when available because it supports native waifu2x models directly and
+    /// leverages Vulkan compute shaders for high throughput.
+    Ncnn {
+        /// Path to the `waifu2x-ncnn-vulkan` binary.
+        binary_path: PathBuf,
+        /// Path to the directory containing NCNN model files (`.param` + `.bin`).
+        model_dir: PathBuf,
     },
     /// Software-only fallback: Lanczos3 resize + unsharp-mask sharpening.
     Compat,
@@ -128,7 +152,7 @@ impl Waifu2xNetwork {
     pub fn from_config(config: &Waifu2xConfig) -> Result<Self> {
         let noise_level = NoiseLevel::from_u8(config.noise_level);
         let scale = Waifu2xScale::from_u8(config.scale);
-        let backend = Self::try_load_cnn(config.noise_level, config.scale, config.style);
+        let backend = Self::try_load_backend(config.noise_level, config.scale, config.style);
         Ok(Self { noise_level, scale, style: config.style, backend })
     }
 
@@ -169,38 +193,89 @@ impl Waifu2xNetwork {
         matches!(self.backend, Waifu2xBackend::Cnn { .. })
     }
 
+    /// Whether this instance is using the NCNN-Vulkan backend.
+    pub fn is_ncnn(&self) -> bool {
+        matches!(self.backend, Waifu2xBackend::Ncnn { .. })
+    }
+
     /// Upscale (and optionally denoise) a [`image::DynamicImage`].
     ///
-    /// Uses CNN inference when weights are available, otherwise falls back to
-    /// the compat software path (Lanczos3 + unsharp mask).
+    /// For scale factors 3× and 4×, the image is iteratively upscaled using 2×
+    /// passes:
+    /// - 3× = one 2× pass → Lanczos3 resize to the exact 3× target
+    /// - 4× = two consecutive 2× passes
+    ///
+    /// Uses CNN, NCNN, or compat backend depending on what is available.
     pub fn upscale_image(
         &self,
         img: &image::DynamicImage,
+    ) -> Result<image::DynamicImage> {
+        let scale = self.scale.as_u8();
+
+        match scale {
+            0 | 1 => self.upscale_single_pass(img, Waifu2xScale::One),
+            2 => self.upscale_single_pass(img, Waifu2xScale::Two),
+            3 => {
+                // 2× pass then Lanczos3 down to exact 3× dimensions.
+                let pass1 = self.upscale_single_pass(img, Waifu2xScale::Two)?;
+                let (w, h) = (img.width(), img.height());
+                let target_w = w * 3;
+                let target_h = h * 3;
+                Ok(pass1.resize_exact(target_w, target_h, image::FilterType::Lanczos3))
+            }
+            _ => {
+                // 4× = two 2× passes.
+                let pass1 = self.upscale_single_pass(img, Waifu2xScale::Two)?;
+                self.upscale_single_pass(&pass1, Waifu2xScale::Two)
+            }
+        }
+    }
+
+    /// Run a single upscale pass at the given scale using the active backend.
+    fn upscale_single_pass(
+        &self,
+        img: &image::DynamicImage,
+        pass_scale: Waifu2xScale,
     ) -> Result<image::DynamicImage> {
         match &self.backend {
             Waifu2xBackend::Cnn { graph, parameters } => {
                 self.upscale_cnn(img, graph, parameters)
             }
+            Waifu2xBackend::Ncnn { binary_path, model_dir } => {
+                self.upscale_ncnn(img, pass_scale, binary_path, model_dir)
+            }
             Waifu2xBackend::Compat => {
-                self.upscale_compat(img)
+                self.upscale_compat_pass(img, pass_scale)
             }
         }
     }
 
     /// Human-readable description of the active configuration.
     pub fn description(&self) -> String {
-        let backend_desc = if self.is_cnn() { "VGG7 CNN" } else { "compat" };
+        let (backend_desc, detail) = match &self.backend {
+            Waifu2xBackend::Cnn { .. } => ("VGG7 CNN", "neural network inference"),
+            Waifu2xBackend::Ncnn { .. } => ("NCNN-Vulkan", "GPU-accelerated inference"),
+            Waifu2xBackend::Compat => ("compat", "Lanczos3 + unsharp mask"),
+        };
         format!(
             "waifu2x-{} noise={} scale={}x style={} ({})",
-            backend_desc, self.noise_level, self.scale, self.style,
-            if self.is_cnn() { "neural network inference" } else { "Lanczos3 + unsharp mask" }
+            backend_desc, self.noise_level, self.scale, self.style, detail
         )
     }
 
-    // ── CNN inference path ──────────────────────────────────────────────
+    // ── Backend selection ──────────────────────────────────────────────
 
-    /// Attempt to load waifu2x VGG7 weights from the standard search paths.
-    fn try_load_cnn(noise_level: u8, scale: u8, style: Waifu2xStyle) -> Waifu2xBackend {
+    /// Attempt to find the best available backend, in preference order:
+    /// 1. NCNN-Vulkan (external binary + native model files)
+    /// 2. VGG7 CNN (.rsr weights via alumina)
+    /// 3. Compat (software fallback)
+    fn try_load_backend(noise_level: u8, scale: u8, style: Waifu2xStyle) -> Waifu2xBackend {
+        // Try NCNN-Vulkan first.
+        if let Some(backend) = Self::try_load_ncnn(noise_level, scale, style) {
+            return backend;
+        }
+
+        // Try alumina VGG7 CNN weights.
         let weight_path = find_weight_file(noise_level, scale, style);
         match weight_path {
             Some(path) => {
@@ -227,6 +302,109 @@ impl Waifu2xNetwork {
                 Waifu2xBackend::Compat
             }
         }
+    }
+
+    // ── NCNN-Vulkan backend ──────────────────────────────────────────
+
+    /// Search for the `waifu2x-ncnn-vulkan` binary and matching model files.
+    ///
+    /// Binary search order:
+    /// 1. `$WAIFU2X_NCNN_PATH` (exact binary path)
+    /// 2. `waifu2x-ncnn-vulkan` on `$PATH`
+    ///
+    /// Model directory search order:
+    /// 1. `$SRGAN_MODEL_PATH/waifu2x-ncnn/`
+    /// 2. `./models/waifu2x-ncnn/`
+    fn try_load_ncnn(noise_level: u8, scale: u8, _style: Waifu2xStyle) -> Option<Waifu2xBackend> {
+        let binary_path = Self::find_ncnn_binary()?;
+
+        // Find model directory containing .param/.bin files for this config.
+        let model_dir = find_ncnn_model_dir(noise_level, scale)?;
+
+        info!(
+            "Using NCNN-Vulkan backend: binary={}, models={}",
+            binary_path.display(),
+            model_dir.display()
+        );
+
+        Some(Waifu2xBackend::Ncnn { binary_path, model_dir })
+    }
+
+    /// Locate the `waifu2x-ncnn-vulkan` binary.
+    fn find_ncnn_binary() -> Option<PathBuf> {
+        // Check explicit environment variable first.
+        if let Ok(p) = std::env::var("WAIFU2X_NCNN_PATH") {
+            let path = PathBuf::from(&p);
+            if path.is_file() {
+                return Some(path);
+            }
+        }
+
+        // Check if it's on PATH via `which`.
+        if let Ok(output) = std::process::Command::new("which")
+            .arg("waifu2x-ncnn-vulkan")
+            .output()
+        {
+            if output.status.success() {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !s.is_empty() {
+                    return Some(PathBuf::from(s));
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Run inference through the external NCNN-Vulkan binary.
+    ///
+    /// Writes the input to a temp file, invokes the binary, and reads the
+    /// output.  This avoids linking against NCNN at compile time while still
+    /// getting Vulkan-accelerated inference.
+    fn upscale_ncnn(
+        &self,
+        img: &image::DynamicImage,
+        pass_scale: Waifu2xScale,
+        binary_path: &Path,
+        model_dir: &Path,
+    ) -> Result<image::DynamicImage> {
+        let tmp_dir = std::env::temp_dir().join("srgan-waifu2x-ncnn");
+        std::fs::create_dir_all(&tmp_dir).map_err(SrganError::Io)?;
+
+        let input_path = tmp_dir.join("input.png");
+        let output_path = tmp_dir.join("output.png");
+
+        // Write input image.
+        img.save(&input_path)
+            .map_err(|e| SrganError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        let scale_str = pass_scale.as_u8().to_string();
+        let noise_str = self.noise_level.as_u8().to_string();
+
+        let status = std::process::Command::new(binary_path)
+            .arg("-i").arg(&input_path)
+            .arg("-o").arg(&output_path)
+            .arg("-n").arg(&noise_str)
+            .arg("-s").arg(&scale_str)
+            .arg("-m").arg(model_dir)
+            .status()
+            .map_err(|e| SrganError::Io(e))?;
+
+        if !status.success() {
+            return Err(SrganError::GraphExecution(format!(
+                "waifu2x-ncnn-vulkan exited with status {}",
+                status
+            )));
+        }
+
+        let result = image::open(&output_path)
+            .map_err(|e| SrganError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
+
+        // Cleanup temp files (best effort).
+        let _ = std::fs::remove_file(&input_path);
+        let _ = std::fs::remove_file(&output_path);
+
+        Ok(result)
     }
 
     /// Load `.rsr` weight file and build the VGG7 graph.
@@ -280,13 +458,14 @@ impl Waifu2xNetwork {
 
     // ── Compat (software fallback) path ─────────────────────────────────
 
-    /// Software fallback: Lanczos3 resize + unsharp mask.
-    fn upscale_compat(
+    /// Software fallback for a single pass: Lanczos3 resize + unsharp mask.
+    fn upscale_compat_pass(
         &self,
         img: &image::DynamicImage,
+        pass_scale: Waifu2xScale,
     ) -> Result<image::DynamicImage> {
         let (w, h) = (img.width(), img.height());
-        let scale_u8 = self.scale.as_u8();
+        let scale_u8 = pass_scale.as_u8();
 
         // Step 1: Lanczos3 resize (scale=1 keeps original dimensions).
         let resized = if scale_u8 >= 2 {
@@ -376,6 +555,35 @@ pub fn find_weight_file(noise_level: u8, scale: u8, style: Waifu2xStyle) -> Opti
     None
 }
 
+// ── NCNN model directory search ──────────────────────────────────────────────
+
+/// Search for NCNN model files (`.param` + `.bin`) for a given noise/scale.
+///
+/// The NCNN model directory should contain files like:
+/// `noise{N}_scale{M}.param` and `noise{N}_scale{M}.bin`.
+///
+/// Search order:
+/// 1. `$SRGAN_MODEL_PATH/waifu2x-ncnn/`
+/// 2. `./models/waifu2x-ncnn/`
+pub fn find_ncnn_model_dir(noise_level: u8, scale: u8) -> Option<PathBuf> {
+    let param_name = format!("noise{}_scale{}.param", noise_level, scale.min(2));
+
+    let candidates = [
+        std::env::var("SRGAN_MODEL_PATH")
+            .ok()
+            .map(|p| PathBuf::from(p).join("waifu2x-ncnn")),
+        Some(PathBuf::from("models").join("waifu2x-ncnn")),
+    ];
+
+    for dir in candidates.iter().flatten() {
+        if dir.join(&param_name).is_file() {
+            return Some(dir.clone());
+        }
+    }
+
+    None
+}
+
 // ── Unsharp mask ─────────────────────────────────────────────────────────────
 
 /// Apply unsharp-mask sharpening: `output = original + amount * (original - blur)`.
@@ -437,18 +645,18 @@ fn unsharp_mask(img: &image::DynamicImage, amount: f32) -> image::DynamicImage {
 /// - `"waifu2x"` → noise=1, scale=2, style=Anime (defaults)
 /// - `"waifu2x-anime"` → noise=1, scale=2, style=Anime
 /// - `"waifu2x-photo"` → noise=2, scale=2, style=Photo
-/// - `"waifu2x-noise{0..3}-scale{1,2}"` → explicit parameters
+/// - `"waifu2x-noise{0..3}-scale{1..4}"` → explicit parameters
 fn parse_label(label: &str) -> Result<Waifu2xConfig> {
     if label == "waifu2x" {
         return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::default() });
     }
 
-    // Style-based convenience labels (scale=1 = denoise only)
+    // Style-based convenience labels default to scale=2 (upscale).
     if label == "waifu2x-anime" {
-        return Ok(Waifu2xConfig { noise_level: 1, scale: 1, style: Waifu2xStyle::Anime });
+        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::Anime });
     }
     if label == "waifu2x-photo" {
-        return Ok(Waifu2xConfig { noise_level: 2, scale: 1, style: Waifu2xStyle::Photo });
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 2, style: Waifu2xStyle::Photo });
     }
 
     if let Some(rest) = label.strip_prefix("waifu2x-") {
@@ -464,7 +672,12 @@ fn parse_label(label: &str) -> Result<Waifu2xConfig> {
                 .strip_prefix("scale")
                 .and_then(|s| s.parse::<u8>().ok())
                 .unwrap_or(2);
-            let scale = if scale == 1 { 1 } else { 2 };
+            let scale = match scale {
+                0 | 1 => 1,
+                2 => 2,
+                3 => 3,
+                _ => 4,
+            };
             return Ok(Waifu2xConfig { noise_level: noise, scale, style: Waifu2xStyle::default() });
         }
     }
@@ -485,12 +698,20 @@ pub const WAIFU2X_LABELS: &[&str] = &[
     "waifu2x-photo",
     "waifu2x-noise0-scale1",
     "waifu2x-noise0-scale2",
+    "waifu2x-noise0-scale3",
+    "waifu2x-noise0-scale4",
     "waifu2x-noise1-scale1",
     "waifu2x-noise1-scale2",
+    "waifu2x-noise1-scale3",
+    "waifu2x-noise1-scale4",
     "waifu2x-noise2-scale1",
     "waifu2x-noise2-scale2",
+    "waifu2x-noise2-scale3",
+    "waifu2x-noise2-scale4",
     "waifu2x-noise3-scale1",
     "waifu2x-noise3-scale2",
+    "waifu2x-noise3-scale3",
+    "waifu2x-noise3-scale4",
 ];
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -553,8 +774,10 @@ mod tests {
     fn scale_roundtrip() {
         assert_eq!(Waifu2xScale::from_u8(1).as_u8(), 1);
         assert_eq!(Waifu2xScale::from_u8(2).as_u8(), 2);
+        assert_eq!(Waifu2xScale::from_u8(3).as_u8(), 3);
+        assert_eq!(Waifu2xScale::from_u8(4).as_u8(), 4);
         assert_eq!(Waifu2xScale::from_u8(0).as_u8(), 1); // 0 → One
-        assert_eq!(Waifu2xScale::from_u8(5).as_u8(), 2); // >2 → Two
+        assert_eq!(Waifu2xScale::from_u8(5).as_u8(), 4); // >4 → Four
     }
 
     // ── Waifu2x-compat inference tests ──────────────────────────────────
@@ -609,14 +832,42 @@ mod tests {
                 .unwrap_or_else(|e| panic!("from_label({}) failed: {}", label, e));
             let result = net.upscale_image(&img)
                 .unwrap_or_else(|e| panic!("upscale_image({}) failed: {}", label, e));
-            if label.contains("scale2") || label == "waifu2x" {
-                assert_eq!(result.width(), 20, "width mismatch for {}", label);
-                assert_eq!(result.height(), 20, "height mismatch for {}", label);
+            let expected_w = if label.contains("scale4") {
+                40
+            } else if label.contains("scale3") {
+                30
+            } else if label.contains("scale2") || label == "waifu2x" || label == "waifu2x-anime" || label == "waifu2x-photo" {
+                20
             } else {
-                assert_eq!(result.width(), 10, "width mismatch for {}", label);
-                assert_eq!(result.height(), 10, "height mismatch for {}", label);
-            }
+                10
+            };
+            assert_eq!(result.width(), expected_w, "width mismatch for {}", label);
+            assert_eq!(result.height(), expected_w, "height mismatch for {}", label);
         }
+    }
+
+    #[test]
+    fn compat_scale3_triples_dimensions() {
+        let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale3").unwrap();
+        let img = test_image(10, 10);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 30);
+        assert_eq!(result.height(), 30);
+    }
+
+    #[test]
+    fn compat_scale4_quadruples_dimensions() {
+        let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale4").unwrap();
+        let img = test_image(10, 10);
+        let result = net.upscale_image(&img).unwrap();
+        assert_eq!(result.width(), 40);
+        assert_eq!(result.height(), 40);
+    }
+
+    #[test]
+    fn is_ncnn_false_without_binary() {
+        let net = Waifu2xNetwork::from_label("waifu2x").unwrap();
+        assert!(!net.is_ncnn());
     }
 
     #[test]

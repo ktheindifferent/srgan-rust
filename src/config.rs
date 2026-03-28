@@ -290,7 +290,7 @@ impl std::fmt::Display for Waifu2xStyle {
 pub struct Waifu2xConfig {
     /// Noise-reduction level (0 = none, 1 = light, 2 = medium, 3 = aggressive).
     pub noise_level: u8,
-    /// Upscaling factor (1 or 2).
+    /// Upscaling factor (1, 2, 3, or 4).
     pub scale: u8,
     /// Content style hint for weight selection.
     pub style: Waifu2xStyle,
@@ -314,9 +314,9 @@ impl Waifu2xConfig {
                 noise_level
             )));
         }
-        if scale != 1 && scale != 2 {
+        if scale == 0 || scale > 4 {
             return Err(SrganError::InvalidParameter(format!(
-                "Waifu2x scale must be 1 or 2, got {}",
+                "Waifu2x scale must be 1–4, got {}",
                 scale
             )));
         }

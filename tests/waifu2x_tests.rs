@@ -35,8 +35,18 @@ fn test_waifu2x_config_invalid_noise_level() {
 #[test]
 fn test_waifu2x_config_invalid_scale() {
     assert!(Waifu2xConfig::new(1, 0).is_err());
-    assert!(Waifu2xConfig::new(1, 3).is_err());
-    assert!(Waifu2xConfig::new(1, 4).is_err());
+    assert!(Waifu2xConfig::new(1, 5).is_err());
+}
+
+#[test]
+fn test_waifu2x_config_scale3_and_scale4_valid() {
+    let cfg3 = Waifu2xConfig::new(1, 3).unwrap();
+    assert_eq!(cfg3.scale, 3);
+    assert_eq!(cfg3.model_label(), "waifu2x-noise1-scale3");
+
+    let cfg4 = Waifu2xConfig::new(2, 4).unwrap();
+    assert_eq!(cfg4.scale, 4);
+    assert_eq!(cfg4.model_label(), "waifu2x-noise2-scale4");
 }
 
 #[test]
@@ -199,14 +209,17 @@ fn test_waifu2x_compat_all_variants_succeed() {
             .unwrap_or_else(|e| panic!("from_label({}) failed: {}", label, e));
         let result = net.upscale_image(&img)
             .unwrap_or_else(|e| panic!("upscale_image({}) failed: {}", label, e));
-        // scale-2 variants should double, scale-1 should preserve.
-        if label.contains("scale2") || label == "waifu2x" {
-            assert_eq!(result.width(), 20, "width mismatch for {}", label);
-            assert_eq!(result.height(), 20, "height mismatch for {}", label);
+        let expected = if label.contains("scale4") {
+            40
+        } else if label.contains("scale3") {
+            30
+        } else if label.contains("scale2") || label == "waifu2x" || label == "waifu2x-anime" || label == "waifu2x-photo" {
+            20
         } else {
-            assert_eq!(result.width(), 10, "width mismatch for {}", label);
-            assert_eq!(result.height(), 10, "height mismatch for {}", label);
-        }
+            10
+        };
+        assert_eq!(result.width(), expected, "width mismatch for {}", label);
+        assert_eq!(result.height(), expected, "height mismatch for {}", label);
     }
 }
 
@@ -224,6 +237,40 @@ fn test_waifu2x_compat_description_mentions_compat() {
 fn test_waifu2x_compat_invalid_label_errors() {
     assert!(Waifu2xNetwork::from_label("esrgan").is_err());
     assert!(Waifu2xNetwork::from_label("waifu2x-bad").is_err());
+}
+
+#[test]
+fn test_waifu2x_compat_scale3_triples_dimensions() {
+    let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale3").unwrap();
+    let img = test_image(10, 10);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 30);
+    assert_eq!(result.height(), 30);
+}
+
+#[test]
+fn test_waifu2x_compat_scale4_quadruples_dimensions() {
+    let net = Waifu2xNetwork::from_label("waifu2x-noise2-scale4").unwrap();
+    let img = test_image(10, 10);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 40);
+    assert_eq!(result.height(), 40);
+}
+
+#[test]
+fn test_waifu2x_ncnn_not_available_falls_back() {
+    // Without waifu2x-ncnn-vulkan binary, should fall back to compat.
+    let net = Waifu2xNetwork::from_label("waifu2x-noise1-scale2").unwrap();
+    assert!(!net.is_ncnn(), "NCNN should not be available in test env");
+}
+
+#[test]
+fn test_waifu2x_scale4_noise3_high_denoise_upscale() {
+    let net = Waifu2xNetwork::from_label("waifu2x-noise3-scale4").unwrap();
+    let img = test_image(8, 8);
+    let result = net.upscale_image(&img).unwrap();
+    assert_eq!(result.width(), 32);
+    assert_eq!(result.height(), 32);
 }
 
 // ── CNN / compat mode detection ─────────────────────────────────────────────

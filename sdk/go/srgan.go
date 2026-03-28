@@ -53,12 +53,24 @@ func (e *APIError) Error() string {
 // UpscaleOptions configures an upscale request.
 // All fields are optional; zero values are omitted from the JSON payload.
 type UpscaleOptions struct {
-	// Model selects the upscaling model: "natural", "anime", "bilinear", etc.
+	// Model selects the upscaling model: "natural", "anime", "bilinear",
+	// "waifu2x", "waifu2x-anime", "waifu2x-photo",
+	// "waifu2x-noise{0-3}-scale{1-4}", "real-esrgan", etc.
 	Model string `json:"model,omitempty"`
 	// OutputFormat is the desired output encoding: "png", "jpeg", or "webp".
 	OutputFormat string `json:"output_format,omitempty"`
 	// Quality sets the JPEG/WebP quality (1-100, ignored for PNG).
 	Quality int `json:"quality,omitempty"`
+	// Waifu2xNoiseLevel sets the noise reduction level (0-3).
+	// Only used when Model is a waifu2x variant.
+	Waifu2xNoiseLevel *int `json:"waifu2x_noise_level,omitempty"`
+	// Waifu2xScale sets the upscaling factor: 1 (denoise-only), 2, 3, or 4.
+	// Scales 3× and 4× use iterative 2× passes.
+	// Only used when Model is a waifu2x variant.
+	Waifu2xScale *int `json:"waifu2x_scale,omitempty"`
+	// Waifu2xStyle selects the content style: "anime", "photo", or "artwork".
+	// Only used when Model is a waifu2x variant.
+	Waifu2xStyle string `json:"waifu2x_style,omitempty"`
 }
 
 // Job describes the state of an upscaling job.

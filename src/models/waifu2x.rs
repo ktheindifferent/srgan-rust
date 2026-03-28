@@ -50,12 +50,12 @@ pub struct Waifu2xVariant {
 
 impl Waifu2xVariant {
     /// Build a variant, validating that `noise_level` is 0–3 and `scale` is
-    /// 1 or 2.
+    /// 1–4.
     ///
     /// Returns `None` for out-of-range values.
     pub fn new(noise_level: u8, scale: u8) -> Option<Self> {
         if noise_level > 3 { return None; }
-        if scale != 1 && scale != 2 { return None; }
+        if scale == 0 || scale > 4 { return None; }
         Some(Self { noise_level, scale })
     }
 
@@ -92,10 +92,12 @@ impl Waifu2xVariant {
         };
         let scale_desc = match self.scale {
             1 => "denoise-only (×1)",
-            _ => "upscale ×2",
+            2 => "upscale ×2",
+            3 => "upscale ×3",
+            _ => "upscale ×4",
         };
         format!(
-            "waifu2x-compat — {} + {} (Lanczos3 + unsharp mask)",
+            "waifu2x — {} + {}",
             noise_desc, scale_desc
         )
     }
@@ -118,7 +120,7 @@ impl Waifu2xVariant {
         if parts.len() != 2 { return None; }
         let noise = parts[0].strip_prefix("noise")?.parse::<u8>().ok()?.min(3);
         let scale = parts[1].strip_prefix("scale")?.parse::<u8>().ok()?;
-        let scale = if scale == 1 { 1 } else { 2 };
+        if scale == 0 || scale > 4 { return None; }
         Some(Self { noise_level: noise, scale })
     }
 }
@@ -143,8 +145,19 @@ mod tests {
     #[test]
     fn new_out_of_range() {
         assert!(Waifu2xVariant::new(4, 2).is_none()); // noise > 3
-        assert!(Waifu2xVariant::new(1, 3).is_none()); // scale must be 1 or 2
+        assert!(Waifu2xVariant::new(1, 5).is_none()); // scale must be 1–4
         assert!(Waifu2xVariant::new(0, 0).is_none()); // scale 0 invalid
+    }
+
+    #[test]
+    fn new_scale3_and_scale4() {
+        let v3 = Waifu2xVariant::new(1, 3).unwrap();
+        assert_eq!(v3.label(), "waifu2x-noise1-scale3");
+        assert_eq!(v3.scale_factor(), 3);
+
+        let v4 = Waifu2xVariant::new(2, 4).unwrap();
+        assert_eq!(v4.label(), "waifu2x-noise2-scale4");
+        assert_eq!(v4.scale_factor(), 4);
     }
 
     #[test]
@@ -188,5 +201,7 @@ mod tests {
     fn scale_factor() {
         assert_eq!(Waifu2xVariant::new(0, 1).unwrap().scale_factor(), 1);
         assert_eq!(Waifu2xVariant::new(0, 2).unwrap().scale_factor(), 2);
+        assert_eq!(Waifu2xVariant::new(0, 3).unwrap().scale_factor(), 3);
+        assert_eq!(Waifu2xVariant::new(0, 4).unwrap().scale_factor(), 4);
     }
 }
