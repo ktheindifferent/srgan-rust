@@ -417,6 +417,7 @@ impl UpscalingNetwork {
 						noise_level: wnet.noise_level().as_u8(),
 						scale: wnet.scale().as_u8(),
 						style: wnet.style(),
+						mode: crate::config::Waifu2xMode::default(),
 					};
 					let weight_path = waifu2x::find_weight_file(
 						config.noise_level, config.scale, config.style,

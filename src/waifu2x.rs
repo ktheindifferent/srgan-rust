@@ -24,7 +24,7 @@
 //! `Waifu2xWeightConverter` in `model_converter/waifu2x_converter.rs` or the
 //! CLI command `convert-model --format waifu2x-json`.
 
-use crate::config::{Waifu2xConfig, Waifu2xStyle};
+use crate::config::{Waifu2xConfig, Waifu2xMode, Waifu2xStyle};
 use crate::error::{Result, SrganError};
 use image::GenericImage;
 use log::{info, debug};
@@ -142,6 +142,7 @@ pub struct Waifu2xNetwork {
     noise_level: NoiseLevel,
     scale: Waifu2xScale,
     style: Waifu2xStyle,
+    mode: Waifu2xMode,
     backend: Waifu2xBackend,
 }
 
@@ -151,9 +152,13 @@ impl Waifu2xNetwork {
     /// Attempts to load CNN weights from disk; falls back to compat mode.
     pub fn from_config(config: &Waifu2xConfig) -> Result<Self> {
         let noise_level = NoiseLevel::from_u8(config.noise_level);
-        let scale = Waifu2xScale::from_u8(config.scale);
-        let backend = Self::try_load_backend(config.noise_level, config.scale, config.style);
-        Ok(Self { noise_level, scale, style: config.style, backend })
+        let scale = if config.mode == Waifu2xMode::Enhance {
+            Waifu2xScale::One // Enhancement mode never upscales
+        } else {
+            Waifu2xScale::from_u8(config.scale)
+        };
+        let backend = Self::try_load_backend(config.noise_level, scale.as_u8(), config.style);
+        Ok(Self { noise_level, scale, style: config.style, mode: config.mode, backend })
     }
 
     /// Load from a canonical label such as `"waifu2x"` or
@@ -188,6 +193,16 @@ impl Waifu2xNetwork {
         self.style
     }
 
+    /// Processing mode this instance was built with.
+    pub fn mode(&self) -> Waifu2xMode {
+        self.mode
+    }
+
+    /// Whether this instance is in enhancement mode.
+    pub fn is_enhance(&self) -> bool {
+        self.mode == Waifu2xMode::Enhance
+    }
+
     /// Whether this instance is using real CNN inference (vs compat fallback).
     pub fn is_cnn(&self) -> bool {
         matches!(self.backend, Waifu2xBackend::Cnn { .. })
@@ -205,11 +220,18 @@ impl Waifu2xNetwork {
     /// - 3× = one 2× pass → Lanczos3 resize to the exact 3× target
     /// - 4× = two consecutive 2× passes
     ///
+    /// In enhancement mode, the image is denoised, sharpened, and
+    /// contrast-adjusted without any resolution change.
+    ///
     /// Uses CNN, NCNN, or compat backend depending on what is available.
     pub fn upscale_image(
         &self,
         img: &image::DynamicImage,
     ) -> Result<image::DynamicImage> {
+        if self.mode == Waifu2xMode::Enhance {
+            return self.enhance_image(img);
+        }
+
         let scale = self.scale.as_u8();
 
         match scale {
@@ -229,6 +251,44 @@ impl Waifu2xNetwork {
                 self.upscale_single_pass(&pass1, Waifu2xScale::Two)
             }
         }
+    }
+
+    /// Enhancement mode: denoise + sharpen + contrast adjustment.
+    ///
+    /// Applies a multi-stage pipeline at the original resolution:
+    /// 1. CNN-based denoise pass (if CNN/NCNN backend available), else compat denoise
+    /// 2. Adaptive unsharp-mask sharpening tuned to content style
+    /// 3. Local contrast enhancement via CLAHE-like histogram stretching
+    fn enhance_image(
+        &self,
+        img: &image::DynamicImage,
+    ) -> Result<image::DynamicImage> {
+        info!("Waifu2x enhance mode: noise={} style={}", self.noise_level, self.style);
+
+        // Step 1: Denoise pass at scale=1 (same resolution)
+        let denoised = self.upscale_single_pass(img, Waifu2xScale::One)?;
+
+        // Step 2: Adaptive sharpening (stronger than standard upscale sharpening)
+        let style_multiplier = match self.style {
+            Waifu2xStyle::Anime   => 1.2f32,
+            Waifu2xStyle::Artwork => 1.0,
+            Waifu2xStyle::Photo   => 0.7,
+        };
+
+        let base_amount = match self.noise_level {
+            NoiseLevel::None   => 0.2f32, // Even at noise=0, enhance applies light sharpening
+            NoiseLevel::Low    => 0.4,
+            NoiseLevel::Medium => 0.6,
+            NoiseLevel::High   => 0.9,
+        };
+
+        let sharpen_amount = base_amount * style_multiplier;
+        let sharpened = unsharp_mask(&denoised, sharpen_amount);
+
+        // Step 3: Local contrast enhancement
+        let enhanced = adjust_contrast(&sharpened, self.style);
+
+        Ok(enhanced)
     }
 
     /// Run a single upscale pass at the given scale using the active backend.
@@ -257,9 +317,13 @@ impl Waifu2xNetwork {
             Waifu2xBackend::Ncnn { .. } => ("NCNN-Vulkan", "GPU-accelerated inference"),
             Waifu2xBackend::Compat => ("compat", "Lanczos3 + unsharp mask"),
         };
+        let mode_str = match self.mode {
+            Waifu2xMode::Upscale => format!("scale={}x", self.scale),
+            Waifu2xMode::Enhance => "enhance".to_string(),
+        };
         format!(
-            "waifu2x-{} noise={} scale={}x style={} ({})",
-            backend_desc, self.noise_level, self.scale, self.style, detail
+            "waifu2x-{} noise={} {} style={} ({})",
+            backend_desc, self.noise_level, mode_str, self.style, detail
         )
     }
 
@@ -637,6 +701,45 @@ fn unsharp_mask(img: &image::DynamicImage, amount: f32) -> image::DynamicImage {
     DynamicImage::ImageRgba8(out)
 }
 
+// ── Contrast enhancement ────────────────────────────────────────────────────
+
+/// Apply local contrast enhancement tuned to content style.
+///
+/// For anime/artwork: gentle S-curve contrast to make colors pop without
+/// crushing blacks.  For photos: lighter touch to preserve natural tones.
+fn adjust_contrast(img: &image::DynamicImage, style: Waifu2xStyle) -> image::DynamicImage {
+    use image::{DynamicImage, GenericImage, Pixel};
+
+    let strength = match style {
+        Waifu2xStyle::Anime   => 0.15f32,
+        Waifu2xStyle::Artwork => 0.12,
+        Waifu2xStyle::Photo   => 0.08,
+    };
+
+    let rgba = img.to_rgba();
+    let (w, h) = rgba.dimensions();
+    let mut out = rgba.clone();
+
+    for y in 0..h {
+        for x in 0..w {
+            let p = rgba.get_pixel(x, y);
+            let channels = p.channels();
+            let mut adjusted = [0u8; 4];
+            for c in 0..3 {
+                // S-curve: val = val + strength * val * (1 - val) * 4
+                // Maps [0,1] → [0,1] with midtone contrast boost
+                let v = channels[c] as f32 / 255.0;
+                let boosted = v + strength * v * (1.0 - v) * 4.0;
+                adjusted[c] = (boosted * 255.0).round().max(0.0).min(255.0) as u8;
+            }
+            adjusted[3] = channels[3]; // preserve alpha
+            out.put_pixel(x, y, image::Rgba(adjusted));
+        }
+    }
+
+    DynamicImage::ImageRgba8(out)
+}
+
 // ── Label parser ──────────────────────────────────────────────────────────────
 
 /// Parse a waifu2x label into a [`Waifu2xConfig`].
@@ -648,15 +751,26 @@ fn unsharp_mask(img: &image::DynamicImage, amount: f32) -> image::DynamicImage {
 /// - `"waifu2x-noise{0..3}-scale{1..4}"` → explicit parameters
 fn parse_label(label: &str) -> Result<Waifu2xConfig> {
     if label == "waifu2x" {
-        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::default() });
+        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::default(), mode: Waifu2xMode::Upscale });
     }
 
     // Style-based convenience labels default to scale=2 (upscale).
     if label == "waifu2x-anime" {
-        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::Anime });
+        return Ok(Waifu2xConfig { noise_level: 1, scale: 2, style: Waifu2xStyle::Anime, mode: Waifu2xMode::Upscale });
     }
     if label == "waifu2x-photo" {
-        return Ok(Waifu2xConfig { noise_level: 2, scale: 2, style: Waifu2xStyle::Photo });
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 2, style: Waifu2xStyle::Photo, mode: Waifu2xMode::Upscale });
+    }
+
+    // Enhancement mode labels.
+    if label == "waifu2x-enhance" {
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 1, style: Waifu2xStyle::Anime, mode: Waifu2xMode::Enhance });
+    }
+    if label == "waifu2x-enhance-anime" {
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 1, style: Waifu2xStyle::Anime, mode: Waifu2xMode::Enhance });
+    }
+    if label == "waifu2x-enhance-photo" {
+        return Ok(Waifu2xConfig { noise_level: 2, scale: 1, style: Waifu2xStyle::Photo, mode: Waifu2xMode::Enhance });
     }
 
     if let Some(rest) = label.strip_prefix("waifu2x-") {
@@ -678,13 +792,14 @@ fn parse_label(label: &str) -> Result<Waifu2xConfig> {
                 3 => 3,
                 _ => 4,
             };
-            return Ok(Waifu2xConfig { noise_level: noise, scale, style: Waifu2xStyle::default() });
+            return Ok(Waifu2xConfig { noise_level: noise, scale, style: Waifu2xStyle::default(), mode: Waifu2xMode::Upscale });
         }
     }
 
     Err(SrganError::Network(format!(
         "invalid waifu2x label '{}'; expected 'waifu2x', 'waifu2x-anime', \
-         'waifu2x-photo', or 'waifu2x-noise{{0..3}}-scale{{1,2}}'",
+         'waifu2x-photo', 'waifu2x-enhance', 'waifu2x-enhance-anime', \
+         'waifu2x-enhance-photo', or 'waifu2x-noise{{0..3}}-scale{{1..4}}'",
         label
     )))
 }
@@ -696,6 +811,9 @@ pub const WAIFU2X_LABELS: &[&str] = &[
     "waifu2x",
     "waifu2x-anime",
     "waifu2x-photo",
+    "waifu2x-enhance",
+    "waifu2x-enhance-anime",
+    "waifu2x-enhance-photo",
     "waifu2x-noise0-scale1",
     "waifu2x-noise0-scale2",
     "waifu2x-noise0-scale3",

@@ -280,6 +280,31 @@ impl std::fmt::Display for Waifu2xStyle {
     }
 }
 
+/// Waifu2x processing mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Waifu2xMode {
+    /// Standard upscaling (with optional noise reduction).
+    Upscale,
+    /// Enhancement-only: denoise + sharpen + contrast adjustment, no upscaling.
+    /// Output has the same dimensions as the input.
+    Enhance,
+}
+
+impl Default for Waifu2xMode {
+    fn default() -> Self {
+        Waifu2xMode::Upscale
+    }
+}
+
+impl std::fmt::Display for Waifu2xMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Waifu2xMode::Upscale => f.write_str("upscale"),
+            Waifu2xMode::Enhance => f.write_str("enhance"),
+        }
+    }
+}
+
 /// Waifu2x-specific configuration options.
 ///
 /// Waifu2x supports noise reduction (levels 0–3), two scale factors, and
@@ -294,6 +319,8 @@ pub struct Waifu2xConfig {
     pub scale: u8,
     /// Content style hint for weight selection.
     pub style: Waifu2xStyle,
+    /// Processing mode: upscale or enhance.
+    pub mode: Waifu2xMode,
 }
 
 impl Default for Waifu2xConfig {
@@ -302,6 +329,7 @@ impl Default for Waifu2xConfig {
             noise_level: 1,
             scale: 2,
             style: Waifu2xStyle::default(),
+            mode: Waifu2xMode::default(),
         }
     }
 }
@@ -320,7 +348,7 @@ impl Waifu2xConfig {
                 scale
             )));
         }
-        Ok(Self { noise_level, scale, style: Waifu2xStyle::default() })
+        Ok(Self { noise_level, scale, style: Waifu2xStyle::default(), mode: Waifu2xMode::default() })
     }
 
     /// Build with an explicit style.
@@ -330,11 +358,29 @@ impl Waifu2xConfig {
         Ok(cfg)
     }
 
+    /// Build an enhancement-mode config (no upscaling).
+    pub fn enhance(noise_level: u8, style: Waifu2xStyle) -> Result<Self> {
+        let mut cfg = Self::new(noise_level, 1)?;
+        cfg.style = style;
+        cfg.mode = Waifu2xMode::Enhance;
+        Ok(cfg)
+    }
+
     /// Return the model-label string understood by `from_label`.
     ///
-    /// Examples: `"waifu2x-noise1-scale2"`, `"waifu2x-noise0-scale1"`.
+    /// Examples: `"waifu2x-noise1-scale2"`, `"waifu2x-noise0-scale1"`,
+    ///           `"waifu2x-enhance"`, `"waifu2x-enhance-anime"`.
     pub fn model_label(&self) -> String {
-        format!("waifu2x-noise{}-scale{}", self.noise_level, self.scale)
+        match self.mode {
+            Waifu2xMode::Upscale => format!("waifu2x-noise{}-scale{}", self.noise_level, self.scale),
+            Waifu2xMode::Enhance => {
+                if self.style == Waifu2xStyle::Anime {
+                    "waifu2x-enhance".to_string()
+                } else {
+                    format!("waifu2x-enhance-{}", self.style)
+                }
+            }
+        }
     }
 }
 
