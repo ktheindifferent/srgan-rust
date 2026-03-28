@@ -100,6 +100,7 @@ fn test_remote_models_include_waifu2x() {
     assert!(waifu2x_names.contains(&"waifu2x-noise2-scale2"));
     assert!(waifu2x_names.contains(&"waifu2x-noise0-scale1"));
     assert!(waifu2x_names.contains(&"waifu2x-noise3-scale2"));
+    assert!(waifu2x_names.contains(&"waifu2x-upconv-7-anime-style-art-rgb"));
 }
 
 #[test]
@@ -237,6 +238,23 @@ fn test_waifu2x_compat_description_mentions_compat() {
 fn test_waifu2x_compat_invalid_label_errors() {
     assert!(Waifu2xNetwork::from_label("esrgan").is_err());
     assert!(Waifu2xNetwork::from_label("waifu2x-bad").is_err());
+}
+
+#[test]
+fn test_model_registry_includes_waifu2x_upconv7() {
+    use srgan_rust::model_registry::ModelRegistry;
+    use tempfile::TempDir;
+    
+    let dir = TempDir::new().unwrap();
+    let registry = ModelRegistry::load_from(dir.path()).unwrap();
+    
+    let entry = registry.get("waifu2x-upconv-7-anime-style-art-rgb");
+    assert!(entry.is_some(), "waifu2x-upconv-7-anime-style-art-rgb should be in registry");
+    
+    let entry = entry.unwrap();
+    assert_eq!(entry.display_name, "Waifu2x Upconv-7 Anime Art");
+    assert!(entry.builtin);
+    assert!(entry.scale_factors.contains(&2));
 }
 
 #[test]

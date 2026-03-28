@@ -186,6 +186,15 @@ fn builtin_entries() -> Vec<RegistryEntry> {
             weight_path: String::new(),
             builtin: true,
         },
+        RegistryEntry {
+            name: "waifu2x-upconv-7-anime-style-art-rgb".to_string(),
+            display_name: "Waifu2x Upconv-7 Anime Art".to_string(),
+            model_type: ModelType::Waifu2x,
+            scale_factors: vec![1, 2],
+            description: "Waifu2x upconv-7 model optimised for anime artwork, art, and RGB content — noise reduction + 2× upscale (built-in software fallback)".to_string(),
+            weight_path: String::new(),
+            builtin: true,
+        },
     ]
 }
 

@@ -189,6 +189,14 @@ pub const REMOTE_MODELS: &[RemoteModel] = &[
         url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/waifu2x_noise3_scale2.rsr",
         sha256: "0000000000000000000000000000000000000000000000000000000000000000",
     },
+    RemoteModel {
+        name: "waifu2x-upconv-7-anime-style-art-rgb",
+        description: "Waifu2x upconv-7 model optimised for anime artwork, art, and RGB content — CNN-based noise reduction + 2× upscale.",
+        filename: "waifu2x_upconv_7_anime_style_art_rgb.rsr",
+        scale_factor: 2,
+        url: "https://github.com/ktheindifferent/srgan-rust/releases/download/v0.2.0/waifu2x_upconv_7_anime_style_art_rgb.rsr",
+        sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+    },
 ];
 
 // ── ONNX model entries (Real-ESRGAN weights) ─────────────────────────────────

@@ -86,6 +86,9 @@ RUSTFLAGS="-C target-cpu=native" cargo build --release
 # Waifu2x with explicit noise reduction level 2, 2× scale
 ./srgan-rust -p waifu2x-noise2-scale2 sketch.png sketch_2x.png
 
+# Waifu2x upconv-7 for anime artwork (CNN-based, optimised for art)
+./srgan-rust -p waifu2x-upconv-7-anime-style-art-rgb artwork.png artwork_2x.png
+
 # Real-ESRGAN for a heavily compressed photo
 ./srgan-rust -p real-esrgan compressed.jpg restored_4x.png
 
@@ -161,6 +164,7 @@ curl http://localhost:8080/api/v1/job/$JOB_ID \
 | `waifu2x` | Anime + photos with noise | 1× or 2× | — | Noise levels 0–3, style: anime/photo/artwork; best for scans/screenshots. Falls back to built-in anime model; native weights optional. |
 | `waifu2x-anime` | Anime, cartoons, manga | 2× | — | Preset: noise=1, anime-tuned sharpening. Uses anime model proxy when no native weights. |
 | `waifu2x-photo` | Photos with noise/JPEG artifacts | 2× | — | Preset: noise=2, photo-tuned denoise. Uses natural model proxy when no native weights. |
+| `waifu2x-upconv-7-anime-style-art-rgb` | Anime art, artwork, RGB anime | 2× | — | Upconv-7 architecture optimised for anime artwork and artistic content; VGG7 CNN-based denoising + upscale. |
 | `real-esrgan` | Compressed/noisy photos | 4× | 31.8 dB | Real-world degradation training (JPEG, noise, blur) |
 | `real-esrgan-anime` | Compressed/noisy anime | 4× | 32.1 dB | Anime-specific degradation pipeline; sharpest line art |
 | `real-esrgan-x2` | Photos, low-memory | 2× | 32.4 dB | Half the memory of `real-esrgan`; moderate upscale |
